@@ -20,6 +20,7 @@ cd <repo-folder-name>
 
 ### 3. Start the Expo Development Server
 npm install expo
+
 npx expo start --tunnel
 
 ### 4. Open the Application
