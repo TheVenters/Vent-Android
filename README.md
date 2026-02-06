@@ -18,6 +18,7 @@ git clone <your-repo-url>
 ### 2. Navigate Into the Project Directory
 cd <repo-folder-name>
 
+Put API Key .env file in directory
 ### 3. Start the Expo Development Server
 npm install
 
