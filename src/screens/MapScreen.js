@@ -13,6 +13,7 @@ import * as Location from 'expo-location';
 import { supabase, getCurrentUser } from '../services/supabase';
 import { COLORS, SIZES, DEFAULT_REGION, PIN_TYPES, LAYERS } from '../constants/theme';
 import PinModal from '../components/PinModal';
+import PinDetailModal from '../components/PinDetailModal';
 import CustomMarker from '../components/CustomMarker';
 
 const MapScreen = ({ navigation }) => {
@@ -24,6 +25,8 @@ const MapScreen = ({ navigation }) => {
   const [pendingPinLocation, setPendingPinLocation] = useState(null);
   const [pendingPinType, setPendingPinType] = useState(null);
   const [showPinModal, setShowPinModal] = useState(false);
+  const [showDetailModal, setShowDetailModal] = useState(false);
+  const [selectedPin, setSelectedPin] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [mapType, setMapType] = useState('standard');
   const mapRef = useRef(null);
@@ -85,7 +88,13 @@ const MapScreen = ({ navigation }) => {
         },
         (payload) => {
           if (payload.eventType === 'INSERT') {
-            setPins((prev) => [payload.new, ...prev]);
+            setPins((prev) => {
+              // Prevent duplicates
+              if (prev.some((pin) => pin.id === payload.new.id)) {
+                return prev;
+              }
+              return [payload.new, ...prev];
+            });
           } else if (payload.eventType === 'UPDATE') {
             setPins((prev) =>
               prev.map((pin) => (pin.id === payload.new.id ? payload.new : pin))
@@ -164,6 +173,52 @@ const MapScreen = ({ navigation }) => {
     }
   };
 
+  const handlePinPress = (pin) => {
+    setSelectedPin(pin);
+    setShowDetailModal(true);
+  };
+
+  const handleUpdatePin = async (pinId, updates) => {
+    try {
+      const { error } = await supabase
+        .from('pins')
+        .update(updates)
+        .eq('id', pinId);
+
+      if (error) throw error;
+
+      // Update local state
+      setPins((prev) =>
+        prev.map((pin) => (pin.id === pinId ? { ...pin, ...updates } : pin))
+      );
+      setSelectedPin((prev) => (prev ? { ...prev, ...updates } : null));
+      Alert.alert('Success', 'Pin updated successfully!');
+    } catch (error) {
+      console.error('Error updating pin:', error);
+      Alert.alert('Error', 'Failed to update pin');
+    }
+  };
+
+  const handleDeletePin = async (pinId) => {
+    try {
+      const { error } = await supabase
+        .from('pins')
+        .delete()
+        .eq('id', pinId);
+
+      if (error) throw error;
+
+      // Update local state
+      setPins((prev) => prev.filter((pin) => pin.id !== pinId));
+      setShowDetailModal(false);
+      setSelectedPin(null);
+      Alert.alert('Success', 'Pin deleted successfully!');
+    } catch (error) {
+      console.error('Error deleting pin:', error);
+      Alert.alert('Error', 'Failed to delete pin');
+    }
+  };
+
   return (
     <View style={styles.container}>
       <MapView
@@ -177,7 +232,7 @@ const MapScreen = ({ navigation }) => {
         showsMyLocationButton
       >
         {pins.map((pin) => (
-          <CustomMarker key={pin.id} pin={pin} />
+          <CustomMarker key={pin.id} pin={pin} onPress={handlePinPress} />
         ))}
       </MapView>
 
@@ -244,6 +299,19 @@ const MapScreen = ({ navigation }) => {
           onSubmit={handleCreatePin}
         />
       )}
+
+      {/* Pin Detail Modal */}
+      <PinDetailModal
+        visible={showDetailModal}
+        pin={selectedPin}
+        currentUserId={currentUser?.id}
+        onClose={() => {
+          setShowDetailModal(false);
+          setSelectedPin(null);
+        }}
+        onUpdate={handleUpdatePin}
+        onDelete={handleDeletePin}
+      />
     </View>
   );
 };

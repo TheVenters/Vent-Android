@@ -3,7 +3,7 @@ import { View, Text, StyleSheet } from 'react-native';
 import { Marker, Callout } from 'react-native-maps';
 import { COLORS, SIZES, PIN_TYPES } from '../constants/theme';
 
-const CustomMarker = ({ pin }) => {
+const CustomMarker = ({ pin, onPress }) => {
   const getMarkerColor = () => {
     switch (pin.type) {
       case PIN_TYPES.PHOTO:
@@ -42,11 +42,12 @@ const CustomMarker = ({ pin }) => {
         latitude: pin.lat,
         longitude: pin.lng,
       }}
+      onPress={() => onPress && onPress(pin)}
     >
       <View style={[styles.markerContainer, { backgroundColor: getMarkerColor() }]}>
         <Text style={styles.markerIcon}>{getMarkerIcon()}</Text>
       </View>
-      <Callout>
+      <Callout onPress={() => onPress && onPress(pin)}>
         <View style={styles.callout}>
           <Text style={styles.authorName}>
             {pin.author_name || 'Anonymous'}
@@ -62,6 +63,7 @@ const CustomMarker = ({ pin }) => {
               {pin.media_type === 'video' ? '🎬 Video' : '📷 Photo'}
             </Text>
           )}
+          <Text style={styles.tapHint}>Tap for details</Text>
         </View>
       </Callout>
     </Marker>
@@ -110,6 +112,12 @@ const styles = StyleSheet.create({
     fontSize: SIZES.xs,
     color: COLORS.gray,
     fontStyle: 'italic',
+  },
+  tapHint: {
+    fontSize: SIZES.xs,
+    color: COLORS.primary,
+    marginTop: SIZES.sm,
+    fontWeight: '600',
   },
 });
 
