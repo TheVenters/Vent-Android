@@ -19,9 +19,8 @@ git clone <your-repo-url>
 cd <repo-folder-name>
 
 ### 3. Start the Expo Development Server
-sudo npm install --global @expo/ngrok@^4.1.0  
+npm install
 
-npm install expo
 
 npx expo start --tunnel
 
