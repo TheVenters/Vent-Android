@@ -370,18 +370,26 @@ const FriendsScreen = ({ navigation }) => {
     <View style={styles.friendItem}>
       <View style={styles.friendInfo}>
         <Text style={styles.friendName}>
-          {item.friend.display_name || 'User'}
+          {item.friend?.display_name || 'User'}
         </Text>
-        {item.friend.username && (
+        {item.friend?.username && (
           <Text style={styles.friendUsername}>@{item.friend.username}</Text>
         )}
       </View>
-      <TouchableOpacity
-        style={styles.removeButton}
-        onPress={() => removeFriend(item.id)}
-      >
-        <Text style={styles.removeText}>Remove</Text>
-      </TouchableOpacity>
+      <View style={styles.friendActions}>
+        <TouchableOpacity
+          style={styles.messageButton}
+          onPress={() => navigation.navigate('Chat', { friend: item.friend })}
+        >
+          <Text style={styles.messageIcon}>💬</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.removeButton}
+          onPress={() => removeFriend(item.id)}
+        >
+          <Text style={styles.removeText}>Remove</Text>
+        </TouchableOpacity>
+      </View>
     </View>
   );
 
@@ -669,6 +677,22 @@ const styles = StyleSheet.create({
     color: COLORS.white,
     fontSize: SIZES.sm,
     fontWeight: '600',
+  },
+  friendActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SIZES.sm,
+  },
+  messageButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLORS.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  messageIcon: {
+    fontSize: 18,
   },
   removeButton: {
     paddingHorizontal: SIZES.lg,
