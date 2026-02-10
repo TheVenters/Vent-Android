@@ -25,7 +25,10 @@ npm install
 
 npx expo start --tunnel
 
-### 4. Open the Application
+### 4. Start supabase
+supabase start
+
+### 5. Open the Application
 
 Choose one of the following options:
 
