@@ -13,7 +13,7 @@ You can run the app on a physical phone using Expo Go or on a mobile emulator.
 ## Setup Instructions
 
 ### 1. Clone the Repository
-git clone <your-repo-url>
+git clone https://github.com/TheVenters/VentApp_Mobile.git
 
 ### 2. Navigate Into the Project Directory
 cd <repo-folder-name>
