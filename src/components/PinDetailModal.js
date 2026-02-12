@@ -14,10 +14,21 @@ import {
 } from 'react-native';
 import { COLORS, SIZES } from '../constants/theme';
 
-const PinDetailModal = ({ visible, pin, currentUserId, onClose, onUpdate, onDelete }) => {
+const PinDetailModal = ({
+  visible,
+  pin,
+  currentUserId,
+  pinVoteSummary,
+  isSubmittingVote,
+  onVote,
+  onClose,
+  onUpdate,
+  onDelete,
+}) => {
   const [isEditing, setIsEditing] = useState(false);
   const [content, setContent] = useState('');
   const [caption, setCaption] = useState('');
+  const [mediaAspectRatio, setMediaAspectRatio] = useState(4 / 3);
 
   const isOwner = pin?.user_id === currentUserId;
   const isMediaPin = pin?.type === 'media' || pin?.type === 'photo' || pin?.type === 'video';
@@ -29,6 +40,25 @@ const PinDetailModal = ({ visible, pin, currentUserId, onClose, onUpdate, onDele
       setIsEditing(false);
     }
   }, [pin]);
+
+  useEffect(() => {
+    if (!pin?.media_url || pin?.media_type === 'video') {
+      setMediaAspectRatio(4 / 3);
+      return;
+    }
+
+    Image.getSize(
+      pin.media_url,
+      (width, height) => {
+        if (width > 0 && height > 0) {
+          setMediaAspectRatio(width / height);
+        } else {
+          setMediaAspectRatio(4 / 3);
+        }
+      },
+      () => setMediaAspectRatio(4 / 3)
+    );
+  }, [pin?.media_url, pin?.media_type]);
 
   const handleSave = () => {
     if (isMediaPin) {
@@ -119,8 +149,8 @@ const PinDetailModal = ({ visible, pin, currentUserId, onClose, onUpdate, onDele
                 ) : (
                   <Image
                     source={{ uri: pin.media_url }}
-                    style={styles.mediaImage}
-                    resizeMode="cover"
+                    style={[styles.mediaImage, { aspectRatio: mediaAspectRatio }]}
+                    resizeMode="contain"
                   />
                 )}
               </View>
@@ -144,8 +174,11 @@ const PinDetailModal = ({ visible, pin, currentUserId, onClose, onUpdate, onDele
               </View>
             ) : (
               <View style={styles.contentContainer}>
+                <Text style={styles.postTitleText}>
+                  {pin.caption || 'Untitled'}
+                </Text>
                 <Text style={styles.contentText}>
-                  {isMediaPin ? (pin.caption || 'No caption') : (pin.content || 'No content')}
+                  {pin.content || 'No caption'}
                 </Text>
               </View>
             )}
@@ -159,6 +192,57 @@ const PinDetailModal = ({ visible, pin, currentUserId, onClose, onUpdate, onDele
                 📍 {pin.layer.charAt(0).toUpperCase() + pin.layer.slice(1)}
               </Text>
             </View>
+            {pin.posted_from_current_location && (
+              <Text style={styles.locationFlareMeta}>
+                ✦ Posted from current location
+              </Text>
+            )}
+
+            <View style={styles.voteRow}>
+              <TouchableOpacity
+                style={[
+                  styles.voteButton,
+                  styles.voteButtonLeft,
+                  pinVoteSummary?.userVote === 1 && styles.voteButtonActive,
+                ]}
+                disabled={!currentUserId || isSubmittingVote || isOwner}
+                onPress={() => onVote && onVote(1)}
+              >
+                <Text
+                  style={[
+                    styles.voteButtonText,
+                    pinVoteSummary?.userVote === 1 && styles.voteButtonTextActive,
+                  ]}
+                >
+                  👍 {pinVoteSummary?.upvotes || 0}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.voteButton,
+                  pinVoteSummary?.userVote === -1 && styles.voteButtonActive,
+                ]}
+                disabled={!currentUserId || isSubmittingVote || isOwner}
+                onPress={() => onVote && onVote(-1)}
+              >
+                <Text
+                  style={[
+                    styles.voteButtonText,
+                    pinVoteSummary?.userVote === -1 && styles.voteButtonTextActive,
+                  ]}
+                >
+                  👎 {pinVoteSummary?.downvotes || 0}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {!currentUserId && (
+              <Text style={styles.voteHint}>Sign in to vote on this pin</Text>
+            )}
+            {isOwner && (
+              <Text style={styles.voteHint}>You cannot vote on your own pin</Text>
+            )}
           </ScrollView>
 
           {/* Actions */}
@@ -260,8 +344,11 @@ const styles = StyleSheet.create({
   },
   mediaImage: {
     width: '100%',
-    height: 200,
+    aspectRatio: 4 / 3,
+    minHeight: 180,
+    maxHeight: 420,
     borderRadius: SIZES.radiusLg,
+    backgroundColor: COLORS.light,
   },
   videoPlaceholder: {
     width: '100%',
@@ -281,6 +368,12 @@ const styles = StyleSheet.create({
   },
   contentContainer: {
     marginBottom: SIZES.lg,
+  },
+  postTitleText: {
+    fontSize: SIZES.lg,
+    fontWeight: '700',
+    color: COLORS.dark,
+    marginBottom: SIZES.sm,
   },
   contentText: {
     fontSize: SIZES.md,
@@ -315,6 +408,45 @@ const styles = StyleSheet.create({
   },
   metaText: {
     fontSize: SIZES.sm,
+    color: COLORS.gray,
+  },
+  locationFlareMeta: {
+    marginTop: SIZES.sm,
+    fontSize: SIZES.xs,
+    fontWeight: '700',
+    color: '#FF7A59',
+  },
+  voteRow: {
+    flexDirection: 'row',
+    marginTop: SIZES.md,
+  },
+  voteButton: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: SIZES.radiusLg,
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: COLORS.white,
+  },
+  voteButtonLeft: {
+    marginRight: SIZES.sm,
+  },
+  voteButtonActive: {
+    backgroundColor: COLORS.primary,
+    borderColor: COLORS.primary,
+  },
+  voteButtonText: {
+    fontSize: SIZES.sm,
+    fontWeight: '600',
+    color: COLORS.dark,
+  },
+  voteButtonTextActive: {
+    color: COLORS.white,
+  },
+  voteHint: {
+    marginTop: SIZES.sm,
+    fontSize: SIZES.xs,
     color: COLORS.gray,
   },
   actions: {
