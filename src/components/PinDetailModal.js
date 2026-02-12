@@ -194,7 +194,7 @@ const PinDetailModal = ({
             </View>
             {pin.posted_from_current_location && (
               <Text style={styles.locationFlareMeta}>
-                ✦ Posted from current location
+                ✦ Posted from this location
               </Text>
             )}
 
