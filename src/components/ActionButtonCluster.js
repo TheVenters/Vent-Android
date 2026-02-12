@@ -17,12 +17,12 @@ import Animated, {
   Extrapolation,
 } from 'react-native-reanimated';
 import {
-  COLORS,
   SIZES,
   ACTION_BUTTON,
   LAYERS,
 } from '../constants/theme';
 import PostCreationForm from './PostCreationForm';
+import { useAppTheme } from '../context/ThemeContext';
 
 const MENU_ITEMS = ['Communities', 'Friends', 'Account', 'Layers', 'Add'];
 
@@ -38,6 +38,8 @@ const ActionButtonCluster = ({
   onStartDrawing,
   onSearch,
 }) => {
+  const { palette } = useAppTheme();
+  const styles = createStyles(palette);
   const [expanded, setExpanded] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [showPostForm, setShowPostForm] = useState(false);
@@ -274,7 +276,7 @@ const ActionButtonCluster = ({
             <TextInput
               style={styles.searchInput}
               placeholder="Search..."
-              placeholderTextColor={COLORS.gray}
+              placeholderTextColor={palette.subtext}
               value={searchQuery}
               onChangeText={setSearchQuery}
               onSubmitEditing={handleSearchSubmit}
@@ -341,7 +343,7 @@ const ActionButtonCluster = ({
   );
 };
 
-const styles = StyleSheet.create({
+const createStyles = (palette) => StyleSheet.create({
   overlay: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'flex-end',
@@ -373,7 +375,7 @@ const styles = StyleSheet.create({
     elevation: 8,
   },
   arrowButton: {
-    backgroundColor: COLORS.white,
+    backgroundColor: palette.surface,
     shadowColor: 'transparent',
     shadowOpacity: 0,
     shadowRadius: 0,
@@ -381,21 +383,21 @@ const styles = StyleSheet.create({
     elevation: 0,
   },
   aButton: {
-    backgroundColor: COLORS.primary,
+    backgroundColor: palette.primary,
   },
   buttonText: {
     fontSize: 22,
     fontWeight: '700',
-    color: COLORS.dark,
+    color: palette.text,
   },
   aButtonText: {
     fontSize: 22,
     fontWeight: '700',
-    color: COLORS.white,
+    color: palette.onPrimary,
   },
   searchBar: {
     height: ACTION_BUTTON.SIZE,
-    backgroundColor: COLORS.white,
+    backgroundColor: palette.surface,
     borderRadius: ACTION_BUTTON.SIZE / 2,
     marginRight: ACTION_BUTTON.GAP,
     shadowColor: '#000',
@@ -408,7 +410,7 @@ const styles = StyleSheet.create({
   searchInput: {
     paddingHorizontal: 20,
     fontSize: 15,
-    color: COLORS.dark,
+    color: palette.text,
   },
   menuColumn: {
     alignItems: 'flex-end',
@@ -417,7 +419,7 @@ const styles = StyleSheet.create({
     elevation: 1000,
   },
   menuItem: {
-    backgroundColor: COLORS.white,
+    backgroundColor: palette.surface,
     borderRadius: ACTION_BUTTON.SIZE / 2,
     paddingHorizontal: 20,
     paddingVertical: 12,
@@ -434,7 +436,7 @@ const styles = StyleSheet.create({
   menuItemText: {
     fontSize: 14,
     fontWeight: '600',
-    color: COLORS.dark,
+    color: palette.text,
   },
   layerBackdrop: {
     ...StyleSheet.absoluteFillObject,
@@ -445,7 +447,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 200 + (Platform.OS === 'ios' ? 20 : 0),
     right: ACTION_BUTTON.MARGIN,
-    backgroundColor: COLORS.white,
+    backgroundColor: palette.surface,
     borderRadius: SIZES.radiusLg,
     padding: SIZES.sm,
     shadowColor: '#000',
@@ -461,15 +463,15 @@ const styles = StyleSheet.create({
     borderRadius: SIZES.radius,
   },
   layerOptionActive: {
-    backgroundColor: COLORS.primary,
+    backgroundColor: palette.primary,
   },
   layerOptionText: {
     fontSize: 14,
     fontWeight: '600',
-    color: COLORS.dark,
+    color: palette.text,
   },
   layerOptionTextActive: {
-    color: COLORS.white,
+    color: palette.onPrimary,
   },
 });
 
