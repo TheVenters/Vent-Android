@@ -266,7 +266,7 @@ const ActionButtonCluster = ({
             style={[styles.button, styles.arrowButton]}
             onPress={goToRandomPin}
           >
-            <Text style={styles.buttonText}>{'>'}</Text>
+            <Text style={styles.buttonText}>{'➜'}</Text>
           </TouchableOpacity>
         </Animated.View>
 
@@ -288,7 +288,7 @@ const ActionButtonCluster = ({
             style={[styles.button, styles.aButton]}
             onPress={toggleExpand}
           >
-            <Text style={styles.aButtonText}>A</Text>
+            <Text style={styles.aButtonText}>Vent</Text>
           </TouchableOpacity>
         </View>
       </Animated.View>
