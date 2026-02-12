@@ -11,7 +11,8 @@ import {
   Alert,
 } from 'react-native';
 import { supabase, getCurrentUser, signIn, signUp, signOut } from '../services/supabase';
-import { COLORS, SIZES } from '../constants/theme';
+import { SIZES } from '../constants/theme';
+import { useAppTheme } from '../context/ThemeContext';
 
 const AccountScreen = ({ navigation }) => {
   const [email, setEmail] = useState('');
@@ -21,13 +22,14 @@ const AccountScreen = ({ navigation }) => {
   const [currentUser, setCurrentUser] = useState(null);
   const [loading, setLoading] = useState(false);
   const [isSignUp, setIsSignUp] = useState(false);
+  const { palette } = useAppTheme();
+  const styles = createStyles(palette);
 
   useEffect(() => {
     loadUser();
-    
-    // Listen for auth state changes
+
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
+      async (_, session) => {
         if (session?.user) {
           setCurrentUser(session.user);
         } else {
@@ -52,7 +54,7 @@ const AccountScreen = ({ navigation }) => {
 
     setLoading(true);
     try {
-      const { data, error } = await signIn(email, password);
+      const { error } = await signIn(email, password);
       if (error) throw error;
 
       Alert.alert('Success', 'Signed in successfully!');
@@ -78,8 +80,6 @@ const AccountScreen = ({ navigation }) => {
       return;
     }
 
-    console.log('Attempting sign up with:', { email, username });
-
     setLoading(true);
     try {
       const { data, error } = await signUp(
@@ -89,11 +89,8 @@ const AccountScreen = ({ navigation }) => {
         displayName.trim() || username.trim()
       );
 
-      console.log('Sign up response:', { data, error });
-
       if (error) throw error;
 
-      // With email confirmation disabled, user should be logged in automatically
       if (data?.user) {
         Alert.alert('Success', 'Account created! You are now signed in.');
         clearForm();
@@ -106,7 +103,6 @@ const AccountScreen = ({ navigation }) => {
         clearForm();
       }
     } catch (error) {
-      console.error('Sign up error:', error);
       Alert.alert('Error', error.message);
     } finally {
       setLoading(false);
@@ -130,7 +126,7 @@ const AccountScreen = ({ navigation }) => {
     try {
       const { error } = await signOut();
       if (error) throw error;
-      
+
       Alert.alert('Success', 'Signed out successfully!');
     } catch (error) {
       Alert.alert('Error', error.message);
@@ -139,17 +135,21 @@ const AccountScreen = ({ navigation }) => {
     }
   };
 
+  const TopBar = () => (
+    <View style={styles.topBar}>
+      <TouchableOpacity style={styles.backButton} onPress={() => navigation.navigate('Map')}>
+        <Text style={styles.backButtonText}>{'< Map'}</Text>
+      </TouchableOpacity>
+      <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')}>
+        <Text style={styles.settingsButtonText}>Settings</Text>
+      </TouchableOpacity>
+    </View>
+  );
+
   if (currentUser) {
     return (
       <View style={styles.container}>
-        <View style={styles.topBar}>
-          <TouchableOpacity
-            style={styles.backButton}
-            onPress={() => navigation.navigate('Map')}
-          >
-            <Text style={styles.backButtonText}>{'< Map'}</Text>
-          </TouchableOpacity>
-        </View>
+        <TopBar />
         <View style={styles.profileContainer}>
           <View style={styles.logo}>
             <Text style={styles.logoText}>Vent</Text>
@@ -157,13 +157,9 @@ const AccountScreen = ({ navigation }) => {
           </View>
 
           <View style={styles.profileInfo}>
-            <Text style={styles.displayName}>
-              {currentUser.user_metadata?.display_name || 'User'}
-            </Text>
+            <Text style={styles.displayName}>{currentUser.user_metadata?.display_name || 'User'}</Text>
             {currentUser.user_metadata?.username && (
-              <Text style={styles.username}>
-                @{currentUser.user_metadata.username}
-              </Text>
+              <Text style={styles.username}>@{currentUser.user_metadata.username}</Text>
             )}
             <Text style={styles.email}>{currentUser.email}</Text>
           </View>
@@ -173,9 +169,7 @@ const AccountScreen = ({ navigation }) => {
             onPress={handleSignOut}
             disabled={loading}
           >
-            <Text style={styles.buttonText}>
-              {loading ? 'Signing out...' : 'Sign Out'}
-            </Text>
+            <Text style={styles.buttonText}>{loading ? 'Signing out...' : 'Sign Out'}</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -183,18 +177,8 @@ const AccountScreen = ({ navigation }) => {
   }
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      style={styles.container}
-    >
-      <View style={styles.topBar}>
-        <TouchableOpacity
-          style={styles.backButton}
-          onPress={() => navigation.navigate('Map')}
-        >
-          <Text style={styles.backButtonText}>{'< Map'}</Text>
-        </TouchableOpacity>
-      </View>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.container}>
+      <TopBar />
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <View style={styles.logo}>
           <Text style={styles.logoText}>Vent</Text>
@@ -207,6 +191,7 @@ const AccountScreen = ({ navigation }) => {
               <TextInput
                 style={styles.input}
                 placeholder="Username"
+                placeholderTextColor={palette.subtext}
                 value={username}
                 onChangeText={setUsername}
                 autoCapitalize="none"
@@ -215,6 +200,7 @@ const AccountScreen = ({ navigation }) => {
               <TextInput
                 style={styles.input}
                 placeholder="Display Name (optional)"
+                placeholderTextColor={palette.subtext}
                 value={displayName}
                 onChangeText={setDisplayName}
                 autoCapitalize="words"
@@ -224,6 +210,7 @@ const AccountScreen = ({ navigation }) => {
           <TextInput
             style={styles.input}
             placeholder="Email"
+            placeholderTextColor={palette.subtext}
             value={email}
             onChangeText={setEmail}
             autoCapitalize="none"
@@ -233,6 +220,7 @@ const AccountScreen = ({ navigation }) => {
           <TextInput
             style={styles.input}
             placeholder="Password"
+            placeholderTextColor={palette.subtext}
             value={password}
             onChangeText={setPassword}
             secureTextEntry
@@ -240,15 +228,15 @@ const AccountScreen = ({ navigation }) => {
             autoComplete={isSignUp ? 'new-password' : 'password'}
           />
 
-          <TouchableOpacity
-            style={styles.button}
-            onPress={isSignUp ? handleSignUp : handleSignIn}
-            disabled={loading}
-          >
+          <TouchableOpacity style={styles.button} onPress={isSignUp ? handleSignUp : handleSignIn} disabled={loading}>
             <Text style={styles.buttonText}>
               {loading
-                ? (isSignUp ? 'Creating account...' : 'Signing in...')
-                : (isSignUp ? 'Create Account' : 'Sign In')}
+                ? isSignUp
+                  ? 'Creating account...'
+                  : 'Signing in...'
+                : isSignUp
+                  ? 'Create Account'
+                  : 'Sign In'}
             </Text>
           </TouchableOpacity>
         </View>
@@ -272,13 +260,9 @@ const AccountScreen = ({ navigation }) => {
         </View>
 
         <View style={styles.footer}>
-          <Text style={styles.footerText}>
-            {isSignUp ? 'Already have an account? ' : "Don't have an account? "}
-          </Text>
+          <Text style={styles.footerText}>{isSignUp ? 'Already have an account? ' : "Don't have an account? "}</Text>
           <TouchableOpacity onPress={toggleMode}>
-            <Text style={styles.footerLink}>
-              {isSignUp ? 'Sign In' : 'Sign Up'}
-            </Text>
+            <Text style={styles.footerLink}>{isSignUp ? 'Sign In' : 'Sign Up'}</Text>
           </TouchableOpacity>
         </View>
       </ScrollView>
@@ -286,140 +270,159 @@ const AccountScreen = ({ navigation }) => {
   );
 };
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.white,
-  },
-  scrollContent: {
-    flexGrow: 1,
-    padding: SIZES.xxl,
-    justifyContent: 'center',
-  },
-  profileContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: SIZES.xxl,
-  },
-  logo: {
-    alignItems: 'center',
-    marginBottom: SIZES.xxl * 2,
-  },
-  logoText: {
-    fontSize: 48,
-    fontWeight: '700',
-    color: COLORS.primary,
-    marginBottom: SIZES.sm,
-  },
-  tagline: {
-    fontSize: SIZES.md,
-    color: COLORS.gray,
-  },
-  form: {
-    marginBottom: SIZES.xxl,
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: SIZES.radiusLg,
-    padding: SIZES.lg,
-    fontSize: SIZES.md,
-    marginBottom: SIZES.lg,
-  },
-  button: {
-    backgroundColor: COLORS.primary,
-    borderRadius: SIZES.radiusLg,
-    padding: SIZES.lg,
-    alignItems: 'center',
-  },
-  signOutButton: {
-    backgroundColor: COLORS.danger,
-    marginTop: SIZES.xxl,
-  },
-  buttonText: {
-    color: COLORS.white,
-    fontSize: SIZES.md,
-    fontWeight: '600',
-  },
-  divider: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginVertical: SIZES.xxl,
-  },
-  dividerLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: COLORS.border,
-  },
-  dividerText: {
-    marginHorizontal: SIZES.md,
-    color: COLORS.gray,
-    fontSize: SIZES.sm,
-  },
-  socialButtons: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: SIZES.lg,
-    marginBottom: SIZES.xxl,
-  },
-  socialButton: {
-    width: 56,
-    height: 56,
-    borderRadius: SIZES.radiusFull,
-    backgroundColor: COLORS.light,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  socialIcon: {
-    fontSize: 24,
-  },
-  footer: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-  },
-  footerText: {
-    color: COLORS.gray,
-    fontSize: SIZES.sm,
-  },
-  footerLink: {
-    color: COLORS.primary,
-    fontSize: SIZES.sm,
-    fontWeight: '600',
-  },
-  profileInfo: {
-    alignItems: 'center',
-    marginBottom: SIZES.xxl,
-  },
-  displayName: {
-    fontSize: SIZES.xxl,
-    fontWeight: '700',
-    color: COLORS.dark,
-    marginBottom: SIZES.xs,
-  },
-  username: {
-    fontSize: SIZES.md,
-    color: COLORS.primary,
-    marginBottom: SIZES.sm,
-  },
-  email: {
-    fontSize: SIZES.sm,
-    color: COLORS.gray,
-  },
-  topBar: {
-    paddingTop: Platform.OS === 'ios' ? 50 : 20,
-    paddingHorizontal: SIZES.lg,
-    paddingBottom: SIZES.sm,
-  },
-  backButton: {
-    paddingVertical: SIZES.sm,
-    paddingRight: SIZES.lg,
-  },
-  backButtonText: {
-    fontSize: SIZES.md,
-    fontWeight: '600',
-    color: COLORS.primary,
-  },
-});
+const createStyles = (palette) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: palette.background,
+    },
+    scrollContent: {
+      flexGrow: 1,
+      padding: SIZES.xxl,
+      justifyContent: 'center',
+    },
+    profileContainer: {
+      flex: 1,
+      justifyContent: 'center',
+      alignItems: 'center',
+      padding: SIZES.xxl,
+    },
+    logo: {
+      alignItems: 'center',
+      marginBottom: SIZES.xxl * 2,
+    },
+    logoText: {
+      fontSize: 48,
+      fontWeight: '700',
+      color: palette.primary,
+      marginBottom: SIZES.sm,
+    },
+    tagline: {
+      fontSize: SIZES.md,
+      color: palette.subtext,
+    },
+    form: {
+      marginBottom: SIZES.xxl,
+    },
+    input: {
+      borderWidth: 1,
+      borderColor: palette.border,
+      borderRadius: SIZES.radiusLg,
+      padding: SIZES.lg,
+      fontSize: SIZES.md,
+      marginBottom: SIZES.lg,
+      color: palette.text,
+      backgroundColor: palette.surface,
+    },
+    button: {
+      backgroundColor: palette.primary,
+      borderRadius: SIZES.radiusLg,
+      padding: SIZES.lg,
+      alignItems: 'center',
+    },
+    signOutButton: {
+      backgroundColor: palette.danger,
+      marginTop: SIZES.xxl,
+    },
+    buttonText: {
+      color: palette.onPrimary,
+      fontSize: SIZES.md,
+      fontWeight: '600',
+    },
+    divider: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginVertical: SIZES.xxl,
+    },
+    dividerLine: {
+      flex: 1,
+      height: 1,
+      backgroundColor: palette.border,
+    },
+    dividerText: {
+      marginHorizontal: SIZES.md,
+      color: palette.subtext,
+      fontSize: SIZES.sm,
+    },
+    socialButtons: {
+      flexDirection: 'row',
+      justifyContent: 'center',
+      gap: SIZES.lg,
+      marginBottom: SIZES.xxl,
+    },
+    socialButton: {
+      width: 56,
+      height: 56,
+      borderRadius: SIZES.radiusFull,
+      backgroundColor: palette.mutedSurface,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    socialIcon: {
+      fontSize: 24,
+    },
+    footer: {
+      flexDirection: 'row',
+      justifyContent: 'center',
+    },
+    footerText: {
+      color: palette.subtext,
+      fontSize: SIZES.sm,
+    },
+    footerLink: {
+      color: palette.primary,
+      fontSize: SIZES.sm,
+      fontWeight: '600',
+    },
+    profileInfo: {
+      alignItems: 'center',
+      marginBottom: SIZES.xxl,
+    },
+    displayName: {
+      fontSize: SIZES.xxl,
+      fontWeight: '700',
+      color: palette.text,
+      marginBottom: SIZES.xs,
+    },
+    username: {
+      fontSize: SIZES.md,
+      color: palette.primary,
+      marginBottom: SIZES.sm,
+    },
+    email: {
+      fontSize: SIZES.sm,
+      color: palette.subtext,
+    },
+    topBar: {
+      paddingTop: Platform.OS === 'ios' ? 50 : 20,
+      paddingHorizontal: SIZES.lg,
+      paddingBottom: SIZES.sm,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    backButton: {
+      paddingVertical: SIZES.sm,
+      paddingRight: SIZES.lg,
+    },
+    backButtonText: {
+      fontSize: SIZES.md,
+      fontWeight: '600',
+      color: palette.primary,
+    },
+    settingsButton: {
+      paddingVertical: 6,
+      paddingHorizontal: 10,
+      borderRadius: SIZES.radius,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.surface,
+    },
+    settingsButtonText: {
+      fontSize: 13,
+      fontWeight: '600',
+      color: palette.text,
+    },
+  });
 
 export default AccountScreen;

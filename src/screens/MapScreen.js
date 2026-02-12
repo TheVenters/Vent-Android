@@ -13,8 +13,12 @@ import { COLORS, SIZES, DEFAULT_REGION, LAYERS, GEOMETRY_TYPES } from '../consta
 import PinDetailModal from '../components/PinDetailModal';
 import CustomMarker from '../components/CustomMarker';
 import ActionButtonCluster from '../components/ActionButtonCluster';
+import { useAppTheme } from '../context/ThemeContext';
+import { MAP_DARK_STYLE } from '../constants/mapDarkStyle';
 
 const MapScreen = ({ navigation }) => {
+  const { isDark, palette } = useAppTheme();
+  const styles = createStyles(palette);
   const [region, setRegion] = useState(DEFAULT_REGION);
   const [pins, setPins] = useState([]);
   const [currentUser, setCurrentUser] = useState(null);
@@ -335,6 +339,7 @@ const MapScreen = ({ navigation }) => {
         provider={PROVIDER_GOOGLE}
         initialRegion={region}
         mapType={mapType}
+        customMapStyle={isDark ? MAP_DARK_STYLE : []}
         onPress={(isDrawingMode || isPickingPostLocation) ? handleMapPress : undefined}
         zoomEnabled
         scrollEnabled
@@ -442,9 +447,10 @@ const MapScreen = ({ navigation }) => {
   );
 };
 
-const styles = StyleSheet.create({
+const createStyles = (palette) => StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: palette.background,
   },
   map: {
     flex: 1,
@@ -457,7 +463,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: COLORS.white,
+    backgroundColor: palette.surface,
     borderRadius: SIZES.radiusLg,
     paddingHorizontal: 16,
     paddingVertical: 12,
@@ -470,18 +476,18 @@ const styles = StyleSheet.create({
   drawingBarText: {
     fontSize: 14,
     fontWeight: '600',
-    color: COLORS.dark,
+    color: palette.text,
     flex: 1,
   },
   drawingDoneBtn: {
-    backgroundColor: COLORS.primary,
+    backgroundColor: palette.primary,
     paddingHorizontal: 20,
     paddingVertical: 8,
     borderRadius: SIZES.radius,
     marginLeft: 12,
   },
   drawingDoneBtnText: {
-    color: COLORS.white,
+    color: palette.onPrimary,
     fontSize: 14,
     fontWeight: '700',
   },
