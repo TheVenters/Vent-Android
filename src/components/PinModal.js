@@ -21,6 +21,7 @@ const PinModal = ({ visible, type, onClose, onSubmit }) => {
   const [mediaUrl, setMediaUrl] = useState('');
   const [mediaType, setMediaType] = useState('photo');
   const [selectedImage, setSelectedImage] = useState(null);
+  const [previewAspectRatio, setPreviewAspectRatio] = useState(4 / 3);
 
   const pickImage = async (useCamera = false) => {
     try {
@@ -41,9 +42,8 @@ const PinModal = ({ visible, type, onClose, onSubmit }) => {
 
       const options = {
         mediaTypes: ['images', 'videos'],
-        allowsEditing: true,
-        aspect: [4, 3],
-        quality: 0.8,
+        allowsEditing: false,
+        quality: 1,
       };
 
       const result = useCamera
@@ -55,6 +55,9 @@ const PinModal = ({ visible, type, onClose, onSubmit }) => {
         setSelectedImage(asset.uri);
         setMediaUrl(asset.uri);
         setMediaType(asset.type === 'video' ? 'video' : 'photo');
+        if (asset.width && asset.height) {
+          setPreviewAspectRatio(asset.width / asset.height);
+        }
       }
     } catch (error) {
       console.error('Error picking image:', error);
@@ -85,6 +88,7 @@ const PinModal = ({ visible, type, onClose, onSubmit }) => {
     setMediaUrl('');
     setMediaType('photo');
     setSelectedImage(null);
+    setPreviewAspectRatio(4 / 3);
   };
 
   const handleClose = () => {
@@ -93,6 +97,7 @@ const PinModal = ({ visible, type, onClose, onSubmit }) => {
     setMediaUrl('');
     setMediaType('photo');
     setSelectedImage(null);
+    setPreviewAspectRatio(4 / 3);
     onClose();
   };
 
@@ -137,12 +142,17 @@ const PinModal = ({ visible, type, onClose, onSubmit }) => {
                 {/* Image Preview */}
                 {selectedImage && (
                   <View style={styles.previewContainer}>
-                    <Image source={{ uri: selectedImage }} style={styles.preview} />
+                    <Image
+                      source={{ uri: selectedImage }}
+                      style={[styles.preview, { aspectRatio: previewAspectRatio }]}
+                      resizeMode="contain"
+                    />
                     <TouchableOpacity
                       style={styles.removePreview}
                       onPress={() => {
                         setSelectedImage(null);
                         setMediaUrl('');
+                        setPreviewAspectRatio(4 / 3);
                       }}
                     >
                       <Text style={styles.removePreviewText}>✕</Text>
@@ -314,8 +324,11 @@ const styles = StyleSheet.create({
   },
   preview: {
     width: '100%',
-    height: 200,
+    aspectRatio: 4 / 3,
+    minHeight: 180,
+    maxHeight: 420,
     borderRadius: SIZES.radiusLg,
+    backgroundColor: COLORS.light,
   },
   removePreview: {
     position: 'absolute',

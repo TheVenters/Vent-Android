@@ -19,13 +19,18 @@ git clone https://github.com/TheVenters/VentApp_Mobile.git
 cd <repo-folder-name>
 
 Put API Key .env file in directory
-### 3. Start the Expo Development Server
+
+### 3. Start supabase
+supabase start
+
+### 4. Start the Expo Development Server
 npm install
 
 
 npx expo start --tunnel
 
-### 4. Open the Application
+
+### 5. Open the Application
 
 Choose one of the following options:
 

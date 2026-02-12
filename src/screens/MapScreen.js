@@ -4,31 +4,39 @@ import {
   StyleSheet,
   TouchableOpacity,
   Text,
-  TextInput,
   Alert,
-  Platform,
 } from 'react-native';
-import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapView, { Polyline, Polygon, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { supabase, getCurrentUser } from '../services/supabase';
-import { COLORS, SIZES, DEFAULT_REGION, PIN_TYPES, LAYERS } from '../constants/theme';
-import PinModal from '../components/PinModal';
+import { COLORS, SIZES, DEFAULT_REGION, LAYERS, GEOMETRY_TYPES } from '../constants/theme';
 import PinDetailModal from '../components/PinDetailModal';
 import CustomMarker from '../components/CustomMarker';
+import ActionButtonCluster from '../components/ActionButtonCluster';
 
 const MapScreen = ({ navigation }) => {
   const [region, setRegion] = useState(DEFAULT_REGION);
   const [pins, setPins] = useState([]);
   const [currentUser, setCurrentUser] = useState(null);
   const [selectedLayer, setSelectedLayer] = useState(LAYERS.PUBLIC);
-  const [isPlacingPin, setIsPlacingPin] = useState(false);
-  const [pendingPinLocation, setPendingPinLocation] = useState(null);
-  const [pendingPinType, setPendingPinType] = useState(null);
-  const [showPinModal, setShowPinModal] = useState(false);
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [selectedPin, setSelectedPin] = useState(null);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [pinVoteSummary, setPinVoteSummary] = useState({
+    upvotes: 0,
+    downvotes: 0,
+    userVote: 0,
+  });
+  const [isSubmittingVote, setIsSubmittingVote] = useState(false);
   const [mapType, setMapType] = useState('standard');
+  const [userLocation, setUserLocation] = useState(null);
+
+  // Drawing mode state
+  const [isDrawingMode, setIsDrawingMode] = useState(false);
+  const [isPickingPostLocation, setIsPickingPostLocation] = useState(false);
+  const [drawingCoords, setDrawingCoords] = useState([]);
+  const [drawingType, setDrawingType] = useState(null);
+  const [pendingPostData, setPendingPostData] = useState(null);
+
   const mapRef = useRef(null);
 
   useEffect(() => {
@@ -48,9 +56,13 @@ const MapScreen = ({ navigation }) => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status === 'granted') {
         const location = await Location.getCurrentPositionAsync({});
-        setRegion({
+        const loc = {
           latitude: location.coords.latitude,
           longitude: location.coords.longitude,
+        };
+        setUserLocation(loc);
+        setRegion({
+          ...loc,
           latitudeDelta: 0.0922,
           longitudeDelta: 0.0421,
         });
@@ -89,7 +101,6 @@ const MapScreen = ({ navigation }) => {
         (payload) => {
           if (payload.eventType === 'INSERT') {
             setPins((prev) => {
-              // Prevent duplicates
               if (prev.some((pin) => pin.id === payload.new.id)) {
                 return prev;
               }
@@ -112,70 +123,169 @@ const MapScreen = ({ navigation }) => {
   };
 
   const handleMapPress = (event) => {
-    if (isPlacingPin) {
+    if (isPickingPostLocation && pendingPostData) {
       const { latitude, longitude } = event.nativeEvent.coordinate;
-      setPendingPinLocation({ latitude, longitude });
-      setShowPinModal(true);
-      setIsPlacingPin(false);
+      const nextPostData = {
+        ...pendingPostData,
+        location: { latitude, longitude },
+      };
+      setPendingPostData(nextPostData);
+      setIsPickingPostLocation(false);
+      handlePostSubmit(nextPostData);
+      return;
+    }
+
+    if (isDrawingMode) {
+      const { latitude, longitude } = event.nativeEvent.coordinate;
+      setDrawingCoords((prev) => [...prev, { latitude, longitude }]);
     }
   };
 
-  const startPinPlacement = (type) => {
+  const handleStartDrawing = (geometryType) => {
+    setIsDrawingMode(true);
+    setDrawingType(geometryType);
+    setDrawingCoords([]);
+  };
+
+  const handleFinishDrawing = () => {
+    setIsDrawingMode(false);
+    // Drawing coords are kept for submission
+  };
+
+  const handlePostSubmit = async (postData) => {
     if (!currentUser) {
       Alert.alert('Sign In Required', 'Please sign in to create posts');
       navigation.navigate('Account');
       return;
     }
-    setIsPlacingPin(true);
-    setPendingPinType(type);
-    Alert.alert('Place Pin', 'Tap on the map to place your pin');
-  };
 
-  const handleCreatePin = async (pinData) => {
+    if (postData.locationMode === 'pick_on_map' && !postData.location) {
+      setPendingPostData(postData);
+      setIsPickingPostLocation(true);
+      Alert.alert('Select Location', 'Tap on the map to place this post.');
+      return;
+    }
+
+    // If Line/Plane geometry and not yet drawn, enter drawing mode
+    if (
+      postData.geometryType !== GEOMETRY_TYPES.POINT &&
+      drawingCoords.length === 0
+    ) {
+      setPendingPostData(postData);
+      handleStartDrawing(postData.geometryType);
+      return;
+    }
+
     try {
-      const { error } = await supabase.from('pins').insert([
-        {
-          user_id: currentUser.id,
-          type: pendingPinType,
-          content: pinData.content,
-          caption: pinData.caption,
-          media_url: pinData.mediaUrl,
-          media_type: pinData.mediaType,
-          lat: pendingPinLocation.latitude,
-          lng: pendingPinLocation.longitude,
-          layer: selectedLayer,
-          author_name: currentUser.user_metadata?.display_name || 'Anonymous',
-          author_username: currentUser.user_metadata?.username || '',
-        },
-      ]);
+      const insertData = {
+        user_id: currentUser.id,
+        type: postData.mediaUrl ? 'media' : 'text',
+        content: postData.content,
+        caption: postData.title,
+        media_url: postData.mediaUrl || null,
+        media_type: postData.mediaType,
+        lat: postData.location?.latitude || userLocation?.latitude || region.latitude,
+        lng: postData.location?.longitude || userLocation?.longitude || region.longitude,
+        layer: postData.layer,
+        author_name: currentUser.user_metadata?.display_name || 'Anonymous',
+        author_username: currentUser.user_metadata?.username || '',
+        posted_from_current_location: postData.locationMode === 'current',
+      };
 
+      // Store geometry data if line/plane
+      if (postData.geometryType !== GEOMETRY_TYPES.POINT && drawingCoords.length > 0) {
+        insertData.geometry_type = postData.geometryType;
+        insertData.geometry_coords = JSON.stringify(drawingCoords);
+      }
+
+      const { error } = await supabase.from('pins').insert([insertData]);
       if (error) throw error;
-      
-      setShowPinModal(false);
-      setPendingPinLocation(null);
-      setPendingPinType(null);
-      Alert.alert('Success', 'Pin created successfully!');
+
+      setDrawingCoords([]);
+      setDrawingType(null);
+      setPendingPostData(null);
+      setIsPickingPostLocation(false);
+      Alert.alert('Success', 'Post created!');
     } catch (error) {
-      console.error('Error creating pin:', error);
-      Alert.alert('Error', 'Failed to create pin. Please try again.');
+      console.error('Error creating post:', error);
+      Alert.alert('Error', 'Failed to create post. Please try again.');
     }
   };
 
-  const handleSearch = async () => {
-    if (!searchQuery.trim()) return;
+  const handleSearch = (query) => {
+    Alert.alert('Search', `Searching for: ${query}`);
+  };
 
+  const loadPinVotes = async (pinId) => {
     try {
-      // Use a geocoding service here
-      // For now, we'll just show an alert
-      Alert.alert('Search', `Searching for: ${searchQuery}`);
+      const { data, error } = await supabase
+        .from('pin_votes')
+        .select('user_id, vote')
+        .eq('pin_id', pinId);
+
+      if (error) throw error;
+
+      const summary = { upvotes: 0, downvotes: 0, userVote: 0 };
+      (data || []).forEach((voteRow) => {
+        if (voteRow.vote === 1) summary.upvotes += 1;
+        if (voteRow.vote === -1) summary.downvotes += 1;
+        if (voteRow.user_id === currentUser?.id) {
+          summary.userVote = voteRow.vote;
+        }
+      });
+
+      setPinVoteSummary(summary);
     } catch (error) {
-      console.error('Search error:', error);
+      console.error('Error loading pin votes:', error);
+      setPinVoteSummary({ upvotes: 0, downvotes: 0, userVote: 0 });
     }
   };
 
   const handlePinPress = (pin) => {
     setSelectedPin(pin);
+    loadPinVotes(pin.id);
     setShowDetailModal(true);
+  };
+
+  const handleVotePin = async (vote) => {
+    if (!selectedPin || !currentUser) {
+      Alert.alert('Sign In Required', 'Please sign in to vote on pins');
+      return;
+    }
+
+    if (selectedPin.user_id === currentUser.id) return;
+
+    try {
+      setIsSubmittingVote(true);
+
+      if (pinVoteSummary.userVote === vote) {
+        const { error } = await supabase
+          .from('pin_votes')
+          .delete()
+          .eq('pin_id', selectedPin.id)
+          .eq('user_id', currentUser.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase
+          .from('pin_votes')
+          .upsert(
+            {
+              pin_id: selectedPin.id,
+              user_id: currentUser.id,
+              vote,
+            },
+            { onConflict: 'pin_id,user_id' }
+          );
+        if (error) throw error;
+      }
+
+      await loadPinVotes(selectedPin.id);
+    } catch (error) {
+      console.error('Error voting on pin:', error);
+      Alert.alert('Error', 'Failed to submit vote. Please try again.');
+    } finally {
+      setIsSubmittingVote(false);
+    }
   };
 
   const handleUpdatePin = async (pinId, updates) => {
@@ -187,12 +297,11 @@ const MapScreen = ({ navigation }) => {
 
       if (error) throw error;
 
-      // Update local state
       setPins((prev) =>
         prev.map((pin) => (pin.id === pinId ? { ...pin, ...updates } : pin))
       );
       setSelectedPin((prev) => (prev ? { ...prev, ...updates } : null));
-      Alert.alert('Success', 'Pin updated successfully!');
+      Alert.alert('Success', 'Pin updated!');
     } catch (error) {
       console.error('Error updating pin:', error);
       Alert.alert('Error', 'Failed to update pin');
@@ -208,11 +317,10 @@ const MapScreen = ({ navigation }) => {
 
       if (error) throw error;
 
-      // Update local state
       setPins((prev) => prev.filter((pin) => pin.id !== pinId));
       setShowDetailModal(false);
       setSelectedPin(null);
-      Alert.alert('Success', 'Pin deleted successfully!');
+      Alert.alert('Success', 'Pin deleted!');
     } catch (error) {
       console.error('Error deleting pin:', error);
       Alert.alert('Error', 'Failed to delete pin');
@@ -227,76 +335,90 @@ const MapScreen = ({ navigation }) => {
         provider={PROVIDER_GOOGLE}
         initialRegion={region}
         mapType={mapType}
-        onPress={handleMapPress}
+        onPress={(isDrawingMode || isPickingPostLocation) ? handleMapPress : undefined}
+        zoomEnabled
+        scrollEnabled
+        scrollDuringRotateOrZoomEnabled={true}
+        rotateEnabled={false}
+        pitchEnabled={false}
+        moveOnMarkerPress={false}
         showsUserLocation
-        showsMyLocationButton
+        showsMyLocationButton={false}
       >
         {pins.map((pin) => (
           <CustomMarker key={pin.id} pin={pin} onPress={handlePinPress} />
         ))}
+
+        {/* Drawing mode: render in-progress polyline/polygon */}
+        {isDrawingMode && drawingCoords.length >= 2 && drawingType === GEOMETRY_TYPES.LINE && (
+          <Polyline
+            coordinates={drawingCoords}
+            strokeColor={COLORS.primary}
+            strokeWidth={3}
+          />
+        )}
+        {isDrawingMode && drawingCoords.length >= 3 && drawingType === GEOMETRY_TYPES.PLANE && (
+          <Polygon
+            coordinates={drawingCoords}
+            strokeColor={COLORS.primary}
+            fillColor="rgba(102, 126, 234, 0.2)"
+            strokeWidth={2}
+          />
+        )}
       </MapView>
 
-      {/* Search Bar */}
-      <View style={styles.searchContainer}>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Search location or community..."
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-          onSubmitEditing={handleSearch}
-          returnKeyType="search"
-        />
-      </View>
+      {/* Drawing Mode Done Bar */}
+      {isDrawingMode && (
+        <View style={styles.drawingBar}>
+          <Text style={styles.drawingBarText}>
+            Tap map to add points ({drawingCoords.length} placed)
+          </Text>
+          <TouchableOpacity
+            style={styles.drawingDoneBtn}
+            onPress={() => {
+              handleFinishDrawing();
+              // If we have pending post data, re-submit with coords
+              if (pendingPostData) {
+                handlePostSubmit(pendingPostData);
+              }
+            }}
+          >
+            <Text style={styles.drawingDoneBtnText}>Done</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
-      {/* FAB Menu */}
-      <View style={styles.fabContainer}>
-        <TouchableOpacity
-          style={[styles.fabButton, { backgroundColor: COLORS.warning }]}
-          onPress={() => startPinPlacement(PIN_TYPES.TEXT)}
-        >
-          <Text style={styles.fabIcon}>✏️</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.fabButton, { backgroundColor: COLORS.success }]}
-          onPress={() => startPinPlacement(PIN_TYPES.MEDIA)}
-        >
-          <Text style={styles.fabIcon}>📸</Text>
-        </TouchableOpacity>
-      </View>
+      {/* Pick Location Bar */}
+      {isPickingPostLocation && (
+        <View style={styles.drawingBar}>
+          <Text style={styles.drawingBarText}>
+            Tap on the map where you want to place this post
+          </Text>
+          <TouchableOpacity
+            style={styles.drawingDoneBtn}
+            onPress={() => {
+              setIsPickingPostLocation(false);
+              setPendingPostData(null);
+            }}
+          >
+            <Text style={styles.drawingDoneBtnText}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
-      {/* Layer Selector */}
-      <View style={styles.layerContainer}>
-        <TouchableOpacity
-          style={[styles.layerButton, selectedLayer === LAYERS.PUBLIC && styles.layerButtonActive]}
-          onPress={() => setSelectedLayer(LAYERS.PUBLIC)}
-        >
-          <Text style={styles.layerText}>Public</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.layerButton, selectedLayer === LAYERS.FRIENDS && styles.layerButtonActive]}
-          onPress={() => setSelectedLayer(LAYERS.FRIENDS)}
-        >
-          <Text style={styles.layerText}>Friends</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.layerButton, selectedLayer === LAYERS.PRIVATE && styles.layerButtonActive]}
-          onPress={() => setSelectedLayer(LAYERS.PRIVATE)}
-        >
-          <Text style={styles.layerText}>Private</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Pin Creation Modal */}
-      {showPinModal && (
-        <PinModal
-          visible={showPinModal}
-          type={pendingPinType}
-          onClose={() => {
-            setShowPinModal(false);
-            setPendingPinLocation(null);
-            setPendingPinType(null);
-          }}
-          onSubmit={handleCreatePin}
+      {/* Action Button Cluster */}
+      {!isDrawingMode && !isPickingPostLocation && (
+        <ActionButtonCluster
+          navigation={navigation}
+          mapRef={mapRef}
+          pins={pins}
+          selectedLayer={selectedLayer}
+          onLayerChange={setSelectedLayer}
+          onPostSubmit={handlePostSubmit}
+          userLocation={userLocation}
+          isDrawingMode={isDrawingMode}
+          onStartDrawing={handleStartDrawing}
+          onSearch={handleSearch}
         />
       )}
 
@@ -305,9 +427,13 @@ const MapScreen = ({ navigation }) => {
         visible={showDetailModal}
         pin={selectedPin}
         currentUserId={currentUser?.id}
+        pinVoteSummary={pinVoteSummary}
+        isSubmittingVote={isSubmittingVote}
+        onVote={handleVotePin}
         onClose={() => {
           setShowDetailModal(false);
           setSelectedPin(null);
+          setPinVoteSummary({ upvotes: 0, downvotes: 0, userVote: 0 });
         }}
         onUpdate={handleUpdatePin}
         onDelete={handleDeletePin}
@@ -323,68 +449,41 @@ const styles = StyleSheet.create({
   map: {
     flex: 1,
   },
-  searchContainer: {
+  drawingBar: {
     position: 'absolute',
-    top: Platform.OS === 'ios' ? 50 : 20,
+    top: 50,
     left: 20,
     right: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     backgroundColor: COLORS.white,
-    borderRadius: SIZES.radiusXl,
+    borderRadius: SIZES.radiusLg,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.15,
-    shadowRadius: 8,
+    shadowRadius: 6,
     elevation: 5,
   },
-  searchInput: {
-    padding: SIZES.lg,
-    fontSize: SIZES.md,
-  },
-  fabContainer: {
-    position: 'absolute',
-    bottom: 100,
-    right: 20,
-    gap: SIZES.md,
-  },
-  fabButton: {
-    width: 56,
-    height: 56,
-    borderRadius: SIZES.radiusFull,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 8,
-  },
-  fabIcon: {
-    fontSize: 24,
-  },
-  layerContainer: {
-    position: 'absolute',
-    top: Platform.OS === 'ios' ? 110 : 80,
-    left: 20,
-    flexDirection: 'row',
-    gap: SIZES.sm,
-  },
-  layerButton: {
-    paddingHorizontal: SIZES.lg,
-    paddingVertical: SIZES.sm,
-    backgroundColor: COLORS.white,
-    borderRadius: SIZES.radiusLg,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  layerButtonActive: {
-    backgroundColor: COLORS.primary,
-  },
-  layerText: {
-    fontSize: SIZES.sm,
+  drawingBarText: {
+    fontSize: 14,
     fontWeight: '600',
+    color: COLORS.dark,
+    flex: 1,
+  },
+  drawingDoneBtn: {
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+    borderRadius: SIZES.radius,
+    marginLeft: 12,
+  },
+  drawingDoneBtnText: {
+    color: COLORS.white,
+    fontSize: 14,
+    fontWeight: '700',
   },
 });
 

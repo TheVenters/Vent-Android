@@ -61,6 +61,24 @@ export const LAYERS = {
   EVENTS: 'events',
 };
 
+export const GEOMETRY_TYPES = {
+  POINT: 'point',
+  LINE: 'line',
+  PLANE: 'plane',
+};
+
+export const ACTION_BUTTON = {
+  SIZE: 56,
+  MARGIN: 16,
+  GAP: 12,
+};
+
+export const A_BUTTON_STATE = {
+  COLLAPSED: 0,
+  SEARCH: 1,
+  MENU: 2,
+};
+
 export const DEFAULT_REGION = {
   latitude: 39.7392,
   longitude: -104.9903,

@@ -8,6 +8,7 @@ import {
   FlatList,
   Alert,
   RefreshControl,
+  Platform,
 } from 'react-native';
 import { supabase, getCurrentUser } from '../services/supabase';
 import { COLORS, SIZES } from '../constants/theme';
@@ -440,7 +441,13 @@ const FriendsScreen = ({ navigation }) => {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.title}>🤝 Friends</Text>
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={() => navigation.navigate('Map')}
+        >
+          <Text style={styles.backButtonText}>{'< Map'}</Text>
+        </TouchableOpacity>
+        <Text style={styles.title}>Friends</Text>
       </View>
 
       <View style={styles.searchContainer}>
@@ -556,9 +563,23 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.white,
   },
   header: {
-    padding: SIZES.xl,
+    paddingTop: Platform.OS === 'ios' ? 50 : 20,
+    paddingHorizontal: SIZES.xl,
+    paddingBottom: SIZES.lg,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SIZES.md,
+  },
+  backButton: {
+    paddingVertical: SIZES.sm,
+    paddingRight: SIZES.sm,
+  },
+  backButtonText: {
+    fontSize: SIZES.md,
+    fontWeight: '600',
+    color: COLORS.primary,
   },
   title: {
     fontSize: SIZES.xxl,

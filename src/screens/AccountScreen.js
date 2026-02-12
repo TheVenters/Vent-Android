@@ -142,6 +142,14 @@ const AccountScreen = ({ navigation }) => {
   if (currentUser) {
     return (
       <View style={styles.container}>
+        <View style={styles.topBar}>
+          <TouchableOpacity
+            style={styles.backButton}
+            onPress={() => navigation.navigate('Map')}
+          >
+            <Text style={styles.backButtonText}>{'< Map'}</Text>
+          </TouchableOpacity>
+        </View>
         <View style={styles.profileContainer}>
           <View style={styles.logo}>
             <Text style={styles.logoText}>Vent</Text>
@@ -179,6 +187,14 @@ const AccountScreen = ({ navigation }) => {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       style={styles.container}
     >
+      <View style={styles.topBar}>
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={() => navigation.navigate('Map')}
+        >
+          <Text style={styles.backButtonText}>{'< Map'}</Text>
+        </TouchableOpacity>
+      </View>
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <View style={styles.logo}>
           <Text style={styles.logoText}>Vent</Text>
@@ -389,6 +405,20 @@ const styles = StyleSheet.create({
   email: {
     fontSize: SIZES.sm,
     color: COLORS.gray,
+  },
+  topBar: {
+    paddingTop: Platform.OS === 'ios' ? 50 : 20,
+    paddingHorizontal: SIZES.lg,
+    paddingBottom: SIZES.sm,
+  },
+  backButton: {
+    paddingVertical: SIZES.sm,
+    paddingRight: SIZES.lg,
+  },
+  backButtonText: {
+    fontSize: SIZES.md,
+    fontWeight: '600',
+    color: COLORS.primary,
   },
 });
 

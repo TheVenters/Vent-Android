@@ -9,6 +9,7 @@ import MapScreen from './src/screens/MapScreen';
 import AccountScreen from './src/screens/AccountScreen';
 import FriendsScreen from './src/screens/FriendsScreen';
 import ChatScreen from './src/screens/ChatScreen';
+import CommunitiesScreen from './src/screens/CommunitiesScreen';
 import { COLORS } from './src/constants/theme';
 
 const Tab = createBottomTabNavigator();
@@ -33,6 +34,7 @@ export default function App() {
           tabBarActiveTintColor: COLORS.primary,
           tabBarInactiveTintColor: COLORS.gray,
           headerShown: false,
+          tabBarStyle: { display: 'none' },
         }}
       >
         <Tab.Screen
@@ -41,6 +43,10 @@ export default function App() {
           options={{
             tabBarIcon: ({ color }) => <Text style={{ fontSize: 24 }}>🗺️</Text>,
           }}
+        />
+        <Tab.Screen
+          name="Communities"
+          component={CommunitiesScreen}
         />
         <Tab.Screen
           name="Friends"
