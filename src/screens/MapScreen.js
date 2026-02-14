@@ -271,9 +271,9 @@ const MapScreen = ({ navigation, route }) => {
   const [allLoadedPosts, setAllLoadedPosts] = useState([]);
   const [cloudPostsModalVisible, setCloudPostsModalVisible] = useState(false);
   const [selectedCloud, setSelectedCloud] = useState(null);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   const mapRef = useRef(null);
-  const isAdmin = Boolean(currentUser?.user_metadata?.is_admin);
 
   const resolveCurrentUserId = useCallback(async () => {
     // For RLS-gated writes, we must ensure there is an active session so auth.uid()
@@ -605,6 +605,28 @@ const MapScreen = ({ navigation, route }) => {
       subscription?.unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    if (!currentUser?.id) {
+      setIsAdmin(false);
+      return;
+    }
+    const fetchAdminStatus = async () => {
+      try {
+        const { data, error } = await supabase
+          .from("profiles")
+          .select("is_admin")
+          .eq("id", currentUser.id)
+          .maybeSingle();
+        if (error) throw error;
+        setIsAdmin(Boolean(data?.is_admin));
+      } catch (error) {
+        console.error("Error fetching admin status:", error);
+        setIsAdmin(false);
+      }
+    };
+    fetchAdminStatus();
+  }, [currentUser?.id]);
 
   useEffect(() => {
     const incomingCommunityMap = route?.params?.communityMap;
@@ -1343,15 +1365,20 @@ const MapScreen = ({ navigation, route }) => {
     try {
       setIsSubmittingVote(true);
 
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const authed = supabaseWithAccessToken(session?.access_token || null);
+
       if (pinVoteSummary.userVote === vote) {
-        const { error } = await supabase
+        const { error } = await authed
           .from("pin_votes")
           .delete()
           .eq("pin_id", selectedPin.id)
           .eq("user_id", currentUser.id);
         if (error) throw error;
       } else {
-        const { error } = await supabase.from("pin_votes").upsert(
+        const { error } = await authed.from("pin_votes").upsert(
           {
             pin_id: selectedPin.id,
             user_id: currentUser.id,
@@ -1687,6 +1714,7 @@ const MapScreen = ({ navigation, route }) => {
         visible={showDetailModal}
         pin={selectedPin}
         currentUserId={currentUser?.id}
+        isAdmin={isAdmin}
         pinVoteSummary={pinVoteSummary}
         isSubmittingVote={isSubmittingVote}
         associatedLayers={selectedPinLayers}
