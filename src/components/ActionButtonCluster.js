@@ -5,6 +5,9 @@ import {
   TouchableOpacity,
   Text,
   TextInput,
+  FlatList,
+  ActivityIndicator,
+  Alert,
   Platform,
   Keyboard,
   Dimensions,
@@ -40,12 +43,14 @@ const ActionButtonCluster = ({
   onToggleMapMode,
 }) => {
   const { palette } = useAppTheme();
-  const styles = createStyles(palette);
+  const searchBarMaxWidth = Dimensions.get('window').width - ACTION_BUTTON.SIZE - ACTION_BUTTON.GAP - ACTION_BUTTON.MARGIN * 2;
+  const styles = createStyles(palette, searchBarMaxWidth);
   const [expanded, setExpanded] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [showPostForm, setShowPostForm] = useState(false);
   const [showLayersPanel, setShowLayersPanel] = useState(false);
 
+  const searchTimerRef = useRef(null);
   const expandProgress = useSharedValue(0);
   const keyboardOffset = useSharedValue(0);
 
@@ -153,11 +158,30 @@ const ActionButtonCluster = ({
     [navigation, collapse],
   );
 
-  const handleSearchSubmit = useCallback(() => {
-    if (searchQuery.trim() && onSearch) {
-      onSearch(searchQuery);
+  const handleSuggestionPress = useCallback((suggestion) => {
+    setSearchQuery(suggestion.displayName.split(',')[0]);
+    setSuggestions([]);
+    setShowSuggestions(false);
+    Keyboard.dismiss();
+    collapse();
+    if (onSearch) {
+      onSearch(suggestion);
     }
-  }, [searchQuery, onSearch]);
+  }, [onSearch, collapse]);
+
+  const handleSearchSubmit = useCallback(async () => {
+    if (!searchQuery.trim()) return;
+
+    setIsSearching(true);
+    const results = await searchLocations(searchQuery.trim());
+    setIsSearching(false);
+
+    if (results.length > 0) {
+      handleSuggestionPress(results[0]);
+    } else {
+      Alert.alert('No Results', `No locations found for "${searchQuery}"`);
+    }
+  }, [searchQuery, handleSuggestionPress]);
 
   const handlePostFormClose = useCallback(() => {
     setShowPostForm(false);

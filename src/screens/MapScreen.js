@@ -1686,6 +1686,7 @@ const MapScreen = ({ navigation, route }) => {
         visible={showDetailModal}
         pin={selectedPin}
         currentUserId={currentUser?.id}
+        isAdmin={isAdmin}
         pinVoteSummary={pinVoteSummary}
         isSubmittingVote={isSubmittingVote}
         associatedLayers={selectedPinLayers}
