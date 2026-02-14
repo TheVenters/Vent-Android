@@ -18,6 +18,7 @@ const PinDetailModal = ({
   visible,
   pin,
   currentUserId,
+  isAdmin,
   pinVoteSummary,
   isSubmittingVote,
   onVote,
@@ -246,9 +247,9 @@ const PinDetailModal = ({
           </ScrollView>
 
           {/* Actions */}
-          {isOwner && (
+          {(isOwner || isAdmin) && (
             <View style={styles.actions}>
-              {isEditing ? (
+              {isOwner && isEditing ? (
                 <>
                   <TouchableOpacity
                     style={styles.cancelButton}
@@ -275,12 +276,14 @@ const PinDetailModal = ({
                   >
                     <Text style={styles.deleteText}>Delete</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.editButton}
-                    onPress={() => setIsEditing(true)}
-                  >
-                    <Text style={styles.editText}>Edit</Text>
-                  </TouchableOpacity>
+                  {isOwner && (
+                    <TouchableOpacity
+                      style={styles.editButton}
+                      onPress={() => setIsEditing(true)}
+                    >
+                      <Text style={styles.editText}>Edit</Text>
+                    </TouchableOpacity>
+                  )}
                 </>
               )}
             </View>

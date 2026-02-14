@@ -8,7 +8,7 @@ import {
 } from 'react-native';
 import MapView, { Polyline, Polygon, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
-import { supabase, getCurrentUser } from '../services/supabase';
+import { supabase, getCurrentUser, getProfile } from '../services/supabase';
 import { COLORS, SIZES, DEFAULT_REGION, LAYERS, GEOMETRY_TYPES } from '../constants/theme';
 import PinDetailModal from '../components/PinDetailModal';
 import CustomMarker from '../components/CustomMarker';
@@ -22,6 +22,7 @@ const MapScreen = ({ navigation }) => {
   const [region, setRegion] = useState(DEFAULT_REGION);
   const [pins, setPins] = useState([]);
   const [currentUser, setCurrentUser] = useState(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [selectedLayer, setSelectedLayer] = useState(LAYERS.PUBLIC);
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [selectedPin, setSelectedPin] = useState(null);
@@ -53,6 +54,10 @@ const MapScreen = ({ navigation }) => {
   const initializeUser = async () => {
     const user = await getCurrentUser();
     setCurrentUser(user);
+    if (user) {
+      const profile = await getProfile(user.id);
+      setIsAdmin(profile?.is_admin === true);
+    }
   };
 
   const requestLocationPermission = async () => {
@@ -444,6 +449,7 @@ const MapScreen = ({ navigation }) => {
         visible={showDetailModal}
         pin={selectedPin}
         currentUserId={currentUser?.id}
+        isAdmin={isAdmin}
         pinVoteSummary={pinVoteSummary}
         isSubmittingVote={isSubmittingVote}
         onVote={handleVotePin}
