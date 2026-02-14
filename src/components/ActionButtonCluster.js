@@ -1,10 +1,13 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   StyleSheet,
   TouchableOpacity,
   Text,
   TextInput,
+  FlatList,
+  ActivityIndicator,
+  Alert,
   Platform,
   Keyboard,
   Dimensions,
@@ -23,6 +26,7 @@ import {
 } from '../constants/theme';
 import PostCreationForm from './PostCreationForm';
 import { useAppTheme } from '../context/ThemeContext';
+import { searchLocations } from '../services/geocoding';
 
 const MENU_ITEMS = ['Communities', 'Friends', 'Account', 'Layers', 'Add'];
 
@@ -39,15 +43,19 @@ const ActionButtonCluster = ({
   onSearch,
 }) => {
   const { palette } = useAppTheme();
-  const styles = createStyles(palette);
+  const searchBarMaxWidth = Dimensions.get('window').width - ACTION_BUTTON.SIZE - ACTION_BUTTON.GAP - ACTION_BUTTON.MARGIN * 2;
+  const styles = createStyles(palette, searchBarMaxWidth);
   const [expanded, setExpanded] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [showPostForm, setShowPostForm] = useState(false);
   const [showLayerPicker, setShowLayerPicker] = useState(false);
+  const [suggestions, setSuggestions] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState(false);
 
+  const searchTimerRef = useRef(null);
   const expandProgress = useSharedValue(0);
   const keyboardOffset = useSharedValue(0);
-  const searchBarMaxWidth = Dimensions.get('window').width - ACTION_BUTTON.SIZE - ACTION_BUTTON.GAP - ACTION_BUTTON.MARGIN * 2;
 
   useEffect(() => {
     const animateToOffset = (offset, duration = 250) => {
@@ -81,6 +89,35 @@ const ActionButtonCluster = ({
       frameListener?.remove();
     };
   }, [keyboardOffset]);
+
+  // Debounced location search
+  useEffect(() => {
+    if (searchTimerRef.current) {
+      clearTimeout(searchTimerRef.current);
+    }
+
+    const trimmed = searchQuery.trim();
+    if (trimmed.length < 3) {
+      setSuggestions([]);
+      setShowSuggestions(false);
+      setIsSearching(false);
+      return;
+    }
+
+    setIsSearching(true);
+    searchTimerRef.current = setTimeout(async () => {
+      const results = await searchLocations(trimmed);
+      setSuggestions(results);
+      setShowSuggestions(results.length > 0);
+      setIsSearching(false);
+    }, 400);
+
+    return () => {
+      if (searchTimerRef.current) {
+        clearTimeout(searchTimerRef.current);
+      }
+    };
+  }, [searchQuery]);
 
   const toggleExpand = useCallback(() => {
     if (showPostForm) {
@@ -118,6 +155,8 @@ const ActionButtonCluster = ({
     setExpanded(false);
     expandProgress.value = withTiming(0, { duration: 250 });
     setShowLayerPicker(false);
+    setSuggestions([]);
+    setShowSuggestions(false);
     Keyboard.dismiss();
   }, [expandProgress]);
 
@@ -148,11 +187,30 @@ const ActionButtonCluster = ({
     [navigation, collapse]
   );
 
-  const handleSearchSubmit = useCallback(() => {
-    if (searchQuery.trim() && onSearch) {
-      onSearch(searchQuery);
+  const handleSuggestionPress = useCallback((suggestion) => {
+    setSearchQuery(suggestion.displayName.split(',')[0]);
+    setSuggestions([]);
+    setShowSuggestions(false);
+    Keyboard.dismiss();
+    collapse();
+    if (onSearch) {
+      onSearch(suggestion);
     }
-  }, [searchQuery, onSearch]);
+  }, [onSearch, collapse]);
+
+  const handleSearchSubmit = useCallback(async () => {
+    if (!searchQuery.trim()) return;
+
+    setIsSearching(true);
+    const results = await searchLocations(searchQuery.trim());
+    setIsSearching(false);
+
+    if (results.length > 0) {
+      handleSuggestionPress(results[0]);
+    } else {
+      Alert.alert('No Results', `No locations found for "${searchQuery}"`);
+    }
+  }, [searchQuery, handleSuggestionPress]);
 
   const handlePostFormClose = useCallback(() => {
     setShowPostForm(false);
@@ -271,6 +329,34 @@ const ActionButtonCluster = ({
           </TouchableOpacity>
         </Animated.View>
 
+        {/* Search Suggestions */}
+        {expanded && (showSuggestions || isSearching) && (
+          <View style={styles.suggestionsContainer}>
+            {isSearching && suggestions.length === 0 ? (
+              <View style={styles.searchingIndicator}>
+                <ActivityIndicator size="small" color={palette.primary} />
+                <Text style={styles.searchingText}>Searching...</Text>
+              </View>
+            ) : (
+              <FlatList
+                data={suggestions}
+                keyExtractor={(item, index) => `${item.latitude}-${item.longitude}-${index}`}
+                keyboardShouldPersistTaps="handled"
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={styles.suggestionItem}
+                    onPress={() => handleSuggestionPress(item)}
+                  >
+                    <Text style={styles.suggestionText} numberOfLines={2}>
+                      {item.displayName}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              />
+            )}
+          </View>
+        )}
+
         {/* Search bar + A button row */}
         <View style={styles.aRow}>
           <Animated.View style={[styles.searchBar, searchBarStyle]}>
@@ -344,7 +430,7 @@ const ActionButtonCluster = ({
   );
 };
 
-const createStyles = (palette) => StyleSheet.create({
+const createStyles = (palette, searchBarMaxWidth) => StyleSheet.create({
   overlay: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'flex-end',
@@ -473,6 +559,41 @@ const createStyles = (palette) => StyleSheet.create({
   },
   layerOptionTextActive: {
     color: palette.onPrimary,
+  },
+  suggestionsContainer: {
+    backgroundColor: palette.surface,
+    borderRadius: SIZES.radiusLg,
+    marginBottom: ACTION_BUTTON.GAP,
+    maxHeight: 200,
+    width: searchBarMaxWidth + ACTION_BUTTON.SIZE + ACTION_BUTTON.GAP,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 10,
+    overflow: 'hidden',
+  },
+  suggestionItem: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.border,
+  },
+  suggestionText: {
+    fontSize: 14,
+    color: palette.text,
+    lineHeight: 19,
+  },
+  searchingIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    gap: 8,
+  },
+  searchingText: {
+    fontSize: 13,
+    color: palette.subtext,
   },
 });
 
