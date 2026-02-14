@@ -173,11 +173,15 @@ const ActionButtonCluster = ({
     [onPostSubmit],
   );
 
+  const screenWidth = Dimensions.get("window").width;
+  const searchBarMaxWidth =
+    screenWidth - ACTION_BUTTON.MARGIN * 2 - ACTION_BUTTON.SIZE - ACTION_BUTTON.GAP;
+
   const searchBarStyle = useAnimatedStyle(() => {
     const width = interpolate(
       expandProgress.value,
       [0, 1],
-      [0, 240],
+      [0, searchBarMaxWidth],
       Extrapolation.CLAMP,
     );
     const opacity = interpolate(
@@ -466,8 +470,8 @@ const createStyles = (palette) =>
     },
     menuItem: {
       backgroundColor: palette.surface,
+      width: 120,
       borderRadius: ACTION_BUTTON.SIZE / 2,
-      paddingHorizontal: 20,
       paddingVertical: 12,
       marginBottom: 2,
       shadowColor: "#000",
@@ -475,7 +479,6 @@ const createStyles = (palette) =>
       shadowOpacity: 0.15,
       shadowRadius: 6,
       elevation: 1000,
-      minWidth: ACTION_BUTTON.SIZE,
       alignItems: "center",
       zIndex: 1000,
     },
