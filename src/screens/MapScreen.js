@@ -273,6 +273,7 @@ const MapScreen = ({ navigation, route }) => {
   const [selectedCloud, setSelectedCloud] = useState(null);
 
   const mapRef = useRef(null);
+  const isAdmin = Boolean(currentUser?.user_metadata?.is_admin);
 
   const resolveCurrentUserId = useCallback(async () => {
     // For RLS-gated writes, we must ensure there is an active session so auth.uid()
