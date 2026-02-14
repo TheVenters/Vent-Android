@@ -1,53 +1,16 @@
-import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
-import { Marker, Callout } from 'react-native-maps';
-import { COLORS, SIZES, PIN_TYPES } from '../constants/theme';
+import React from "react";
+import { View, Text, StyleSheet, Image } from "react-native";
+import { Marker, Callout } from "react-native-maps";
+import { COLORS } from "../constants/theme";
 
 const CustomMarker = ({ pin, onPress }) => {
-  const formatTimestamp = (dateString) => {
-    if (!dateString) return 'Just now';
-    const date = new Date(dateString);
-    if (Number.isNaN(date.getTime())) return 'Just now';
-
-    return date.toLocaleString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-    });
-  };
-
   const getMarkerColor = () => {
-    switch (pin.type) {
-      case PIN_TYPES.PHOTO:
-        return COLORS.success;
-      case PIN_TYPES.TEXT:
-        return COLORS.warning;
-      case PIN_TYPES.VIDEO:
-        return COLORS.danger;
-      default:
-        return COLORS.primary;
-    }
+    return COLORS.primary;
   };
 
-  const getMarkerIcon = () => {
-    switch (pin.type) {
-      case PIN_TYPES.PHOTO:
-      case 'photo':
-        return '📷';
-      case PIN_TYPES.TEXT:
-      case 'text':
-        return '📝';
-      case PIN_TYPES.VIDEO:
-      case 'video':
-        return '🎬';
-      case PIN_TYPES.MEDIA:
-      case 'media':
-        return pin.media_type === 'video' ? '🎬' : '📷';
-      default:
-        return '📍';
-    }
+  const getInitial = () => {
+    const source = String(pin.author_username || pin.author_name || "?").trim();
+    return source ? source.charAt(0).toUpperCase() : "?";
   };
 
   return (
@@ -56,12 +19,27 @@ const CustomMarker = ({ pin, onPress }) => {
         latitude: pin.lat,
         longitude: pin.lng,
       }}
-      onPress={() => onPress && onPress(pin)}
     >
       <View style={styles.markerWrap}>
-        {pin.posted_from_current_location && <View style={styles.locationFlareRing} />}
-        <View style={[styles.markerContainer, { backgroundColor: getMarkerColor() }]}>
-          <Text style={styles.markerIcon}>{getMarkerIcon()}</Text>
+        {pin.posted_from_current_location && (
+          <View style={styles.locationFlareRing} />
+        )}
+        <View
+          style={[
+            styles.markerContainer,
+            { backgroundColor: getMarkerColor() },
+          ]}
+        >
+          {pin.layer_emoji ? (
+            <Text style={styles.markerIcon}>{pin.layer_emoji}</Text>
+          ) : pin.author_avatar_url ? (
+            <Image
+              source={{ uri: pin.author_avatar_url }}
+              style={styles.avatarImage}
+            />
+          ) : (
+            <Text style={styles.markerInitial}>{getInitial()}</Text>
+          )}
         </View>
         {pin.posted_from_current_location && (
           <View style={styles.locationFlareBadge}>
@@ -71,28 +49,11 @@ const CustomMarker = ({ pin, onPress }) => {
       </View>
       <Callout onPress={() => onPress && onPress(pin)}>
         <View style={styles.callout}>
-          <Text style={styles.authorName}>
-            {pin.author_name || 'Anonymous'}
+          <Text style={styles.calloutTitle}>{pin.caption || "Untitled"}</Text>
+          <Text style={styles.calloutMeta}>
+            {(pin.author_name || "Anonymous").trim()}
           </Text>
-          {pin.author_username && (
-            <Text style={styles.username}>@{pin.author_username}</Text>
-          )}
-          <Text style={styles.title}>
-            {pin.caption || 'Untitled'}
-          </Text>
-          <Text style={styles.content}>
-            {pin.content || 'No caption'}
-          </Text>
-          {pin.posted_from_current_location && (
-            <Text style={styles.locationFlareText}>Posted from current location</Text>
-          )}
-          {pin.media_url && (
-            <Text style={styles.mediaLabel}>
-              {pin.media_type === 'video' ? '🎬 Video' : '📷 Photo'}
-            </Text>
-          )}
-          <Text style={styles.timestamp}>🕒 {formatTimestamp(pin.created_at)}</Text>
-          <Text style={styles.tapHint}>Tap for details</Text>
+          <Text style={styles.calloutHint}>Tap to open post details</Text>
         </View>
       </Callout>
     </Marker>
@@ -101,105 +62,89 @@ const CustomMarker = ({ pin, onPress }) => {
 
 const styles = StyleSheet.create({
   markerWrap: {
-    width: 56,
-    height: 56,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  locationFlareRing: {
-    position: 'absolute',
     width: 52,
     height: 52,
-    borderRadius: 26,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  locationFlareRing: {
+    position: "absolute",
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     borderWidth: 2,
-    borderColor: 'rgba(255, 122, 89, 0.75)',
-    backgroundColor: 'rgba(255, 122, 89, 0.12)',
+    borderColor: "rgba(255, 122, 89, 0.75)",
+    backgroundColor: "rgba(255, 122, 89, 0.12)",
     top: 2,
     left: 2,
   },
   markerContainer: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    justifyContent: "center",
+    alignItems: "center",
     borderWidth: 2,
     borderColor: COLORS.white,
-    shadowColor: 'transparent',
+    shadowColor: "transparent",
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0,
     shadowRadius: 0,
     elevation: 0,
   },
   markerIcon: {
-    fontSize: 18,
+    fontSize: 17,
+  },
+  markerInitial: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: COLORS.white,
+  },
+  avatarImage: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
   },
   locationFlareBadge: {
-    position: 'absolute',
-    top: 6,
-    right: 4,
+    position: "absolute",
+    top: 5,
+    right: 5,
     width: 16,
     height: 16,
     borderRadius: 8,
-    backgroundColor: '#FF7A59',
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: "#FF7A59",
+    alignItems: "center",
+    justifyContent: "center",
     borderWidth: 1,
     borderColor: COLORS.white,
   },
   locationFlareBadgeText: {
     color: COLORS.white,
     fontSize: 9,
-    fontWeight: '700',
+    fontWeight: "700",
     lineHeight: 10,
   },
   callout: {
-    minWidth: 200,
-    padding: SIZES.md,
+    minWidth: 180,
+    maxWidth: 240,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
   },
-  authorName: {
-    fontSize: SIZES.md,
-    fontWeight: '700',
+  calloutTitle: {
+    fontSize: 15,
+    fontWeight: "700",
     color: COLORS.dark,
-    marginBottom: SIZES.xs,
+    marginBottom: 2,
   },
-  username: {
-    fontSize: SIZES.sm,
-    color: COLORS.primary,
-    marginBottom: SIZES.sm,
-  },
-  content: {
-    fontSize: SIZES.sm,
-    color: COLORS.dark,
-    marginBottom: SIZES.sm,
-  },
-  title: {
-    fontSize: SIZES.sm,
-    fontWeight: '700',
-    color: COLORS.dark,
-    marginBottom: SIZES.xs,
-  },
-  mediaLabel: {
-    fontSize: SIZES.xs,
+  calloutMeta: {
+    fontSize: 12,
     color: COLORS.gray,
-    fontStyle: 'italic',
   },
-  locationFlareText: {
-    fontSize: SIZES.xs,
-    color: '#FF7A59',
-    fontWeight: '700',
-    marginBottom: SIZES.xs,
-  },
-  timestamp: {
-    fontSize: SIZES.xs,
-    color: COLORS.gray,
-    marginTop: SIZES.xs,
-  },
-  tapHint: {
-    fontSize: SIZES.xs,
+  calloutHint: {
+    fontSize: 12,
     color: COLORS.primary,
-    marginTop: SIZES.sm,
-    fontWeight: '600',
+    marginTop: 6,
+    fontWeight: "600",
   },
 });
 

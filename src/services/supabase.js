@@ -19,6 +19,25 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   },
 });
 
+// For rare cases where we must guarantee the Authorization header is present
+// (e.g. debugging RLS writes), create a short-lived client pinned to a token.
+export const supabaseWithAccessToken = (accessToken) => {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !accessToken) return supabase;
+  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    global: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    },
+    auth: {
+      storage: AsyncStorage,
+      autoRefreshToken: false,
+      persistSession: false,
+      detectSessionInUrl: false,
+    },
+  });
+};
+
 // Helper functions
 export const getCurrentUser = async () => {
   const { data: { user } } = await supabase.auth.getUser();

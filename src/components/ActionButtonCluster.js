@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect } from "react";
 import {
   View,
   StyleSheet,
@@ -11,47 +11,44 @@ import {
   Platform,
   Keyboard,
   Dimensions,
-} from 'react-native';
+} from "react-native";
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withTiming,
   interpolate,
   Extrapolation,
-} from 'react-native-reanimated';
-import {
-  SIZES,
-  ACTION_BUTTON,
-  LAYERS,
-} from '../constants/theme';
-import PostCreationForm from './PostCreationForm';
-import { useAppTheme } from '../context/ThemeContext';
-import { searchLocations } from '../services/geocoding';
-
-const MENU_ITEMS = ['Communities', 'Friends', 'Account', 'Layers', 'Add'];
+} from "react-native-reanimated";
+import { ACTION_BUTTON } from "../constants/theme";
+import PostCreationForm from "./PostCreationForm";
+import LayersControlPanel from "./LayersControlPanel";
+import { useAppTheme } from "../context/ThemeContext";
 
 const ActionButtonCluster = ({
   navigation,
   mapRef,
   pins,
-  selectedLayer,
-  onLayerChange,
+  layers,
+  selectedLayerId,
+  layersLoading,
+  onSelectLayer,
+  onOpenLayerPosts,
+  onToggleLayer,
+  onMoveLayer,
+  onRefreshLayers,
   onPostSubmit,
   userLocation,
-  isDrawingMode,
-  onStartDrawing,
   onSearch,
+  mapMode,
+  onToggleMapMode,
 }) => {
   const { palette } = useAppTheme();
   const searchBarMaxWidth = Dimensions.get('window').width - ACTION_BUTTON.SIZE - ACTION_BUTTON.GAP - ACTION_BUTTON.MARGIN * 2;
   const styles = createStyles(palette, searchBarMaxWidth);
   const [expanded, setExpanded] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState("");
   const [showPostForm, setShowPostForm] = useState(false);
-  const [showLayerPicker, setShowLayerPicker] = useState(false);
-  const [suggestions, setSuggestions] = useState([]);
-  const [isSearching, setIsSearching] = useState(false);
-  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [showLayersPanel, setShowLayersPanel] = useState(false);
 
   const searchTimerRef = useRef(null);
   const expandProgress = useSharedValue(0);
@@ -63,7 +60,7 @@ const ActionButtonCluster = ({
     };
 
     const handleKeyboardChange = (event) => {
-      const screenHeight = Dimensions.get('window').height;
+      const screenHeight = Dimensions.get("window").height;
       const endY = event?.endCoordinates?.screenY ?? screenHeight;
       const nextOffset = Math.max(0, screenHeight - endY);
       animateToOffset(nextOffset, event?.duration ?? 250);
@@ -73,9 +70,11 @@ const ActionButtonCluster = ({
       animateToOffset(0, event?.duration ?? 250);
     };
 
-    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-    const frameEvent = Platform.OS === 'ios' ? 'keyboardWillChangeFrame' : null;
+    const showEvent =
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent =
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    const frameEvent = Platform.OS === "ios" ? "keyboardWillChangeFrame" : null;
 
     const showListener = Keyboard.addListener(showEvent, handleKeyboardChange);
     const hideListener = Keyboard.addListener(hideEvent, handleKeyboardHide);
@@ -90,34 +89,11 @@ const ActionButtonCluster = ({
     };
   }, [keyboardOffset]);
 
-  // Debounced location search
-  useEffect(() => {
-    if (searchTimerRef.current) {
-      clearTimeout(searchTimerRef.current);
-    }
-
-    const trimmed = searchQuery.trim();
-    if (trimmed.length < 3) {
-      setSuggestions([]);
-      setShowSuggestions(false);
-      setIsSearching(false);
-      return;
-    }
-
-    setIsSearching(true);
-    searchTimerRef.current = setTimeout(async () => {
-      const results = await searchLocations(trimmed);
-      setSuggestions(results);
-      setShowSuggestions(results.length > 0);
-      setIsSearching(false);
-    }, 400);
-
-    return () => {
-      if (searchTimerRef.current) {
-        clearTimeout(searchTimerRef.current);
-      }
-    };
-  }, [searchQuery]);
+  const collapse = useCallback(() => {
+    setExpanded(false);
+    expandProgress.value = withTiming(0, { duration: 250 });
+    Keyboard.dismiss();
+  }, [expandProgress]);
 
   const toggleExpand = useCallback(() => {
     if (showPostForm) {
@@ -125,15 +101,18 @@ const ActionButtonCluster = ({
       return;
     }
 
-    if (expanded) {
-      expandProgress.value = withTiming(0, { duration: 250 });
-      setShowLayerPicker(false);
-      Keyboard.dismiss();
-    } else {
-      expandProgress.value = withTiming(1, { duration: 250 });
+    if (showLayersPanel) {
+      setShowLayersPanel(false);
     }
-    setExpanded(!expanded);
-  }, [expanded, showPostForm, expandProgress]);
+
+    if (expanded) {
+      collapse();
+      return;
+    }
+
+    expandProgress.value = withTiming(1, { duration: 250 });
+    setExpanded(true);
+  }, [collapse, expanded, expandProgress, showLayersPanel, showPostForm]);
 
   const goToRandomPin = useCallback(() => {
     if (!pins || pins.length === 0) return;
@@ -146,45 +125,37 @@ const ActionButtonCluster = ({
           latitudeDelta: 0.01,
           longitudeDelta: 0.01,
         },
-        500
+        500,
       );
     }
   }, [pins, mapRef]);
 
-  const collapse = useCallback(() => {
-    setExpanded(false);
-    expandProgress.value = withTiming(0, { duration: 250 });
-    setShowLayerPicker(false);
-    setSuggestions([]);
-    setShowSuggestions(false);
-    Keyboard.dismiss();
-  }, [expandProgress]);
-
   const handleMenuPress = useCallback(
     (item) => {
       switch (item) {
-        case 'Communities':
-          navigation.navigate('Communities');
+        case "Communities":
+          navigation.navigate("Communities");
           collapse();
           break;
-        case 'Friends':
-          navigation.navigate('Friends');
+        case "Friends":
+          navigation.navigate("Friends");
           collapse();
           break;
-        case 'Account':
-          navigation.navigate('Account');
+        case "Account":
+          navigation.navigate("Account");
           collapse();
           break;
-        case 'Layers':
-          setShowLayerPicker((prev) => !prev);
+        case "Layers":
+          setShowLayersPanel(true);
+          collapse();
           break;
-        case 'Add':
+        case "Add":
           setShowPostForm(true);
           collapse();
           break;
       }
     },
-    [navigation, collapse]
+    [navigation, collapse],
   );
 
   const handleSuggestionPress = useCallback((suggestion) => {
@@ -223,79 +194,81 @@ const ActionButtonCluster = ({
       }
       setShowPostForm(false);
     },
-    [onPostSubmit]
+    [onPostSubmit],
   );
 
-  // Search bar expands leftward in same row as A button
   const searchBarStyle = useAnimatedStyle(() => {
     const width = interpolate(
       expandProgress.value,
       [0, 1],
-      [0, searchBarMaxWidth],
-      Extrapolation.CLAMP
+      [0, 240],
+      Extrapolation.CLAMP,
     );
     const opacity = interpolate(
       expandProgress.value,
       [0, 0.3, 1],
       [0, 0, 1],
-      Extrapolation.CLAMP
+      Extrapolation.CLAMP,
     );
-    return { width, opacity, overflow: 'hidden' };
+    return { width, opacity, overflow: "hidden" };
   });
 
-  // Arrow button fades out when expanded
   const arrowButtonStyle = useAnimatedStyle(() => {
     const opacity = interpolate(
       expandProgress.value,
       [0, 0.5, 1],
       [1, 0, 0],
-      Extrapolation.CLAMP
+      Extrapolation.CLAMP,
     );
     const scale = interpolate(
       expandProgress.value,
       [0, 0.5, 1],
       [1, 0.5, 0.5],
-      Extrapolation.CLAMP
+      Extrapolation.CLAMP,
     );
     const height = interpolate(
       expandProgress.value,
       [0, 1],
       [ACTION_BUTTON.SIZE + 2, 0],
-      Extrapolation.CLAMP
+      Extrapolation.CLAMP,
     );
     const marginBottom = interpolate(
       expandProgress.value,
       [0, 1],
       [2, 0],
-      Extrapolation.CLAMP
+      Extrapolation.CLAMP,
     );
-    return { opacity, transform: [{ scale }], height, marginBottom, overflow: 'hidden' };
+    return {
+      opacity,
+      transform: [{ scale }],
+      height,
+      marginBottom,
+      overflow: "hidden",
+    };
   });
 
-  // Vertical menu slides up from bottom
   const menuStyle = useAnimatedStyle(() => {
     const translateY = interpolate(
       expandProgress.value,
       [0, 1],
       [100, 0],
-      Extrapolation.CLAMP
+      Extrapolation.CLAMP,
     );
     const opacity = interpolate(
       expandProgress.value,
       [0, 0.3, 1],
       [0, 0, 1],
-      Extrapolation.CLAMP
+      Extrapolation.CLAMP,
     );
     return { transform: [{ translateY }], opacity };
   });
-
   const keyboardShiftStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: -keyboardOffset.value }],
   }));
+  const menuItems = ["Communities", "Friends", "Account", "Layers", "Add"];
 
   return (
     <View style={styles.overlay} pointerEvents="box-none">
-      {/* Backdrop to dismiss keyboard/menu when tapping outside */}
       {expanded && (
         <TouchableOpacity
           style={StyleSheet.absoluteFillObject}
@@ -304,11 +277,9 @@ const ActionButtonCluster = ({
         />
       )}
 
-      {/* Bottom-right column: menu items stacked above, then arrow, then search+A row */}
       <Animated.View style={[styles.column, keyboardShiftStyle]}>
-        {/* Vertical menu items — stacked above the A button */}
         <Animated.View style={[styles.menuColumn, menuStyle]}>
-          {MENU_ITEMS.map((item) => (
+          {menuItems.map((item) => (
             <TouchableOpacity
               key={item}
               style={styles.menuItem}
@@ -317,47 +288,55 @@ const ActionButtonCluster = ({
               <Text style={styles.menuItemText}>{item}</Text>
             </TouchableOpacity>
           ))}
+          <View style={styles.mapModeRow}>
+            <TouchableOpacity
+              style={[
+                styles.mapModePill,
+                mapMode !== "explore" && styles.mapModePillActive,
+              ]}
+              onPress={() =>
+                mapMode === "explore" && onToggleMapMode && onToggleMapMode()
+              }
+            >
+              <Text
+                style={[
+                  styles.mapModePillText,
+                  mapMode !== "explore" && styles.mapModePillTextActive,
+                ]}
+              >
+                UserMap
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.mapModePill,
+                mapMode === "explore" && styles.mapModePillActive,
+              ]}
+              onPress={() =>
+                mapMode !== "explore" && onToggleMapMode && onToggleMapMode()
+              }
+            >
+              <Text
+                style={[
+                  styles.mapModePillText,
+                  mapMode === "explore" && styles.mapModePillTextActive,
+                ]}
+              >
+                Explore
+              </Text>
+            </TouchableOpacity>
+          </View>
         </Animated.View>
 
-        {/* Arrow Button — above A, visible when collapsed */}
         <Animated.View style={arrowButtonStyle}>
           <TouchableOpacity
             style={[styles.button, styles.arrowButton]}
             onPress={goToRandomPin}
           >
-            <Text style={styles.buttonText}>{'➜'}</Text>
+            <Text style={styles.buttonText}>{"➜"}</Text>
           </TouchableOpacity>
         </Animated.View>
 
-        {/* Search Suggestions */}
-        {expanded && (showSuggestions || isSearching) && (
-          <View style={styles.suggestionsContainer}>
-            {isSearching && suggestions.length === 0 ? (
-              <View style={styles.searchingIndicator}>
-                <ActivityIndicator size="small" color={palette.primary} />
-                <Text style={styles.searchingText}>Searching...</Text>
-              </View>
-            ) : (
-              <FlatList
-                data={suggestions}
-                keyExtractor={(item, index) => `${item.latitude}-${item.longitude}-${index}`}
-                keyboardShouldPersistTaps="handled"
-                renderItem={({ item }) => (
-                  <TouchableOpacity
-                    style={styles.suggestionItem}
-                    onPress={() => handleSuggestionPress(item)}
-                  >
-                    <Text style={styles.suggestionText} numberOfLines={2}>
-                      {item.displayName}
-                    </Text>
-                  </TouchableOpacity>
-                )}
-              />
-            )}
-          </View>
-        )}
-
-        {/* Search bar + A button row */}
         <View style={styles.aRow}>
           <Animated.View style={[styles.searchBar, searchBarStyle]}>
             <TextInput
@@ -380,221 +359,155 @@ const ActionButtonCluster = ({
         </View>
       </Animated.View>
 
-      {/* Layer Picker — rendered last so it's on top */}
-      {showLayerPicker && (
-        <>
-          <TouchableOpacity
-            style={styles.layerBackdrop}
-            activeOpacity={1}
-            onPress={() => { setShowLayerPicker(false); Keyboard.dismiss(); }}
-          />
-          <View style={styles.layerPickerContainer}>
-            {Object.values(LAYERS).map((layer) => (
-              <TouchableOpacity
-                key={layer}
-                style={[
-                  styles.layerOption,
-                  selectedLayer === layer && styles.layerOptionActive,
-                ]}
-                onPress={() => {
-                  onLayerChange(layer);
-                  setShowLayerPicker(false);
-                }}
-              >
-                <Text
-                  style={[
-                    styles.layerOptionText,
-                    selectedLayer === layer && styles.layerOptionTextActive,
-                  ]}
-                >
-                  {layer.charAt(0).toUpperCase() + layer.slice(1)}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </>
-      )}
+      <LayersControlPanel
+        visible={showLayersPanel}
+        onClose={() => setShowLayersPanel(false)}
+        layers={layers}
+        selectedLayerId={selectedLayerId}
+        isLoading={layersLoading}
+        onSelectLayer={(layerId) => {
+          onSelectLayer(layerId);
+        }}
+        onOpenLayerPosts={onOpenLayerPosts}
+        onToggleLayer={onToggleLayer}
+        onMoveLayer={onMoveLayer}
+        onRefresh={onRefreshLayers}
+      />
 
-      {/* Post Creation Form — uses Modal internally */}
       <PostCreationForm
         visible={showPostForm}
         onClose={handlePostFormClose}
         onSubmit={handlePostFormSubmit}
-        selectedLayer={selectedLayer}
-        onLayerChange={onLayerChange}
+        layers={layers}
+        selectedLayerId={selectedLayerId}
         userLocation={userLocation}
-        isDrawingMode={isDrawingMode}
-        onStartDrawing={onStartDrawing}
       />
     </View>
   );
 };
 
-const createStyles = (palette, searchBarMaxWidth) => StyleSheet.create({
-  overlay: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'flex-end',
-    alignItems: 'flex-end',
-    padding: ACTION_BUTTON.MARGIN,
-    paddingBottom: ACTION_BUTTON.MARGIN + (Platform.OS === 'ios' ? 20 : 0),
-    zIndex: 999,
-    elevation: 999,
-  },
-  column: {
-    alignItems: 'flex-end',
-    zIndex: 999,
-    elevation: 999,
-  },
-  aRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  button: {
-    width: ACTION_BUTTON.SIZE,
-    height: ACTION_BUTTON.SIZE,
-    borderRadius: ACTION_BUTTON.SIZE / 2,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 8,
-  },
-  arrowButton: {
-    backgroundColor: palette.surface,
-    shadowColor: 'transparent',
-    shadowOpacity: 0,
-    shadowRadius: 0,
-    shadowOffset: { width: 0, height: 0 },
-    elevation: 0,
-  },
-  aButton: {
-    backgroundColor: palette.primary,
-  },
-  buttonText: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: palette.text,
-  },
-  aButtonText: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: palette.onPrimary,
-  },
-  searchBar: {
-    height: ACTION_BUTTON.SIZE,
-    backgroundColor: palette.surface,
-    borderRadius: ACTION_BUTTON.SIZE / 2,
-    marginRight: ACTION_BUTTON.GAP,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 6,
-    elevation: 5,
-    justifyContent: 'center',
-  },
-  searchInput: {
-    paddingHorizontal: 20,
-    fontSize: 15,
-    color: palette.text,
-  },
-  menuColumn: {
-    alignItems: 'flex-end',
-    marginBottom: ACTION_BUTTON.GAP,
-    zIndex: 1000,
-    elevation: 1000,
-  },
-  menuItem: {
-    backgroundColor: palette.surface,
-    borderRadius: ACTION_BUTTON.SIZE / 2,
-    width: 130,
-    height: 42,
-    justifyContent: 'center',
-    marginBottom: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 6,
-    elevation: 1000,
-    alignItems: 'center',
-    zIndex: 1000,
-  },
-  menuItemText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: palette.text,
-  },
-  layerBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 1999,
-    elevation: 1999,
-  },
-  layerPickerContainer: {
-    position: 'absolute',
-    bottom: 200 + (Platform.OS === 'ios' ? 20 : 0),
-    right: ACTION_BUTTON.MARGIN,
-    backgroundColor: palette.surface,
-    borderRadius: SIZES.radiusLg,
-    padding: SIZES.sm,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 10,
-    elevation: 2000,
-    zIndex: 2000,
-  },
-  layerOption: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: SIZES.radius,
-  },
-  layerOptionActive: {
-    backgroundColor: palette.primary,
-  },
-  layerOptionText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: palette.text,
-  },
-  layerOptionTextActive: {
-    color: palette.onPrimary,
-  },
-  suggestionsContainer: {
-    backgroundColor: palette.surface,
-    borderRadius: SIZES.radiusLg,
-    marginBottom: ACTION_BUTTON.GAP,
-    maxHeight: 200,
-    width: searchBarMaxWidth + ACTION_BUTTON.SIZE + ACTION_BUTTON.GAP,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 10,
-    overflow: 'hidden',
-  },
-  suggestionItem: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: palette.border,
-  },
-  suggestionText: {
-    fontSize: 14,
-    color: palette.text,
-    lineHeight: 19,
-  },
-  searchingIndicator: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    gap: 8,
-  },
-  searchingText: {
-    fontSize: 13,
-    color: palette.subtext,
-  },
-});
+const createStyles = (palette) =>
+  StyleSheet.create({
+    overlay: {
+      ...StyleSheet.absoluteFillObject,
+      justifyContent: "flex-end",
+      alignItems: "flex-end",
+      padding: ACTION_BUTTON.MARGIN,
+      paddingBottom: ACTION_BUTTON.MARGIN + (Platform.OS === "ios" ? 20 : 0),
+      zIndex: 999,
+      elevation: 999,
+    },
+    column: {
+      alignItems: "flex-end",
+      zIndex: 999,
+      elevation: 999,
+    },
+    aRow: {
+      flexDirection: "row",
+      alignItems: "center",
+    },
+    button: {
+      width: ACTION_BUTTON.SIZE,
+      height: ACTION_BUTTON.SIZE,
+      borderRadius: ACTION_BUTTON.SIZE / 2,
+      justifyContent: "center",
+      alignItems: "center",
+      shadowColor: "#000",
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.3,
+      shadowRadius: 8,
+      elevation: 8,
+    },
+    arrowButton: {
+      backgroundColor: palette.surface,
+      shadowColor: "transparent",
+      shadowOpacity: 0,
+      shadowRadius: 0,
+      shadowOffset: { width: 0, height: 0 },
+      elevation: 0,
+    },
+    aButton: {
+      backgroundColor: palette.primary,
+    },
+    buttonText: {
+      fontSize: 22,
+      fontWeight: "700",
+      color: palette.text,
+    },
+    aButtonText: {
+      fontSize: 18,
+      fontWeight: "700",
+      color: palette.onPrimary,
+    },
+    searchBar: {
+      height: ACTION_BUTTON.SIZE,
+      backgroundColor: palette.surface,
+      borderRadius: ACTION_BUTTON.SIZE / 2,
+      marginRight: ACTION_BUTTON.GAP,
+      shadowColor: "#000",
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.15,
+      shadowRadius: 6,
+      elevation: 5,
+      justifyContent: "center",
+    },
+    searchInput: {
+      paddingHorizontal: 20,
+      fontSize: 15,
+      color: palette.text,
+    },
+    menuColumn: {
+      alignItems: "flex-end",
+      marginBottom: 2,
+      zIndex: 1000,
+      elevation: 1000,
+    },
+    mapModeRow: {
+      flexDirection: "row",
+      backgroundColor: palette.surface,
+      borderRadius: 999,
+      padding: 4,
+      marginBottom: 2,
+      borderWidth: 1,
+      borderColor: palette.border,
+      gap: 4,
+    },
+    mapModePill: {
+      paddingHorizontal: 12,
+      paddingVertical: 7,
+      borderRadius: 999,
+    },
+    mapModePillActive: {
+      backgroundColor: palette.primary,
+    },
+    mapModePillText: {
+      fontSize: 12,
+      fontWeight: "700",
+      color: palette.subtext,
+    },
+    mapModePillTextActive: {
+      color: palette.onPrimary,
+    },
+    menuItem: {
+      backgroundColor: palette.surface,
+      borderRadius: ACTION_BUTTON.SIZE / 2,
+      paddingHorizontal: 20,
+      paddingVertical: 12,
+      marginBottom: 2,
+      shadowColor: "#000",
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.15,
+      shadowRadius: 6,
+      elevation: 1000,
+      minWidth: ACTION_BUTTON.SIZE,
+      alignItems: "center",
+      zIndex: 1000,
+    },
+    menuItemText: {
+      fontSize: 14,
+      fontWeight: "600",
+      color: palette.text,
+    },
+  });
 
 export default ActionButtonCluster;
