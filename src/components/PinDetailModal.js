@@ -18,6 +18,7 @@ const PinDetailModal = ({
   visible,
   pin,
   currentUserId,
+  isAdmin,
   pinVoteSummary,
   isSubmittingVote,
   associatedLayers,
@@ -63,15 +64,15 @@ const PinDetailModal = ({
   }, [pin?.media_url, pin?.media_type]);
 
   const handleSave = () => {
-    if (isMediaPin) {
-      onUpdate(pin.id, { caption });
-    } else {
-      if (!content.trim()) {
-        Alert.alert("Error", "Content cannot be empty");
-        return;
-      }
-      onUpdate(pin.id, { content });
+    if (!isMediaPin && !content.trim()) {
+      Alert.alert("Error", "Content cannot be empty");
+      return;
     }
+    const updates = { caption };
+    if (!isMediaPin) {
+      updates.content = content;
+    }
+    onUpdate(pin.id, updates);
     setIsEditing(false);
   };
 
@@ -160,20 +161,29 @@ const PinDetailModal = ({
             {/* Content/Caption */}
             {isEditing ? (
               <View style={styles.editContainer}>
-                <Text style={styles.label}>
-                  {isMediaPin ? "Caption" : "Content"}
-                </Text>
+                <Text style={styles.label}>Title</Text>
                 <TextInput
-                  style={[styles.input, styles.textArea]}
-                  value={isMediaPin ? caption : content}
-                  onChangeText={isMediaPin ? setCaption : setContent}
-                  multiline
-                  numberOfLines={4}
-                  textAlignVertical="top"
-                  placeholder={
-                    isMediaPin ? "Edit caption..." : "Edit content..."
-                  }
+                  style={styles.input}
+                  value={caption}
+                  onChangeText={setCaption}
+                  placeholder="Edit title..."
                 />
+                {!isMediaPin && (
+                  <>
+                    <Text style={[styles.label, { marginTop: SIZES.md }]}>
+                      Content
+                    </Text>
+                    <TextInput
+                      style={[styles.input, styles.textArea]}
+                      value={content}
+                      onChangeText={setContent}
+                      multiline
+                      numberOfLines={4}
+                      textAlignVertical="top"
+                      placeholder="Edit content..."
+                    />
+                  </>
+                )}
               </View>
             ) : (
               <View style={styles.contentContainer}>
@@ -256,7 +266,7 @@ const PinDetailModal = ({
           </ScrollView>
 
           {/* Actions */}
-          {isOwner && (
+          {(isOwner || isAdmin) && (
             <View style={styles.actions}>
               {isEditing ? (
                 <>
@@ -285,12 +295,14 @@ const PinDetailModal = ({
                   >
                     <Text style={styles.deleteText}>Delete</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.editButton}
-                    onPress={() => setIsEditing(true)}
-                  >
-                    <Text style={styles.editText}>Edit</Text>
-                  </TouchableOpacity>
+                  {isOwner && (
+                    <TouchableOpacity
+                      style={styles.editButton}
+                      onPress={() => setIsEditing(true)}
+                    >
+                      <Text style={styles.editText}>Edit</Text>
+                    </TouchableOpacity>
+                  )}
                 </>
               )}
             </View>
