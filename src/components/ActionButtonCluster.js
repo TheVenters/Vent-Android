@@ -47,6 +47,7 @@ const ActionButtonCluster = ({
 
   const expandProgress = useSharedValue(0);
   const keyboardOffset = useSharedValue(0);
+  const searchBarMaxWidth = Dimensions.get('window').width - ACTION_BUTTON.SIZE - ACTION_BUTTON.GAP - ACTION_BUTTON.MARGIN * 2;
 
   useEffect(() => {
     const animateToOffset = (offset, duration = 250) => {
@@ -172,7 +173,7 @@ const ActionButtonCluster = ({
     const width = interpolate(
       expandProgress.value,
       [0, 1],
-      [0, 240],
+      [0, searchBarMaxWidth],
       Extrapolation.CLAMP
     );
     const opacity = interpolate(
@@ -421,15 +422,15 @@ const createStyles = (palette) => StyleSheet.create({
   menuItem: {
     backgroundColor: palette.surface,
     borderRadius: ACTION_BUTTON.SIZE / 2,
-    paddingHorizontal: 20,
-    paddingVertical: 12,
+    width: 130,
+    height: 42,
+    justifyContent: 'center',
     marginBottom: 2,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.15,
     shadowRadius: 6,
     elevation: 1000,
-    minWidth: ACTION_BUTTON.SIZE,
     alignItems: 'center',
     zIndex: 1000,
   },
