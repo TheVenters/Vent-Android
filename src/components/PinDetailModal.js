@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from "react";
 import {
   View,
   Modal,
@@ -11,8 +11,8 @@ import {
   Platform,
   Image,
   Alert,
-} from 'react-native';
-import { COLORS, SIZES } from '../constants/theme';
+} from "react-native";
+import { COLORS, SIZES } from "../constants/theme";
 
 const PinDetailModal = ({
   visible,
@@ -20,29 +20,31 @@ const PinDetailModal = ({
   currentUserId,
   pinVoteSummary,
   isSubmittingVote,
+  associatedLayers,
   onVote,
   onClose,
   onUpdate,
   onDelete,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
-  const [content, setContent] = useState('');
-  const [caption, setCaption] = useState('');
+  const [content, setContent] = useState("");
+  const [caption, setCaption] = useState("");
   const [mediaAspectRatio, setMediaAspectRatio] = useState(4 / 3);
 
   const isOwner = pin?.user_id === currentUserId;
-  const isMediaPin = pin?.type === 'media' || pin?.type === 'photo' || pin?.type === 'video';
+  const isMediaPin =
+    pin?.type === "media" || pin?.type === "photo" || pin?.type === "video";
 
   useEffect(() => {
     if (pin) {
-      setContent(pin.content || '');
-      setCaption(pin.caption || '');
+      setContent(pin.content || "");
+      setCaption(pin.caption || "");
       setIsEditing(false);
     }
   }, [pin]);
 
   useEffect(() => {
-    if (!pin?.media_url || pin?.media_type === 'video') {
+    if (!pin?.media_url || pin?.media_type === "video") {
       setMediaAspectRatio(4 / 3);
       return;
     }
@@ -56,7 +58,7 @@ const PinDetailModal = ({
           setMediaAspectRatio(4 / 3);
         }
       },
-      () => setMediaAspectRatio(4 / 3)
+      () => setMediaAspectRatio(4 / 3),
     );
   }, [pin?.media_url, pin?.media_type]);
 
@@ -65,7 +67,7 @@ const PinDetailModal = ({
       onUpdate(pin.id, { caption });
     } else {
       if (!content.trim()) {
-        Alert.alert('Error', 'Content cannot be empty');
+        Alert.alert("Error", "Content cannot be empty");
         return;
       }
       onUpdate(pin.id, { content });
@@ -74,18 +76,14 @@ const PinDetailModal = ({
   };
 
   const handleDelete = () => {
-    Alert.alert(
-      'Delete Pin',
-      'Are you sure you want to delete this pin?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: () => onDelete(pin.id),
-        },
-      ]
-    );
+    Alert.alert("Delete Pin", "Are you sure you want to delete this pin?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: () => onDelete(pin.id),
+      },
+    ]);
   };
 
   const handleClose = () => {
@@ -97,12 +95,12 @@ const PinDetailModal = ({
 
   const formatDate = (dateString) => {
     const date = new Date(dateString);
-    return date.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
+    return date.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
     });
   };
 
@@ -114,7 +112,7 @@ const PinDetailModal = ({
       onRequestClose={handleClose}
     >
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
         style={styles.overlay}
       >
         <TouchableOpacity
@@ -126,7 +124,7 @@ const PinDetailModal = ({
           <View style={styles.header}>
             <View>
               <Text style={styles.authorName}>
-                {pin.author_name || 'Anonymous'}
+                {pin.author_name || "Anonymous"}
               </Text>
               {pin.author_username && (
                 <Text style={styles.username}>@{pin.author_username}</Text>
@@ -141,7 +139,7 @@ const PinDetailModal = ({
             {/* Media Preview */}
             {isMediaPin && pin.media_url && (
               <View style={styles.mediaContainer}>
-                {pin.media_type === 'video' ? (
+                {pin.media_type === "video" ? (
                   <View style={styles.videoPlaceholder}>
                     <Text style={styles.videoIcon}>🎬</Text>
                     <Text style={styles.videoText}>Video</Text>
@@ -149,7 +147,10 @@ const PinDetailModal = ({
                 ) : (
                   <Image
                     source={{ uri: pin.media_url }}
-                    style={[styles.mediaImage, { aspectRatio: mediaAspectRatio }]}
+                    style={[
+                      styles.mediaImage,
+                      { aspectRatio: mediaAspectRatio },
+                    ]}
                     resizeMode="contain"
                   />
                 )}
@@ -160,7 +161,7 @@ const PinDetailModal = ({
             {isEditing ? (
               <View style={styles.editContainer}>
                 <Text style={styles.label}>
-                  {isMediaPin ? 'Caption' : 'Content'}
+                  {isMediaPin ? "Caption" : "Content"}
                 </Text>
                 <TextInput
                   style={[styles.input, styles.textArea]}
@@ -169,29 +170,34 @@ const PinDetailModal = ({
                   multiline
                   numberOfLines={4}
                   textAlignVertical="top"
-                  placeholder={isMediaPin ? 'Edit caption...' : 'Edit content...'}
+                  placeholder={
+                    isMediaPin ? "Edit caption..." : "Edit content..."
+                  }
                 />
               </View>
             ) : (
               <View style={styles.contentContainer}>
                 <Text style={styles.postTitleText}>
-                  {pin.caption || 'Untitled'}
+                  {pin.caption || "Untitled"}
                 </Text>
                 <Text style={styles.contentText}>
-                  {pin.content || 'No caption'}
+                  {pin.content || "No caption"}
                 </Text>
               </View>
             )}
 
             {/* Metadata */}
             <View style={styles.metadata}>
-              <Text style={styles.metaText}>
-                {formatDate(pin.created_at)}
-              </Text>
+              <Text style={styles.metaText}>{formatDate(pin.created_at)}</Text>
               <Text style={styles.metaText}>
                 📍 {pin.layer.charAt(0).toUpperCase() + pin.layer.slice(1)}
               </Text>
             </View>
+            {Array.isArray(associatedLayers) && associatedLayers.length > 0 && (
+              <Text style={styles.layerMetaText}>
+                Layers: {associatedLayers.join(", ")}
+              </Text>
+            )}
             {pin.posted_from_current_location && (
               <Text style={styles.locationFlareMeta}>
                 ✦ Posted from this location
@@ -211,7 +217,8 @@ const PinDetailModal = ({
                 <Text
                   style={[
                     styles.voteButtonText,
-                    pinVoteSummary?.userVote === 1 && styles.voteButtonTextActive,
+                    pinVoteSummary?.userVote === 1 &&
+                      styles.voteButtonTextActive,
                   ]}
                 >
                   👍 {pinVoteSummary?.upvotes || 0}
@@ -229,7 +236,8 @@ const PinDetailModal = ({
                 <Text
                   style={[
                     styles.voteButtonText,
-                    pinVoteSummary?.userVote === -1 && styles.voteButtonTextActive,
+                    pinVoteSummary?.userVote === -1 &&
+                      styles.voteButtonTextActive,
                   ]}
                 >
                   👎 {pinVoteSummary?.downvotes || 0}
@@ -241,7 +249,9 @@ const PinDetailModal = ({
               <Text style={styles.voteHint}>Sign in to vote on this pin</Text>
             )}
             {isOwner && (
-              <Text style={styles.voteHint}>You cannot vote on your own pin</Text>
+              <Text style={styles.voteHint}>
+                You cannot vote on your own pin
+              </Text>
             )}
           </ScrollView>
 
@@ -253,8 +263,8 @@ const PinDetailModal = ({
                   <TouchableOpacity
                     style={styles.cancelButton}
                     onPress={() => {
-                      setContent(pin.content || '');
-                      setCaption(pin.caption || '');
+                      setContent(pin.content || "");
+                      setCaption(pin.caption || "");
                       setIsEditing(false);
                     }}
                   >
@@ -294,56 +304,61 @@ const PinDetailModal = ({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    justifyContent: 'flex-end',
+    justifyContent: "flex-end",
   },
   backdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backgroundColor: "rgba(0, 0, 0, 0.5)",
   },
   modal: {
     backgroundColor: COLORS.white,
     borderTopLeftRadius: SIZES.radiusXl,
     borderTopRightRadius: SIZES.radiusXl,
-    maxHeight: '80%',
+    maxHeight: "88%",
   },
   header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    padding: SIZES.xl,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    paddingHorizontal: SIZES.xl,
+    paddingTop: SIZES.xl,
+    paddingBottom: SIZES.lg,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
   authorName: {
-    fontSize: SIZES.lg,
-    fontWeight: '700',
+    fontSize: SIZES.xl,
+    fontWeight: "700",
     color: COLORS.dark,
   },
   username: {
-    fontSize: SIZES.sm,
+    fontSize: SIZES.md,
     color: COLORS.primary,
     marginTop: SIZES.xs,
   },
   closeButton: {
-    width: 32,
-    height: 32,
-    justifyContent: 'center',
-    alignItems: 'center',
+    width: 44,
+    height: 44,
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: 22,
+    backgroundColor: COLORS.light,
   },
   closeText: {
-    fontSize: 24,
+    fontSize: 30,
     color: COLORS.gray,
   },
   content: {
-    padding: SIZES.xl,
+    paddingHorizontal: SIZES.xl,
+    paddingTop: SIZES.lg,
   },
   mediaContainer: {
     marginBottom: SIZES.lg,
     borderRadius: SIZES.radiusLg,
-    overflow: 'hidden',
+    overflow: "hidden",
   },
   mediaImage: {
-    width: '100%',
+    width: "100%",
     aspectRatio: 4 / 3,
     minHeight: 180,
     maxHeight: 420,
@@ -351,12 +366,12 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.light,
   },
   videoPlaceholder: {
-    width: '100%',
+    width: "100%",
     height: 200,
     backgroundColor: COLORS.dark,
     borderRadius: SIZES.radiusLg,
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: "center",
+    alignItems: "center",
   },
   videoIcon: {
     fontSize: 48,
@@ -364,28 +379,28 @@ const styles = StyleSheet.create({
   },
   videoText: {
     color: COLORS.white,
-    fontSize: SIZES.md,
+    fontSize: SIZES.lg,
   },
   contentContainer: {
     marginBottom: SIZES.lg,
   },
   postTitleText: {
-    fontSize: SIZES.lg,
-    fontWeight: '700',
+    fontSize: SIZES.xl,
+    fontWeight: "700",
     color: COLORS.dark,
     marginBottom: SIZES.sm,
   },
   contentText: {
-    fontSize: SIZES.md,
+    fontSize: SIZES.lg,
     color: COLORS.dark,
-    lineHeight: 24,
+    lineHeight: 30,
   },
   editContainer: {
     marginBottom: SIZES.lg,
   },
   label: {
-    fontSize: SIZES.sm,
-    fontWeight: '600',
+    fontSize: SIZES.md,
+    fontWeight: "600",
     color: COLORS.dark,
     marginBottom: SIZES.sm,
   },
@@ -394,39 +409,46 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     borderRadius: SIZES.radiusLg,
     padding: SIZES.lg,
-    fontSize: SIZES.md,
+    fontSize: SIZES.lg,
   },
   textArea: {
     minHeight: 100,
   },
   metadata: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    justifyContent: "space-between",
     paddingTop: SIZES.md,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
   },
   metaText: {
-    fontSize: SIZES.sm,
+    fontSize: SIZES.md,
     color: COLORS.gray,
   },
   locationFlareMeta: {
     marginTop: SIZES.sm,
-    fontSize: SIZES.xs,
-    fontWeight: '700',
-    color: '#FF7A59',
+    fontSize: SIZES.sm,
+    fontWeight: "700",
+    color: "#FF7A59",
+  },
+  layerMetaText: {
+    marginTop: SIZES.sm,
+    fontSize: SIZES.sm,
+    color: COLORS.gray,
+    fontWeight: "600",
   },
   voteRow: {
-    flexDirection: 'row',
-    marginTop: SIZES.md,
+    flexDirection: "row",
+    marginTop: SIZES.lg,
+    marginBottom: SIZES.md,
   },
   voteButton: {
     flex: 1,
     borderWidth: 1,
     borderColor: COLORS.border,
     borderRadius: SIZES.radiusLg,
-    paddingVertical: 10,
-    alignItems: 'center',
+    paddingVertical: 14,
+    alignItems: "center",
     backgroundColor: COLORS.white,
   },
   voteButtonLeft: {
@@ -437,8 +459,8 @@ const styles = StyleSheet.create({
     borderColor: COLORS.primary,
   },
   voteButtonText: {
-    fontSize: SIZES.sm,
-    fontWeight: '600',
+    fontSize: SIZES.lg,
+    fontWeight: "600",
     color: COLORS.dark,
   },
   voteButtonTextActive: {
@@ -446,11 +468,11 @@ const styles = StyleSheet.create({
   },
   voteHint: {
     marginTop: SIZES.sm,
-    fontSize: SIZES.xs,
+    fontSize: SIZES.sm,
     color: COLORS.gray,
   },
   actions: {
-    flexDirection: 'row',
+    flexDirection: "row",
     padding: SIZES.xl,
     gap: SIZES.md,
     borderTopWidth: 1,
@@ -461,11 +483,11 @@ const styles = StyleSheet.create({
     paddingVertical: SIZES.lg,
     backgroundColor: COLORS.light,
     borderRadius: SIZES.radiusLg,
-    alignItems: 'center',
+    alignItems: "center",
   },
   deleteText: {
     fontSize: SIZES.md,
-    fontWeight: '600',
+    fontWeight: "600",
     color: COLORS.danger,
   },
   editButton: {
@@ -473,11 +495,11 @@ const styles = StyleSheet.create({
     paddingVertical: SIZES.lg,
     backgroundColor: COLORS.primary,
     borderRadius: SIZES.radiusLg,
-    alignItems: 'center',
+    alignItems: "center",
   },
   editText: {
     fontSize: SIZES.md,
-    fontWeight: '600',
+    fontWeight: "600",
     color: COLORS.white,
   },
   cancelButton: {
@@ -485,11 +507,11 @@ const styles = StyleSheet.create({
     paddingVertical: SIZES.lg,
     backgroundColor: COLORS.light,
     borderRadius: SIZES.radiusLg,
-    alignItems: 'center',
+    alignItems: "center",
   },
   cancelText: {
     fontSize: SIZES.md,
-    fontWeight: '600',
+    fontWeight: "600",
     color: COLORS.dark,
   },
   saveButton: {
@@ -497,11 +519,11 @@ const styles = StyleSheet.create({
     paddingVertical: SIZES.lg,
     backgroundColor: COLORS.success,
     borderRadius: SIZES.radiusLg,
-    alignItems: 'center',
+    alignItems: "center",
   },
   saveText: {
     fontSize: SIZES.md,
-    fontWeight: '600',
+    fontWeight: "600",
     color: COLORS.white,
   },
 });

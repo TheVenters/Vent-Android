@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from "react";
 import {
   View,
   Text,
@@ -9,34 +9,45 @@ import {
   Platform,
   ScrollView,
   Alert,
-} from 'react-native';
-import { supabase, getCurrentUser, signIn, signUp, signOut } from '../services/supabase';
-import { SIZES } from '../constants/theme';
-import { useAppTheme } from '../context/ThemeContext';
+  Image,
+} from "react-native";
+import * as ImagePicker from "expo-image-picker";
+import {
+  supabase,
+  getCurrentUser,
+  signIn,
+  signUp,
+  signOut,
+} from "../services/supabase";
+import { SIZES } from "../constants/theme";
+import { useAppTheme } from "../context/ThemeContext";
 
 const AccountScreen = ({ navigation }) => {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [username, setUsername] = useState('');
-  const [displayName, setDisplayName] = useState('');
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [username, setUsername] = useState("");
+  const [displayName, setDisplayName] = useState("");
   const [currentUser, setCurrentUser] = useState(null);
   const [loading, setLoading] = useState(false);
   const [isSignUp, setIsSignUp] = useState(false);
+  const [avatarUrl, setAvatarUrl] = useState(null);
   const { palette } = useAppTheme();
   const styles = createStyles(palette);
 
   useEffect(() => {
     loadUser();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (_, session) => {
-        if (session?.user) {
-          setCurrentUser(session.user);
-        } else {
-          setCurrentUser(null);
-        }
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (_, session) => {
+      if (session?.user) {
+        setCurrentUser(session.user);
+        await loadProfile(session.user.id);
+      } else {
+        setCurrentUser(null);
+        setAvatarUrl(null);
       }
-    );
+    });
 
     return () => subscription.unsubscribe();
   }, []);
@@ -44,11 +55,31 @@ const AccountScreen = ({ navigation }) => {
   const loadUser = async () => {
     const user = await getCurrentUser();
     setCurrentUser(user);
+    if (user?.id) {
+      await loadProfile(user.id);
+    } else {
+      setAvatarUrl(null);
+    }
+  };
+
+  const loadProfile = async (userId) => {
+    try {
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("avatar_url")
+        .eq("id", userId)
+        .maybeSingle();
+      if (error) throw error;
+      setAvatarUrl(data?.avatar_url || null);
+    } catch (error) {
+      console.error("Error loading profile avatar:", error);
+      setAvatarUrl(null);
+    }
   };
 
   const handleSignIn = async () => {
     if (!email.trim() || !password.trim()) {
-      Alert.alert('Error', 'Please enter email and password');
+      Alert.alert("Error", "Please enter email and password");
       return;
     }
 
@@ -57,10 +88,10 @@ const AccountScreen = ({ navigation }) => {
       const { error } = await signIn(email, password);
       if (error) throw error;
 
-      Alert.alert('Success', 'Signed in successfully!');
+      Alert.alert("Success", "Signed in successfully!");
       clearForm();
     } catch (error) {
-      Alert.alert('Error', error.message);
+      Alert.alert("Error", error.message);
     } finally {
       setLoading(false);
     }
@@ -68,15 +99,15 @@ const AccountScreen = ({ navigation }) => {
 
   const handleSignUp = async () => {
     if (!email.trim() || !password.trim()) {
-      Alert.alert('Error', 'Please enter email and password');
+      Alert.alert("Error", "Please enter email and password");
       return;
     }
     if (!username.trim()) {
-      Alert.alert('Error', 'Please enter a username');
+      Alert.alert("Error", "Please enter a username");
       return;
     }
     if (password.length < 6) {
-      Alert.alert('Error', 'Password must be at least 6 characters');
+      Alert.alert("Error", "Password must be at least 6 characters");
       return;
     }
 
@@ -86,34 +117,34 @@ const AccountScreen = ({ navigation }) => {
         email,
         password,
         username.toLowerCase().trim(),
-        displayName.trim() || username.trim()
+        displayName.trim() || username.trim(),
       );
 
       if (error) throw error;
 
       if (data?.user) {
-        Alert.alert('Success', 'Account created! You are now signed in.');
+        Alert.alert("Success", "Account created! You are now signed in.");
         clearForm();
       } else {
         Alert.alert(
-          'Success',
-          'Account created! Please check your email to verify your account.',
-          [{ text: 'OK', onPress: () => setIsSignUp(false) }]
+          "Success",
+          "Account created! Please check your email to verify your account.",
+          [{ text: "OK", onPress: () => setIsSignUp(false) }],
         );
         clearForm();
       }
     } catch (error) {
-      Alert.alert('Error', error.message);
+      Alert.alert("Error", error.message);
     } finally {
       setLoading(false);
     }
   };
 
   const clearForm = () => {
-    setEmail('');
-    setPassword('');
-    setUsername('');
-    setDisplayName('');
+    setEmail("");
+    setPassword("");
+    setUsername("");
+    setDisplayName("");
   };
 
   const toggleMode = () => {
@@ -127,9 +158,82 @@ const AccountScreen = ({ navigation }) => {
       const { error } = await signOut();
       if (error) throw error;
 
-      Alert.alert('Success', 'Signed out successfully!');
+      Alert.alert("Success", "Signed out successfully!");
     } catch (error) {
-      Alert.alert('Error', error.message);
+      Alert.alert("Error", error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePickAvatar = async () => {
+    if (!currentUser?.id) return;
+
+    try {
+      const permission =
+        await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert("Permission Needed", "Please allow photo library access.");
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.6,
+        base64: true,
+      });
+
+      if (result.canceled || !result.assets?.[0]) return;
+      const asset = result.assets[0];
+      if (!asset.base64) {
+        Alert.alert("Error", "Unable to process selected image.");
+        return;
+      }
+
+      const nextAvatarUrl = `data:image/jpeg;base64,${asset.base64}`;
+      setLoading(true);
+
+      const existingProfileRes = await supabase
+        .from("profiles")
+        .select("username")
+        .eq("id", currentUser.id)
+        .maybeSingle();
+      if (existingProfileRes.error) throw existingProfileRes.error;
+
+      const fallbackUsername = `user-${currentUser.id.slice(0, 8)}`;
+      const usernameValue =
+        existingProfileRes.data?.username ||
+        currentUser.user_metadata?.username ||
+        fallbackUsername;
+
+      const upsertRes = await supabase.from("profiles").upsert(
+        {
+          id: currentUser.id,
+          username: usernameValue,
+          display_name:
+            currentUser.user_metadata?.display_name ||
+            currentUser.user_metadata?.username ||
+            usernameValue,
+          avatar_url: nextAvatarUrl,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "id" },
+      );
+      if (upsertRes.error) throw upsertRes.error;
+
+      const { error: updateMetaError } = await supabase.auth.updateUser({
+        data: {
+          avatar_url: nextAvatarUrl,
+        },
+      });
+      if (updateMetaError) throw updateMetaError;
+
+      setAvatarUrl(nextAvatarUrl);
+      await loadUser();
+    } catch (error) {
+      Alert.alert("Error", error.message || "Failed to update profile image.");
     } finally {
       setLoading(false);
     }
@@ -137,10 +241,16 @@ const AccountScreen = ({ navigation }) => {
 
   const TopBar = () => (
     <View style={styles.topBar}>
-      <TouchableOpacity style={styles.backButton} onPress={() => navigation.navigate('Map')}>
-        <Text style={styles.backButtonText}>{'< Map'}</Text>
+      <TouchableOpacity
+        style={styles.backButton}
+        onPress={() => navigation.navigate("Map")}
+      >
+        <Text style={styles.backButtonText}>{"< Map"}</Text>
       </TouchableOpacity>
-      <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')}>
+      <TouchableOpacity
+        style={styles.settingsButton}
+        onPress={() => navigation.navigate("Settings")}
+      >
         <Text style={styles.settingsButtonText}>Settings</Text>
       </TouchableOpacity>
     </View>
@@ -156,10 +266,45 @@ const AccountScreen = ({ navigation }) => {
             <Text style={styles.tagline}>Share your world</Text>
           </View>
 
+          <TouchableOpacity
+            style={styles.avatarWrap}
+            onPress={handlePickAvatar}
+            disabled={loading}
+          >
+            {avatarUrl ? (
+              <Image source={{ uri: avatarUrl }} style={styles.avatarImage} />
+            ) : (
+              <Text style={styles.avatarInitial}>
+                {String(
+                  currentUser.user_metadata?.username ||
+                    currentUser.user_metadata?.display_name ||
+                    currentUser.email ||
+                    "U",
+                )
+                  .trim()
+                  .charAt(0)
+                  .toUpperCase()}
+              </Text>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.avatarButton}
+            onPress={handlePickAvatar}
+            disabled={loading}
+          >
+            <Text style={styles.avatarButtonText}>
+              {loading ? "Saving..." : "Change Profile Image"}
+            </Text>
+          </TouchableOpacity>
+
           <View style={styles.profileInfo}>
-            <Text style={styles.displayName}>{currentUser.user_metadata?.display_name || 'User'}</Text>
+            <Text style={styles.displayName}>
+              {currentUser.user_metadata?.display_name || "User"}
+            </Text>
             {currentUser.user_metadata?.username && (
-              <Text style={styles.username}>@{currentUser.user_metadata.username}</Text>
+              <Text style={styles.username}>
+                @{currentUser.user_metadata.username}
+              </Text>
             )}
             <Text style={styles.email}>{currentUser.email}</Text>
           </View>
@@ -169,7 +314,9 @@ const AccountScreen = ({ navigation }) => {
             onPress={handleSignOut}
             disabled={loading}
           >
-            <Text style={styles.buttonText}>{loading ? 'Signing out...' : 'Sign Out'}</Text>
+            <Text style={styles.buttonText}>
+              {loading ? "Signing out..." : "Sign Out"}
+            </Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -177,7 +324,10 @@ const AccountScreen = ({ navigation }) => {
   }
 
   return (
-    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.container}>
+    <KeyboardAvoidingView
+      behavior={Platform.OS === "ios" ? "padding" : "height"}
+      style={styles.container}
+    >
       <TopBar />
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <View style={styles.logo}>
@@ -225,18 +375,22 @@ const AccountScreen = ({ navigation }) => {
             onChangeText={setPassword}
             secureTextEntry
             autoCapitalize="none"
-            autoComplete={isSignUp ? 'new-password' : 'password'}
+            autoComplete={isSignUp ? "new-password" : "password"}
           />
 
-          <TouchableOpacity style={styles.button} onPress={isSignUp ? handleSignUp : handleSignIn} disabled={loading}>
+          <TouchableOpacity
+            style={styles.button}
+            onPress={isSignUp ? handleSignUp : handleSignIn}
+            disabled={loading}
+          >
             <Text style={styles.buttonText}>
               {loading
                 ? isSignUp
-                  ? 'Creating account...'
-                  : 'Signing in...'
+                  ? "Creating account..."
+                  : "Signing in..."
                 : isSignUp
-                  ? 'Create Account'
-                  : 'Sign In'}
+                  ? "Create Account"
+                  : "Sign In"}
             </Text>
           </TouchableOpacity>
         </View>
@@ -260,9 +414,13 @@ const AccountScreen = ({ navigation }) => {
         </View>
 
         <View style={styles.footer}>
-          <Text style={styles.footerText}>{isSignUp ? 'Already have an account? ' : "Don't have an account? "}</Text>
+          <Text style={styles.footerText}>
+            {isSignUp ? "Already have an account? " : "Don't have an account? "}
+          </Text>
           <TouchableOpacity onPress={toggleMode}>
-            <Text style={styles.footerLink}>{isSignUp ? 'Sign In' : 'Sign Up'}</Text>
+            <Text style={styles.footerLink}>
+              {isSignUp ? "Sign In" : "Sign Up"}
+            </Text>
           </TouchableOpacity>
         </View>
       </ScrollView>
@@ -279,21 +437,21 @@ const createStyles = (palette) =>
     scrollContent: {
       flexGrow: 1,
       padding: SIZES.xxl,
-      justifyContent: 'center',
+      justifyContent: "center",
     },
     profileContainer: {
       flex: 1,
-      justifyContent: 'center',
-      alignItems: 'center',
+      justifyContent: "center",
+      alignItems: "center",
       padding: SIZES.xxl,
     },
     logo: {
-      alignItems: 'center',
+      alignItems: "center",
       marginBottom: SIZES.xxl * 2,
     },
     logoText: {
       fontSize: 48,
-      fontWeight: '700',
+      fontWeight: "700",
       color: palette.primary,
       marginBottom: SIZES.sm,
     },
@@ -318,7 +476,7 @@ const createStyles = (palette) =>
       backgroundColor: palette.primary,
       borderRadius: SIZES.radiusLg,
       padding: SIZES.lg,
-      alignItems: 'center',
+      alignItems: "center",
     },
     signOutButton: {
       backgroundColor: palette.danger,
@@ -327,11 +485,11 @@ const createStyles = (palette) =>
     buttonText: {
       color: palette.onPrimary,
       fontSize: SIZES.md,
-      fontWeight: '600',
+      fontWeight: "600",
     },
     divider: {
-      flexDirection: 'row',
-      alignItems: 'center',
+      flexDirection: "row",
+      alignItems: "center",
       marginVertical: SIZES.xxl,
     },
     dividerLine: {
@@ -345,8 +503,8 @@ const createStyles = (palette) =>
       fontSize: SIZES.sm,
     },
     socialButtons: {
-      flexDirection: 'row',
-      justifyContent: 'center',
+      flexDirection: "row",
+      justifyContent: "center",
       gap: SIZES.lg,
       marginBottom: SIZES.xxl,
     },
@@ -355,15 +513,15 @@ const createStyles = (palette) =>
       height: 56,
       borderRadius: SIZES.radiusFull,
       backgroundColor: palette.mutedSurface,
-      justifyContent: 'center',
-      alignItems: 'center',
+      justifyContent: "center",
+      alignItems: "center",
     },
     socialIcon: {
       fontSize: 24,
     },
     footer: {
-      flexDirection: 'row',
-      justifyContent: 'center',
+      flexDirection: "row",
+      justifyContent: "center",
     },
     footerText: {
       color: palette.subtext,
@@ -372,15 +530,50 @@ const createStyles = (palette) =>
     footerLink: {
       color: palette.primary,
       fontSize: SIZES.sm,
-      fontWeight: '600',
+      fontWeight: "600",
     },
     profileInfo: {
-      alignItems: 'center',
+      alignItems: "center",
       marginBottom: SIZES.xxl,
+    },
+    avatarWrap: {
+      width: 92,
+      height: 92,
+      borderRadius: 46,
+      backgroundColor: palette.mutedSurface,
+      borderWidth: 1,
+      borderColor: palette.border,
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: SIZES.md,
+      overflow: "hidden",
+    },
+    avatarImage: {
+      width: "100%",
+      height: "100%",
+    },
+    avatarInitial: {
+      fontSize: 34,
+      fontWeight: "800",
+      color: palette.primary,
+    },
+    avatarButton: {
+      paddingVertical: 8,
+      paddingHorizontal: 12,
+      borderRadius: SIZES.radius,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.surface,
+      marginBottom: SIZES.lg,
+    },
+    avatarButtonText: {
+      color: palette.text,
+      fontSize: 13,
+      fontWeight: "700",
     },
     displayName: {
       fontSize: SIZES.xxl,
-      fontWeight: '700',
+      fontWeight: "700",
       color: palette.text,
       marginBottom: SIZES.xs,
     },
@@ -394,12 +587,12 @@ const createStyles = (palette) =>
       color: palette.subtext,
     },
     topBar: {
-      paddingTop: Platform.OS === 'ios' ? 50 : 20,
+      paddingTop: Platform.OS === "ios" ? 50 : 20,
       paddingHorizontal: SIZES.lg,
       paddingBottom: SIZES.sm,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
     },
     backButton: {
       paddingVertical: SIZES.sm,
@@ -407,7 +600,7 @@ const createStyles = (palette) =>
     },
     backButtonText: {
       fontSize: SIZES.md,
-      fontWeight: '600',
+      fontWeight: "600",
       color: palette.primary,
     },
     settingsButton: {
@@ -420,7 +613,7 @@ const createStyles = (palette) =>
     },
     settingsButtonText: {
       fontSize: 13,
-      fontWeight: '600',
+      fontWeight: "600",
       color: palette.text,
     },
   });
