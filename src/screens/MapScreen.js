@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   StyleSheet,
@@ -216,9 +216,21 @@ const MapScreen = ({ navigation }) => {
     }
   };
 
-  const handleSearch = (query) => {
-    Alert.alert('Search', `Searching for: ${query}`);
-  };
+  const handleSearch = useCallback((location) => {
+    if (!location || !location.latitude || !location.longitude) return;
+
+    if (mapRef.current) {
+      mapRef.current.animateToRegion(
+        {
+          latitude: location.latitude,
+          longitude: location.longitude,
+          latitudeDelta: 0.01,
+          longitudeDelta: 0.01,
+        },
+        800
+      );
+    }
+  }, []);
 
   const loadPinVotes = async (pinId) => {
     try {
