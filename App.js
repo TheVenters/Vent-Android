@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer, DefaultTheme as NavLightTheme, DarkTheme as NavDarkTheme } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -12,7 +12,13 @@ import ChatScreen from './src/screens/ChatScreen';
 import CommunitiesScreen from './src/screens/CommunitiesScreen';
 import { COLORS } from './src/constants/theme';
 import SettingsScreen from './src/screens/SettingsScreen';
+import ReportBugScreen from './src/screens/ReportBugScreen';
+import AdminBugReportsScreen from './src/screens/AdminBugReportsScreen';
 import { ThemeProvider, useAppTheme } from './src/context/ThemeContext';
+import {
+  installGlobalErrorTracking,
+  setCurrentTelemetryScreen,
+} from './src/services/telemetry';
 
 const Tab = createBottomTabNavigator();
 const Stack = createStackNavigator();
@@ -32,12 +38,42 @@ function AccountStack() {
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="AccountHome" component={AccountScreen} />
       <Stack.Screen name="Settings" component={SettingsScreen} />
+      <Stack.Screen name="ReportBug" component={ReportBugScreen} />
+      <Stack.Screen name="AdminBugReports" component={AdminBugReportsScreen} />
     </Stack.Navigator>
   );
 }
 
+const getActiveRouteName = (state) => {
+  if (!state || !Array.isArray(state.routes) || state.routes.length === 0) {
+    return null;
+  }
+  const index = Number.isFinite(state.index) ? state.index : 0;
+  const route = state.routes[index];
+  if (!route) return null;
+  if (route.state) {
+    return getActiveRouteName(route.state) || route.name || null;
+  }
+  return route.name || null;
+};
+
 function AppNavigator() {
   const { isDark } = useAppTheme();
+  const navigationRef = useRef(null);
+  const currentRouteRef = useRef(null);
+
+  useEffect(() => {
+    const uninstall = installGlobalErrorTracking();
+    return () => uninstall?.();
+  }, []);
+
+  const syncCurrentRoute = () => {
+    const routeName = getActiveRouteName(navigationRef.current?.getRootState?.());
+    if (!routeName || routeName === currentRouteRef.current) return;
+    currentRouteRef.current = routeName;
+    setCurrentTelemetryScreen(routeName);
+  };
+
   const navTheme = isDark
     ? {
         ...NavDarkTheme,
@@ -59,7 +95,12 @@ function AppNavigator() {
       };
 
   return (
-    <NavigationContainer theme={navTheme}>
+    <NavigationContainer
+      ref={navigationRef}
+      theme={navTheme}
+      onReady={syncCurrentRoute}
+      onStateChange={syncCurrentRoute}
+    >
       <StatusBar style={isDark ? 'light' : 'dark'} />
       <Tab.Navigator
         screenOptions={{

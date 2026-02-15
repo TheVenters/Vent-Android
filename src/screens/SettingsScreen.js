@@ -1,11 +1,50 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { useAppTheme } from '../context/ThemeContext';
+import { getCurrentUser, supabase } from '../services/supabase';
 
 const SettingsScreen = ({ navigation }) => {
   const { themeMode, setThemeMode, palette } = useAppTheme();
+  const [isAdmin, setIsAdmin] = useState(false);
 
   const styles = createStyles(palette);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadAdminStatus = async () => {
+      try {
+        const user = await getCurrentUser();
+        if (!user?.id) {
+          if (active) setIsAdmin(false);
+          return;
+        }
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('is_admin')
+          .eq('id', user.id)
+          .maybeSingle();
+        if (error) {
+          const code = String(error?.code || '');
+          const message = String(error?.message || '').toLowerCase();
+          const missingAdminColumn = code === '42703' || message.includes('is_admin');
+          if (!missingAdminColumn) {
+            console.warn('Failed to load admin status:', error);
+          }
+          if (active) setIsAdmin(false);
+          return;
+        }
+        if (active) setIsAdmin(Boolean(data?.is_admin));
+      } catch (error) {
+        if (active) setIsAdmin(false);
+      }
+    };
+
+    loadAdminStatus();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   return (
     <View style={styles.container}>
@@ -37,6 +76,35 @@ const SettingsScreen = ({ navigation }) => {
             </Text>
           </TouchableOpacity>
         </View>
+
+        <Text style={[styles.sectionTitle, styles.sectionSpacing]}>Support</Text>
+        <TouchableOpacity
+          style={styles.supportButton}
+          onPress={() =>
+            navigation.navigate('ReportBug', {
+              fromScreen: 'Settings',
+            })
+          }
+        >
+          <Text style={styles.supportButtonText}>Report a Bug</Text>
+          <Text style={styles.supportButtonHint}>
+            Send details and an optional screenshot to help us fix issues faster.
+          </Text>
+        </TouchableOpacity>
+
+        {isAdmin && (
+          <TouchableOpacity
+            style={[styles.supportButton, styles.adminButton]}
+            onPress={() =>
+              navigation.navigate('AdminBugReports')
+            }
+          >
+            <Text style={styles.supportButtonText}>Review Bug Reports</Text>
+            <Text style={styles.supportButtonHint}>
+              Admin triage view with screenshot previews and report details.
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
     </View>
   );
@@ -100,6 +168,31 @@ const createStyles = (palette) =>
     },
     optionTextActive: {
       color: palette.onPrimary,
+    },
+    sectionSpacing: {
+      marginTop: 30,
+    },
+    supportButton: {
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.surface,
+      paddingVertical: 14,
+      paddingHorizontal: 14,
+      gap: 4,
+    },
+    supportButtonText: {
+      fontSize: 15,
+      fontWeight: '700',
+      color: palette.text,
+    },
+    supportButtonHint: {
+      fontSize: 13,
+      lineHeight: 18,
+      color: palette.subtext,
+    },
+    adminButton: {
+      marginTop: 10,
     },
   });
 

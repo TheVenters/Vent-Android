@@ -459,6 +459,21 @@ export const deletePinCommentViaEdgeFunction = async (
     refreshToken,
   );
 
+export const listAdminIssueReportsViaEdgeFunction = async (
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+  limit = 50,
+  before = null,
+  signedUrlTtlSec = 3600,
+) =>
+  socialAction(
+    'admin_issue_reports',
+    { actorUserId, limit, before, signedUrlTtlSec },
+    accessToken,
+    refreshToken,
+  );
+
 export const fetchFriendListsViaEdgeFunction = async (
   accessToken,
   refreshToken = null,
