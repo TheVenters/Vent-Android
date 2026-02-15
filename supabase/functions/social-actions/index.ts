@@ -22,6 +22,7 @@ type SocialAction =
   | "add_comment"
   | "list_comments"
   | "delete_comment"
+  | "admin_issue_reports"
   | "friend_lists"
   | "send_friend_request"
   | "accept_friend_request"
@@ -35,6 +36,7 @@ type SocialAction =
 
 const asString = (value: unknown) => String(value ?? "").trim();
 const MAX_COMMENT_LENGTH = 500;
+const BUG_SCREENSHOT_BUCKET = "bug-report-screenshots";
 
 const isUuid = (value: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -878,6 +880,113 @@ const isActorAdmin = async (
   return Boolean(profileRes.data?.is_admin);
 };
 
+const handleAdminIssueReports = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const admin = await isActorAdmin(adminClient, actorId);
+  if (!admin) {
+    return jsonResponse(403, { error: "Admin access is required." });
+  }
+
+  const requestedLimit = Number(payload.limit);
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(1, Math.min(200, Math.floor(requestedLimit)))
+    : 50;
+  const before = asString(payload.before);
+  const requestedSignedUrlTtl = Number(payload.signedUrlTtlSec);
+  const signedUrlTtlSec = Number.isFinite(requestedSignedUrlTtl)
+    ? Math.max(60, Math.min(24 * 60 * 60, Math.floor(requestedSignedUrlTtl)))
+    : 60 * 60;
+
+  let query = adminClient
+    .from("client_issue_reports")
+    .select(
+      "id,user_id,category,severity,title,description,current_screen,app_version,app_build,platform,device_info,screenshot_path,stack,metadata,created_at",
+    )
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (before) {
+    query = query.lt("created_at", before);
+  }
+
+  const reportsRes = await query;
+  if (reportsRes.error) {
+    return jsonResponse(400, { error: reportsRes.error.message });
+  }
+
+  const rawReports = (reportsRes.data || []) as Record<string, unknown>[];
+  const reporterUserIds = Array.from(
+    new Set(
+      rawReports
+        .map((row) => asString(row.user_id))
+        .filter((userId) => isUuid(userId)),
+    ),
+  );
+  const reporterProfiles = new Map<string, Record<string, unknown>>();
+  if (reporterUserIds.length > 0) {
+    const profilesRes = await adminClient
+      .from("profiles")
+      .select("id,username,display_name")
+      .in("id", reporterUserIds);
+    if (!profilesRes.error) {
+      (profilesRes.data || []).forEach((profile) => {
+        reporterProfiles.set(asString(profile.id), profile as Record<string, unknown>);
+      });
+    }
+  }
+
+  const reports = await Promise.all(
+    rawReports.map(async (row) => {
+      const reporterUserId = asString(row.user_id);
+      const profile = reporterProfiles.get(reporterUserId);
+      const reporterUsername = asString(profile?.username);
+      const reporterDisplayName = asString(profile?.display_name);
+      const screenshotPath = asString(row.screenshot_path);
+      if (!screenshotPath) {
+        return {
+          ...row,
+          reporter_username: reporterUsername || null,
+          reporter_display_name: reporterDisplayName || null,
+          screenshot_signed_url: null,
+        };
+      }
+
+      const signedRes = await adminClient.storage
+        .from(BUG_SCREENSHOT_BUCKET)
+        .createSignedUrl(screenshotPath, signedUrlTtlSec);
+      if (signedRes.error) {
+        return {
+          ...row,
+          reporter_username: reporterUsername || null,
+          reporter_display_name: reporterDisplayName || null,
+          screenshot_signed_url: null,
+          screenshot_signed_url_error: signedRes.error.message,
+        };
+      }
+
+      return {
+        ...row,
+        reporter_username: reporterUsername || null,
+        reporter_display_name: reporterDisplayName || null,
+        screenshot_signed_url: asString(signedRes.data?.signedUrl),
+      };
+    }),
+  );
+
+  const nextBefore =
+    rawReports.length >= limit
+      ? asString(rawReports[rawReports.length - 1]?.created_at)
+      : null;
+
+  return jsonResponse(200, {
+    success: true,
+    reports,
+    nextBefore: nextBefore || null,
+  });
+};
+
 const resolveGroupedPinIds = async (
   adminClient: ReturnType<typeof createClient>,
   groupId: string,
@@ -1184,6 +1293,7 @@ Deno.serve(async (req) => {
           action !== "delete_pin" &&
           action !== "create_pins" &&
           action !== "list_pins" &&
+          action !== "admin_issue_reports" &&
           action !== "set_layer_pref" &&
           action !== "set_layer_order",
       },
@@ -1229,6 +1339,11 @@ Deno.serve(async (req) => {
     if (action === "delete_comment") {
       return await withRefreshedTokens(
         await handleDeleteComment(adminClient, actorId, payload),
+      );
+    }
+    if (action === "admin_issue_reports") {
+      return await withRefreshedTokens(
+        await handleAdminIssueReports(adminClient, actorId, payload),
       );
     }
     if (action === "friend_lists") {
