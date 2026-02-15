@@ -18,7 +18,7 @@ import { useAppTheme } from "../context/ThemeContext";
 import {
   supabase,
   getCurrentUser,
-  supabaseWithAccessToken,
+  setLayerPreferenceViaEdgeFunction,
 } from "../services/supabase";
 import { getPinLayerKeyFromLayer } from "../utils/layers";
 import {
@@ -429,12 +429,14 @@ const CommunitiesScreen = ({ navigation }) => {
   const handleToggleLayerCollection = async (layerId, nextEnabled) => {
     let sessionUserId = null;
     let accessToken = null;
+    let refreshToken = null;
     try {
       const {
         data: { session },
       } = await supabase.auth.getSession();
       sessionUserId = session?.user?.id || null;
       accessToken = session?.access_token || null;
+      refreshToken = session?.refresh_token || null;
     } catch (error) {
       console.error("Error resolving session:", error);
     }
@@ -453,17 +455,16 @@ const CommunitiesScreen = ({ navigation }) => {
     setCommunityLayers(optimistic);
 
     try {
-      const authed = supabaseWithAccessToken(accessToken);
-      const { error } = await authed.from("user_layer_prefs").upsert(
-        {
-          user_id: sessionUserId,
-          layer_id: layerId,
-          hidden: !nextEnabled,
-        },
-        { onConflict: "user_id,layer_id" },
+      const edgeResult = await setLayerPreferenceViaEdgeFunction(
+        layerId,
+        !nextEnabled,
+        accessToken,
+        refreshToken,
+        sessionUserId,
       );
-
-      if (error) throw error;
+      if (edgeResult.error) {
+        throw edgeResult.error;
+      }
     } catch (error) {
       if (isRlsPolicyError(error)) {
         console.warn("Community layer collection blocked by RLS:", error);
@@ -474,8 +475,8 @@ const CommunitiesScreen = ({ navigation }) => {
       Alert.alert(
         "Layer Update Blocked",
         isRlsPolicyError(error)
-          ? "Database policy blocked this layer update. Apply the user_layer_prefs RLS policy migration to allow your account to save layer toggles."
-          : "Failed to update your layer collection.",
+          ? "Database policy blocked this layer update."
+          : "Failed to sync your layer collection to Supabase.",
       );
     }
   };

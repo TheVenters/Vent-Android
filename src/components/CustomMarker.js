@@ -1,17 +1,29 @@
-import React from "react";
+import React, { memo, useEffect, useMemo, useState } from "react";
 import { View, Text, StyleSheet, Image } from "react-native";
 import { Marker, Callout } from "react-native-maps";
 import { COLORS } from "../constants/theme";
 
 const CustomMarker = ({ pin, onPress }) => {
-  const getMarkerColor = () => {
-    return COLORS.primary;
-  };
+  const [tracksViewChanges, setTracksViewChanges] = useState(
+    Boolean(pin?.author_avatar_url),
+  );
 
-  const getInitial = () => {
+  useEffect(() => {
+    if (!pin?.author_avatar_url) {
+      setTracksViewChanges(false);
+      return undefined;
+    }
+    setTracksViewChanges(true);
+    const timer = setTimeout(() => {
+      setTracksViewChanges(false);
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [pin?.author_avatar_url, pin?.id]);
+
+  const markerInitial = useMemo(() => {
     const source = String(pin.author_username || pin.author_name || "?").trim();
     return source ? source.charAt(0).toUpperCase() : "?";
-  };
+  }, [pin.author_name, pin.author_username]);
 
   return (
     <Marker
@@ -19,6 +31,7 @@ const CustomMarker = ({ pin, onPress }) => {
         latitude: pin.lat,
         longitude: pin.lng,
       }}
+      tracksViewChanges={tracksViewChanges}
     >
       <View style={styles.markerWrap}>
         {pin.posted_from_current_location && (
@@ -27,7 +40,7 @@ const CustomMarker = ({ pin, onPress }) => {
         <View
           style={[
             styles.markerContainer,
-            { backgroundColor: getMarkerColor() },
+            { backgroundColor: COLORS.primary },
           ]}
         >
           {pin.layer_emoji ? (
@@ -36,9 +49,10 @@ const CustomMarker = ({ pin, onPress }) => {
             <Image
               source={{ uri: pin.author_avatar_url }}
               style={styles.avatarImage}
+              onLoadEnd={() => setTracksViewChanges(false)}
             />
           ) : (
-            <Text style={styles.markerInitial}>{getInitial()}</Text>
+            <Text style={styles.markerInitial}>{markerInitial}</Text>
           )}
         </View>
         {pin.posted_from_current_location && (
@@ -57,6 +71,22 @@ const CustomMarker = ({ pin, onPress }) => {
         </View>
       </Callout>
     </Marker>
+  );
+};
+
+const areMarkerPropsEqual = (prevProps, nextProps) => {
+  const prevPin = prevProps.pin || {};
+  const nextPin = nextProps.pin || {};
+  return (
+    prevPin.id === nextPin.id &&
+    prevPin.lat === nextPin.lat &&
+    prevPin.lng === nextPin.lng &&
+    prevPin.caption === nextPin.caption &&
+    prevPin.author_name === nextPin.author_name &&
+    prevPin.author_username === nextPin.author_username &&
+    prevPin.author_avatar_url === nextPin.author_avatar_url &&
+    prevPin.layer_emoji === nextPin.layer_emoji &&
+    prevPin.posted_from_current_location === nextPin.posted_from_current_location
   );
 };
 
@@ -148,4 +178,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default CustomMarker;
+export default memo(CustomMarker, areMarkerPropsEqual);

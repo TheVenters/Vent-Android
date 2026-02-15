@@ -26,6 +26,11 @@ const POST_VISIBILITY_MODES = {
   CLOUD_ONLY: "cloud_only",
 };
 
+const POST_AUDIENCE = {
+  FRIENDS: "friends",
+  PUBLIC: "public",
+};
+
 const CLOUD_RADIUS_OPTIONS_METERS = [100, 250, 500, 1000];
 
 const OWNER_LABELS = {
@@ -56,6 +61,7 @@ const PostCreationForm = ({
   const [locationMode, setLocationMode] = useState(LOCATION_MODES.CURRENT);
   const [mediaUrl, setMediaUrl] = useState(null);
   const [mediaType, setMediaType] = useState(null);
+  const [baseAudience, setBaseAudience] = useState(POST_AUDIENCE.FRIENDS);
 
   const availableLayers = useMemo(
     () => (Array.isArray(layers) ? layers : []),
@@ -74,17 +80,36 @@ const PostCreationForm = ({
   const selectableLayers = useMemo(
     () =>
       availableLayers.filter(
-        (layer) =>
-          layer.id !== userPostingLayer?.id &&
-          layer.owner_type !== "user" &&
-          getPinLayerKeyFromLayer(layer) !== "friends",
+        (layer) => {
+          const pinLayerKey = getPinLayerKeyFromLayer(layer);
+          return (
+            layer.id !== userPostingLayer?.id &&
+            layer.owner_type !== "user" &&
+            pinLayerKey === "public"
+          );
+        },
       ),
     [availableLayers, userPostingLayer?.id],
+  );
+  const friendsBaseLayer = useMemo(
+    () =>
+      availableLayers.find(
+        (layer) => getPinLayerKeyFromLayer(layer) === "friends",
+      ) || null,
+    [availableLayers],
+  );
+  const publicBaseLayer = useMemo(
+    () =>
+      selectableLayers.find(
+        (layer) => getPinLayerKeyFromLayer(layer) === "public",
+      ) || null,
+    [selectableLayers],
   );
 
   useEffect(() => {
     if (!visible) return;
     setSelectedLayerIds([]);
+    setBaseAudience(POST_AUDIENCE.FRIENDS);
   }, [visible]);
 
   const resetForm = () => {
@@ -97,6 +122,7 @@ const PostCreationForm = ({
     setLocationMode(LOCATION_MODES.CURRENT);
     setMediaUrl(null);
     setMediaType(null);
+    setBaseAudience(POST_AUDIENCE.FRIENDS);
   };
 
   const handleClose = () => {
@@ -114,6 +140,20 @@ const PostCreationForm = ({
       Alert.alert(
         "Location Unavailable",
         "Unable to read your current location right now.",
+      );
+      return;
+    }
+    if (baseAudience === POST_AUDIENCE.PUBLIC && !publicBaseLayer?.id) {
+      Alert.alert(
+        "Public Layer Unavailable",
+        "No public layer is available right now. Please refresh layers and try again.",
+      );
+      return;
+    }
+    if (baseAudience === POST_AUDIENCE.FRIENDS && !friendsBaseLayer?.id) {
+      Alert.alert(
+        "Friends Layer Unavailable",
+        "No friends layer is available right now. Please refresh layers and try again.",
       );
       return;
     }
@@ -138,6 +178,13 @@ const PostCreationForm = ({
           : null,
       mediaUrl,
       mediaType,
+      baseAudience,
+      basePublicLayerId:
+        baseAudience === POST_AUDIENCE.PUBLIC ? publicBaseLayer?.id || null : null,
+      baseFriendsLayerId:
+        baseAudience === POST_AUDIENCE.FRIENDS
+          ? friendsBaseLayer?.id || null
+          : null,
     });
 
     resetForm();
@@ -151,7 +198,14 @@ const PostCreationForm = ({
     );
   };
 
-  const pickMedia = async () => {
+  const applyPickedMedia = (result) => {
+    if (result.canceled || !result.assets?.[0]) return;
+    const asset = result.assets[0];
+    setMediaUrl(asset.uri);
+    setMediaType(asset.type === "video" ? "video" : "photo");
+  };
+
+  const pickMediaFromLibrary = async () => {
     try {
       const permissionResult =
         await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -164,18 +218,34 @@ const PostCreationForm = ({
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.All,
+        mediaTypes: ["images", "videos"],
         allowsEditing: false,
         quality: 0.8,
       });
-
-      if (result.canceled || !result.assets?.[0]) return;
-      const asset = result.assets[0];
-      setMediaUrl(asset.uri);
-      setMediaType(asset.type === "video" ? "video" : "photo");
+      applyPickedMedia(result);
     } catch (error) {
       console.error("Error picking media:", error);
       Alert.alert("Error", "Failed to pick media.");
+    }
+  };
+
+  const capturePhotoWithCamera = async () => {
+    try {
+      const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permissionResult.granted) {
+        Alert.alert("Permission Needed", "Please grant camera permissions.");
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: "images",
+        allowsEditing: false,
+        quality: 0.8,
+      });
+      applyPickedMedia(result);
+    } catch (error) {
+      console.error("Error taking photo:", error);
+      Alert.alert("Error", "Failed to open camera.");
     }
   };
 
@@ -229,12 +299,25 @@ const PostCreationForm = ({
 
             <Text style={styles.sectionLabel}>Media (Optional)</Text>
             <View style={styles.mediaRow}>
-              <TouchableOpacity style={styles.mediaBtn} onPress={pickMedia}>
+              <TouchableOpacity
+                style={styles.mediaBtn}
+                onPress={pickMediaFromLibrary}
+              >
                 <Text style={styles.mediaBtnText}>
-                  {mediaUrl ? "Change Media" : "Add Media"}
+                  {mediaUrl ? "Change Library Media" : "Choose from Library"}
                 </Text>
               </TouchableOpacity>
-              {mediaUrl ? (
+              <TouchableOpacity
+                style={styles.mediaBtn}
+                onPress={capturePhotoWithCamera}
+              >
+                <Text style={styles.mediaBtnText}>
+                  {mediaUrl ? "Retake Photo" : "Take Photo"}
+                </Text>
+              </TouchableOpacity>
+            </View>
+            {mediaUrl ? (
+              <View style={styles.mediaRemoveRow}>
                 <TouchableOpacity
                   style={styles.mediaClearBtn}
                   onPress={() => {
@@ -244,13 +327,58 @@ const PostCreationForm = ({
                 >
                   <Text style={styles.mediaClearBtnText}>Remove</Text>
                 </TouchableOpacity>
-              ) : null}
-            </View>
+              </View>
+            ) : null}
             {mediaUrl ? (
               <Text style={styles.inlineHint}>
                 Attached {mediaType === "video" ? "video" : "photo"}
               </Text>
             ) : null}
+
+            <Text style={styles.sectionLabel}>Post To</Text>
+            <View style={styles.locationModeRow}>
+              <TouchableOpacity
+                style={[
+                  styles.locationModeBtn,
+                  baseAudience === POST_AUDIENCE.FRIENDS &&
+                    styles.locationModeBtnActive,
+                ]}
+                onPress={() => setBaseAudience(POST_AUDIENCE.FRIENDS)}
+              >
+                <Text
+                  style={[
+                    styles.locationModeBtnText,
+                    baseAudience === POST_AUDIENCE.FRIENDS &&
+                      styles.locationModeBtnTextActive,
+                  ]}
+                >
+                  Friends
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.locationModeBtn,
+                  baseAudience === POST_AUDIENCE.PUBLIC &&
+                    styles.locationModeBtnActive,
+                ]}
+                onPress={() => setBaseAudience(POST_AUDIENCE.PUBLIC)}
+              >
+                <Text
+                  style={[
+                    styles.locationModeBtnText,
+                    baseAudience === POST_AUDIENCE.PUBLIC &&
+                      styles.locationModeBtnTextActive,
+                  ]}
+                >
+                  Public
+                </Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.inlineHint}>
+              {baseAudience === POST_AUDIENCE.FRIENDS
+                ? "Posts to your friends layer by default."
+                : "Posts to a public layer by default."}
+            </Text>
 
             <Text style={styles.sectionLabel}>Geometry Type</Text>
             <TouchableOpacity
@@ -377,7 +505,7 @@ const PostCreationForm = ({
 
             <Text style={styles.sectionLabel}>Also Post To (Optional)</Text>
             <Text style={styles.inlineHint}>
-              Your user layer is always included.
+              Add any extra non-friends layers in addition to the target above.
             </Text>
             {availableLayers.length === 0 ? (
               <Text style={styles.emptyStateText}>
@@ -390,7 +518,7 @@ const PostCreationForm = ({
             ) : selectableLayers.length === 0 ? (
               <Text style={styles.emptyStateText}>
                 No additional postable layers found. This post will go to your
-                user layer only.
+                selected audience layer only.
               </Text>
             ) : (
               <View style={styles.layerList}>
@@ -568,6 +696,10 @@ const createStyles = (palette, isDark) =>
     mediaRow: {
       flexDirection: "row",
       gap: 8,
+      marginBottom: 10,
+    },
+    mediaRemoveRow: {
+      alignItems: "flex-start",
       marginBottom: 10,
     },
     mediaBtn: {
