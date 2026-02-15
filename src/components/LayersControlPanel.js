@@ -54,6 +54,9 @@ const LayersControlPanel = ({
 }) => {
   const { palette, isDark } = useAppTheme();
   const styles = createStyles(palette, isDark);
+  const manageableLayers = Array.isArray(layers)
+    ? layers.filter((layer) => layer?.viewerCanManage !== false)
+    : [];
 
   return (
     <Modal
@@ -96,13 +99,13 @@ const LayersControlPanel = ({
               showsVerticalScrollIndicator={false}
             >
               <Text style={styles.sectionTitle}>My Layer Collection</Text>
-              {layers.length === 0 ? (
+              {manageableLayers.length === 0 ? (
                 <Text style={styles.emptyText}>
-                  No layers found. Join a community or create one to manage
-                  layers.
+                  No layers available to manage right now. Join a community to
+                  manage its layers.
                 </Text>
               ) : (
-                layers.map((layer, index) => {
+                manageableLayers.map((layer, index) => {
                   const badge = getBadgeStyles(layer.owner_type, palette);
                   const isSelected = selectedLayerId === layer.id;
                   const pinLayerKey = getPinLayerKeyFromLayer(layer);
@@ -179,10 +182,10 @@ const LayersControlPanel = ({
                           <TouchableOpacity
                             style={[
                               styles.reorderBtn,
-                              index === layers.length - 1 &&
+                              index === manageableLayers.length - 1 &&
                                 styles.reorderBtnDisabled,
                             ]}
-                            disabled={index === layers.length - 1}
+                            disabled={index === manageableLayers.length - 1}
                             onPress={(event) => {
                               event?.stopPropagation?.();
                               onMoveLayer && onMoveLayer(layer.id, 1);

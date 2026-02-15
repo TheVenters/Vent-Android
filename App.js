@@ -10,6 +10,7 @@ import AccountScreen from './src/screens/AccountScreen';
 import FriendsScreen from './src/screens/FriendsScreen';
 import ChatScreen from './src/screens/ChatScreen';
 import CommunitiesScreen from './src/screens/CommunitiesScreen';
+import CommunityChatScreen from './src/screens/CommunityChatScreen';
 import { COLORS } from './src/constants/theme';
 import SettingsScreen from './src/screens/SettingsScreen';
 import ReportBugScreen from './src/screens/ReportBugScreen';
@@ -40,6 +41,15 @@ function AccountStack() {
       <Stack.Screen name="Settings" component={SettingsScreen} />
       <Stack.Screen name="ReportBug" component={ReportBugScreen} />
       <Stack.Screen name="AdminBugReports" component={AdminBugReportsScreen} />
+    </Stack.Navigator>
+  );
+}
+
+function CommunitiesStack() {
+  return (
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="CommunitiesHome" component={CommunitiesScreen} />
+      <Stack.Screen name="CommunityChat" component={CommunityChatScreen} />
     </Stack.Navigator>
   );
 }
@@ -119,7 +129,7 @@ function AppNavigator() {
         />
         <Tab.Screen
           name="Communities"
-          component={CommunitiesScreen}
+          component={CommunitiesStack}
         />
         <Tab.Screen
           name="Friends"

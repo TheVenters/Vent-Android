@@ -14,7 +14,7 @@ import {
 } from "react-native";
 import { COLORS, SIZES } from "../constants/theme";
 
-const VISIBILITY_OPTIONS = ["public", "friends"];
+const VISIBILITY_OPTIONS = ["public", "friends", "private"];
 const COMMENT_INDENT_WIDTH = 12;
 const COMMENT_MAX_VISUAL_DEPTH = 3;
 const COMMENT_AUTO_COLLAPSE_DEPTH = 2;
@@ -22,7 +22,6 @@ const COMMENT_PREVIEW_CHILD_COUNT = 3;
 
 const normalizeVisibility = (value) => {
   const layer = String(value || "").toLowerCase();
-  if (layer === "private") return "friends";
   return VISIBILITY_OPTIONS.includes(layer) ? layer : "public";
 };
 
