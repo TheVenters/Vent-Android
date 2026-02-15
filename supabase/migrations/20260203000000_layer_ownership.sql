@@ -2,7 +2,6 @@ alter table public.layers
   add column if not exists owner_type text not null default 'system',
   add column if not exists owner_id uuid,
   add column if not exists is_public boolean not null default true;
-
 do $$
 begin
   if not exists (

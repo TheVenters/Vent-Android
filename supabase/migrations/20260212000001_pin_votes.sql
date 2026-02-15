@@ -11,12 +11,9 @@ create table if not exists public.pin_votes (
   updated_at timestamptz not null default now(),
   unique(pin_id, user_id)
 );
-
 create index if not exists pin_votes_pin_id_idx on public.pin_votes(pin_id);
 create index if not exists pin_votes_user_id_idx on public.pin_votes(user_id);
-
 alter table public.pin_votes enable row level security;
-
 -- Users can view votes for pins they can already view
 create policy "Users can view votes for visible pins"
   on public.pin_votes for select
@@ -45,7 +42,6 @@ create policy "Users can view votes for visible pins"
       )
     )
   );
-
 -- Only signed-in non-authors can vote as themselves
 create policy "Users can insert their own pin votes"
   on public.pin_votes for insert
@@ -57,7 +53,6 @@ create policy "Users can insert their own pin votes"
       and p.user_id <> auth.uid()
     )
   );
-
 create policy "Users can update their own pin votes"
   on public.pin_votes for update
   using (auth.uid() = user_id)
@@ -69,13 +64,10 @@ create policy "Users can update their own pin votes"
       and p.user_id <> auth.uid()
     )
   );
-
 create policy "Users can delete their own pin votes"
   on public.pin_votes for delete
   using (auth.uid() = user_id);
-
 create trigger pin_votes_updated_at
   before update on public.pin_votes
   for each row execute function public.update_updated_at();
-
 alter publication supabase_realtime add table public.pin_votes;
