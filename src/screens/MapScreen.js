@@ -25,10 +25,13 @@ import MapView, {
 } from "react-native-maps";
 import * as Location from "expo-location";
 import {
+  addPinCommentViaEdgeFunction,
   createPinsViaEdgeFunction,
+  deletePinCommentViaEdgeFunction,
   deletePinViaEdgeFunction,
   fetchPinsViaEdgeFunction,
   getPinVoteSummaryViaEdgeFunction,
+  listPinCommentsViaEdgeFunction,
   setLayerOrderViaEdgeFunction,
   setLayerPreferenceViaEdgeFunction,
   supabase,
@@ -81,6 +84,7 @@ const ERROR_LOG_COOLDOWN_MS = 120000;
 const ERROR_ALERT_COOLDOWN_MS = 15000;
 const NETWORK_BACKOFF_MS = 20000;
 const MAP_POSTS_CACHE_KEY = "map_posts_cache_v1";
+const PIN_COMMENT_MAX_LENGTH = 500;
 
 const toRadians = (degrees) => (degrees * Math.PI) / 180;
 
@@ -570,6 +574,54 @@ const toTitle = (value) => {
   return str.charAt(0).toUpperCase() + str.slice(1);
 };
 
+const normalizePinComment = (comment) => {
+  if (!comment || typeof comment !== "object") return null;
+  const id = String(comment.id || "");
+  const pinId = String(comment.pin_id || "");
+  const parentCommentIdRaw = String(comment.parent_comment_id || "");
+  if (!id || !pinId) return null;
+
+  return {
+    id,
+    pin_id: pinId,
+    parent_comment_id: isUuid(parentCommentIdRaw) ? parentCommentIdRaw : null,
+    user_id: String(comment.user_id || comment.author_id || ""),
+    content: String(comment.content || comment.text || ""),
+    created_at:
+      comment.created_at || comment.updated_at || new Date().toISOString(),
+    updated_at:
+      comment.updated_at || comment.created_at || new Date().toISOString(),
+    author_name: String(comment.author_name || "Anonymous"),
+    author_username: String(comment.author_username || ""),
+    author_avatar_url: comment.author_avatar_url || null,
+  };
+};
+
+const collectCommentThreadIds = (comments, rootCommentId) => {
+  const byParentId = new Map();
+  (Array.isArray(comments) ? comments : []).forEach((comment) => {
+    const parentId = String(comment?.parent_comment_id || "");
+    const commentId = String(comment?.id || "");
+    if (!parentId || !commentId) return;
+    const existing = byParentId.get(parentId) || [];
+    existing.push(commentId);
+    byParentId.set(parentId, existing);
+  });
+
+  const ids = new Set([String(rootCommentId || "")]);
+  const queue = [String(rootCommentId || "")];
+  while (queue.length > 0) {
+    const currentId = queue.shift();
+    const children = byParentId.get(currentId) || [];
+    children.forEach((childId) => {
+      if (ids.has(childId)) return;
+      ids.add(childId);
+      queue.push(childId);
+    });
+  }
+  return ids;
+};
+
 const isUserPostingLayer = (layer) => {
   const ownerType = layer?.owner_type || "system";
   const { baseKind } = parseLayerKindMetadata(layer?.kind);
@@ -656,6 +708,10 @@ const MapScreen = ({ navigation, route }) => {
     userVote: 0,
   });
   const [isSubmittingVote, setIsSubmittingVote] = useState(false);
+  const [pinComments, setPinComments] = useState([]);
+  const [pinCommentsLoading, setPinCommentsLoading] = useState(false);
+  const [isSubmittingComment, setIsSubmittingComment] = useState(false);
+  const [deletingCommentId, setDeletingCommentId] = useState(null);
   const [mapType, setMapType] = useState("standard");
   const [mapMode, setMapMode] = useState("user");
   const [userLocation, setUserLocation] = useState(null);
@@ -685,6 +741,8 @@ const MapScreen = ({ navigation, route }) => {
   const selectedPinIdRef = useRef(null);
   const pinVoteSummaryCacheRef = useRef(new Map());
   const pinVoteRequestRef = useRef(new Map());
+  const pinCommentsCacheRef = useRef(new Map());
+  const pinCommentsRequestRef = useRef(new Map());
   const votePrefetchTimerRef = useRef(null);
   const layerFetchInFlightRef = useRef({ key: null, promise: null });
   const errorThrottleRef = useRef(new Map());
@@ -2176,6 +2234,138 @@ const MapScreen = ({ navigation, route }) => {
     }
   };
 
+  const loadPinComments = async (
+    pinId,
+    { preferCache = true, suppressState = false, backgroundRefresh = true } = {},
+  ) => {
+    if (!pinId) return [];
+
+    const cached = pinCommentsCacheRef.current.get(pinId);
+    if (cached && preferCache && !suppressState) {
+      setPinComments(cached);
+    }
+    if (!suppressState && (!cached || !preferCache)) {
+      setPinCommentsLoading(true);
+    }
+
+    const inFlight = pinCommentsRequestRef.current.get(pinId);
+    if (inFlight) {
+      if (cached && preferCache) {
+        inFlight.catch(() => {});
+        return cached;
+      }
+      return await inFlight;
+    }
+
+    const requestPromise = (async () => {
+      try {
+        const session = await getActiveSession();
+        const activeUserId = session?.user?.id || currentUser?.id || null;
+        let comments = null;
+        let edgeError = null;
+
+        if (session?.access_token && activeUserId) {
+          const commentResult = await listPinCommentsViaEdgeFunction(
+            pinId,
+            session.access_token,
+            session.refresh_token || null,
+            activeUserId,
+          );
+          if (!commentResult.error) {
+            const rawComments = Array.isArray(commentResult?.data?.comments)
+              ? commentResult.data.comments
+              : Array.isArray(commentResult?.data)
+                ? commentResult.data
+                : [];
+            comments = rawComments
+              .map((row) => normalizePinComment(row))
+              .filter(Boolean);
+          } else {
+            edgeError = commentResult.error;
+          }
+        }
+
+        if (!Array.isArray(comments)) {
+          const reader = session?.access_token
+            ? supabaseWithAccessToken(session.access_token)
+            : supabase;
+          const tableResult = await reader
+            .from("pin_comments")
+            .select("*")
+            .eq("pin_id", pinId)
+            .order("created_at", { ascending: true })
+            .limit(200);
+          if (tableResult.error) {
+            if (edgeError) throw edgeError;
+            throw tableResult.error;
+          }
+
+          const rows = Array.isArray(tableResult.data) ? tableResult.data : [];
+          const userIds = Array.from(
+            new Set(
+              rows
+                .map((row) => row?.user_id || row?.author_id)
+                .filter(Boolean),
+            ),
+          );
+          const profileByUserId = new Map();
+          if (userIds.length > 0) {
+            const profileResult = await supabase
+              .from("profiles")
+              .select("id,username,display_name,avatar_url")
+              .in("id", userIds);
+            if (profileResult.error) {
+              if (edgeError) throw edgeError;
+              throw profileResult.error;
+            }
+            (profileResult.data || []).forEach((profile) => {
+              profileByUserId.set(profile.id, profile);
+            });
+          }
+
+          comments = rows
+            .map((row) => {
+              const actorUserId = row?.user_id || row?.author_id || "";
+              const profile = profileByUserId.get(actorUserId);
+              return normalizePinComment({
+                ...row,
+                user_id: actorUserId,
+                author_name: profile?.display_name || "Anonymous",
+                author_username: profile?.username || "",
+                author_avatar_url: profile?.avatar_url || null,
+              });
+            })
+            .filter(Boolean);
+        }
+
+        pinCommentsCacheRef.current.set(pinId, comments);
+        if (!suppressState && selectedPinIdRef.current === pinId) {
+          setPinComments(comments);
+        }
+        return comments;
+      } catch (error) {
+        console.error("Error loading pin comments:", error);
+        if (!suppressState && selectedPinIdRef.current === pinId && !cached) {
+          setPinComments([]);
+        }
+        throw error;
+      } finally {
+        pinCommentsRequestRef.current.delete(pinId);
+        if (!suppressState && selectedPinIdRef.current === pinId) {
+          setPinCommentsLoading(false);
+        }
+      }
+    })();
+
+    pinCommentsRequestRef.current.set(pinId, requestPromise);
+
+    if (cached && preferCache && backgroundRefresh) {
+      requestPromise.catch(() => {});
+      return cached;
+    }
+    return await requestPromise;
+  };
+
   const loadPinVotes = async (
     pinId,
     { preferCache = true, suppressState = false, backgroundRefresh = true } = {},
@@ -2266,6 +2456,7 @@ const MapScreen = ({ navigation, route }) => {
     selectedPinIdRef.current = pin.id;
     setSelectedPin(pin);
     const cached = pinVoteSummaryCacheRef.current.get(pin.id);
+    const cachedComments = pinCommentsCacheRef.current.get(pin.id);
     setPinVoteSummary(
       cached || {
         upvotes: 0,
@@ -2273,7 +2464,15 @@ const MapScreen = ({ navigation, route }) => {
         userVote: 0,
       },
     );
+    setPinComments(cachedComments || []);
+    setPinCommentsLoading(!cachedComments);
+    setDeletingCommentId(null);
     loadPinVotes(pin.id, {
+      preferCache: true,
+      suppressState: false,
+      backgroundRefresh: true,
+    }).catch(() => {});
+    loadPinComments(pin.id, {
       preferCache: true,
       suppressState: false,
       backgroundRefresh: true,
@@ -2480,6 +2679,379 @@ const MapScreen = ({ navigation, route }) => {
     }
   };
 
+  const handleAddPinComment = async (content, options = {}) => {
+    if (!selectedPin?.id) return false;
+
+    const pinId = selectedPin.id;
+    const trimmedContent = String(content || "").trim();
+    const parentCommentIdRaw = String(options?.parentCommentId || "").trim();
+    const parentCommentId = parentCommentIdRaw
+      ? isUuid(parentCommentIdRaw)
+        ? parentCommentIdRaw
+        : null
+      : null;
+    if (!trimmedContent) return false;
+    if (trimmedContent.length > PIN_COMMENT_MAX_LENGTH) {
+      Alert.alert(
+        "Comment Too Long",
+        `Comments are limited to ${PIN_COMMENT_MAX_LENGTH} characters.`,
+      );
+      return false;
+    }
+    if (parentCommentIdRaw && !parentCommentId) {
+      Alert.alert("Error", "Invalid parent comment reference.");
+      return false;
+    }
+
+    const session = await getActiveSession();
+    const userId = session?.user?.id || null;
+    if (!userId || !session?.access_token) {
+      Alert.alert("Sign In Required", "Please sign in to add comments.");
+      return false;
+    }
+    if (parentCommentId) {
+      const existing = pinCommentsCacheRef.current.get(pinId) || pinComments || [];
+      const parentComment = existing.find((comment) => comment?.id === parentCommentId);
+      if (!parentComment) {
+        Alert.alert(
+          "Error",
+          "The comment you are replying to no longer exists.",
+        );
+        return false;
+      }
+    }
+
+    const optimisticComment = normalizePinComment({
+      id: `temp-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+      pin_id: pinId,
+      parent_comment_id: parentCommentId,
+      user_id: userId,
+      content: trimmedContent,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      author_name:
+        session?.user?.user_metadata?.display_name ||
+        currentUser?.user_metadata?.display_name ||
+        "Anonymous",
+      author_username:
+        session?.user?.user_metadata?.username ||
+        currentUser?.user_metadata?.username ||
+        "",
+      author_avatar_url:
+        session?.user?.user_metadata?.avatar_url ||
+        currentUser?.user_metadata?.avatar_url ||
+        null,
+    });
+    if (!optimisticComment) return false;
+
+    const previousComments = Array.isArray(pinCommentsCacheRef.current.get(pinId))
+      ? pinCommentsCacheRef.current.get(pinId)
+      : Array.isArray(pinComments)
+        ? pinComments
+        : [];
+    const optimisticComments = [...previousComments, optimisticComment];
+    pinCommentsCacheRef.current.set(pinId, optimisticComments);
+    if (selectedPinIdRef.current === pinId) {
+      setPinComments(optimisticComments);
+    }
+
+    try {
+      setIsSubmittingComment(true);
+
+      let confirmedComment = null;
+      const createResult = await addPinCommentViaEdgeFunction(
+        pinId,
+        trimmedContent,
+        session.access_token,
+        session.refresh_token || null,
+        userId,
+        parentCommentId,
+      );
+
+      if (!createResult.error) {
+        const rawComment = createResult?.data?.comment || createResult?.data;
+        confirmedComment = normalizePinComment(rawComment);
+      } else {
+        const edgeErrorText = String(
+          createResult?.error?.message || "",
+        ).toLowerCase();
+        const canFallbackToDirectInsert =
+          createResult?.status === 404 ||
+          createResult?.status === 405 ||
+          edgeErrorText.includes("unsupported action") ||
+          edgeErrorText.includes("edge function failed (404)") ||
+          edgeErrorText.includes("edge function failed (405)") ||
+          edgeErrorText.includes('null value in column "author_id"') ||
+          edgeErrorText.includes('null value in column "user_id"') ||
+          edgeErrorText.includes('null value in column "parent_comment_id"') ||
+          edgeErrorText.includes('null value in column "text"') ||
+          edgeErrorText.includes('null value in column "content"') ||
+          edgeErrorText.includes('column "author_id"') ||
+          edgeErrorText.includes('column "user_id"') ||
+          edgeErrorText.includes('column "parent_comment_id"') ||
+          edgeErrorText.includes('column "text"') ||
+          edgeErrorText.includes('column "content"');
+        if (!canFallbackToDirectInsert) {
+          throw createResult.error;
+        }
+
+        const authed = supabaseWithAccessToken(session.access_token);
+        const baseInsertVariants = [
+          {
+            pin_id: pinId,
+            user_id: userId,
+            author_id: userId,
+            content: trimmedContent,
+            text: trimmedContent,
+          },
+          {
+            pin_id: pinId,
+            user_id: userId,
+            author_id: userId,
+            content: trimmedContent,
+          },
+          {
+            pin_id: pinId,
+            user_id: userId,
+            author_id: userId,
+            text: trimmedContent,
+          },
+          { pin_id: pinId, user_id: userId, content: trimmedContent, text: trimmedContent },
+          { pin_id: pinId, user_id: userId, content: trimmedContent },
+          { pin_id: pinId, user_id: userId, text: trimmedContent },
+          {
+            pin_id: pinId,
+            author_id: userId,
+            content: trimmedContent,
+            text: trimmedContent,
+          },
+          { pin_id: pinId, author_id: userId, content: trimmedContent },
+          { pin_id: pinId, author_id: userId, text: trimmedContent },
+        ];
+        const insertVariants = parentCommentId
+          ? baseInsertVariants.map((row) => ({
+              ...row,
+              parent_comment_id: parentCommentId,
+            }))
+          : baseInsertVariants;
+        let insertResult = null;
+        let insertError = null;
+        for (const row of insertVariants) {
+          const attempt = await authed
+            .from("pin_comments")
+            .insert([row])
+            .select("*")
+            .maybeSingle();
+          if (!attempt.error && attempt.data) {
+            insertResult = attempt;
+            insertError = null;
+            break;
+          }
+          insertError = attempt.error;
+          const message = String(attempt?.error?.message || "").toLowerCase();
+          const code = String(attempt?.error?.code || "");
+          const isSchemaCompatibilityError =
+            code === "42703" ||
+            message.includes('column "user_id"') ||
+            message.includes('column "author_id"') ||
+            message.includes('column "parent_comment_id"') ||
+            message.includes('column "text"') ||
+            message.includes('column "content"') ||
+            message.includes('null value in column "user_id"') ||
+            message.includes('null value in column "author_id"') ||
+            message.includes('null value in column "parent_comment_id"') ||
+            message.includes('null value in column "text"') ||
+            message.includes('null value in column "content"');
+          if (!isSchemaCompatibilityError) {
+            throw attempt.error;
+          }
+        }
+
+        if (insertError) {
+          const code = String(insertError?.code || "");
+          if (code === "42501") {
+            throw new Error(
+              "Comment insert was blocked by row-level security. Deploy the latest `social-actions` edge function and run latest Supabase migrations.",
+            );
+          }
+          throw insertError;
+        }
+        if (!insertResult?.data) {
+          throw new Error("Comment insert returned no affected rows.");
+        }
+
+        confirmedComment = normalizePinComment({
+          ...insertResult.data,
+          parent_comment_id:
+            insertResult.data?.parent_comment_id || parentCommentId || null,
+          user_id:
+            insertResult.data?.user_id || insertResult.data?.author_id || userId,
+          author_name: optimisticComment.author_name,
+          author_username: optimisticComment.author_username,
+          author_avatar_url: optimisticComment.author_avatar_url,
+        });
+      }
+
+      if (!confirmedComment) {
+        throw new Error("Comment insert returned no affected rows.");
+      }
+
+      const nextComments = (pinCommentsCacheRef.current.get(pinId) || []).map(
+        (item) => (item.id === optimisticComment.id ? confirmedComment : item),
+      );
+      pinCommentsCacheRef.current.set(pinId, nextComments);
+      if (selectedPinIdRef.current === pinId) {
+        setPinComments(nextComments);
+      }
+      return true;
+    } catch (error) {
+      const rollbackComments = (pinCommentsCacheRef.current.get(pinId) || []).filter(
+        (item) => item.id !== optimisticComment.id,
+      );
+      pinCommentsCacheRef.current.set(pinId, rollbackComments);
+      if (selectedPinIdRef.current === pinId) {
+        setPinComments(rollbackComments);
+      }
+      console.error("Error adding pin comment:", error);
+      Alert.alert("Error", formatErrorMessage(error));
+      return false;
+    } finally {
+      setIsSubmittingComment(false);
+    }
+  };
+
+  const handleDeletePinComment = async (commentId) => {
+    const normalizedCommentId = String(commentId || "");
+    if (!isUuid(normalizedCommentId)) return false;
+    if (!selectedPin?.id) return false;
+
+    const pinId = selectedPin.id;
+    const session = await getActiveSession();
+    const userId = session?.user?.id || null;
+    if (!userId || !session?.access_token) {
+      Alert.alert("Sign In Required", "Please sign in to delete comments.");
+      return false;
+    }
+    const isPinOwner = String(selectedPin?.user_id || "") === String(userId || "");
+
+    const existing = pinCommentsCacheRef.current.get(pinId) || pinComments || [];
+    const target = existing.find((comment) => comment?.id === normalizedCommentId);
+    if (!target) {
+      return false;
+    }
+    const isCommentOwner = String(target?.user_id || "") === String(userId || "");
+    if (!isCommentOwner && !isPinOwner) {
+      Alert.alert(
+        "Not Allowed",
+        "You can only delete your own comments or comments on your own pin.",
+      );
+      return false;
+    }
+
+    const threadCommentIds = collectCommentThreadIds(existing, normalizedCommentId);
+    const optimisticComments = existing.filter(
+      (comment) => !threadCommentIds.has(String(comment?.id || "")),
+    );
+    pinCommentsCacheRef.current.set(pinId, optimisticComments);
+    if (selectedPinIdRef.current === pinId) {
+      setPinComments(optimisticComments);
+    }
+
+    try {
+      setDeletingCommentId(normalizedCommentId);
+      const deleteResult = await deletePinCommentViaEdgeFunction(
+        normalizedCommentId,
+        session.access_token,
+        session.refresh_token || null,
+        userId,
+      );
+      if (deleteResult.error) {
+        const edgeErrorText = String(
+          deleteResult?.error?.message || "",
+        ).toLowerCase();
+        const canFallbackToDirectDelete =
+          deleteResult?.status === 404 ||
+          deleteResult?.status === 405 ||
+          edgeErrorText.includes("unsupported action") ||
+          edgeErrorText.includes("edge function failed (404)") ||
+          edgeErrorText.includes("edge function failed (405)");
+        if (!canFallbackToDirectDelete) {
+          throw deleteResult.error;
+        }
+
+        let directAccessToken = session.access_token;
+        const performDirectDelete = async () => {
+          const authed = supabaseWithAccessToken(directAccessToken);
+          return await authed
+            .from("pin_comments")
+            .delete()
+            .eq("id", normalizedCommentId)
+            .select("id")
+            .maybeSingle();
+        };
+
+        let fallbackDelete = await performDirectDelete();
+        if (!fallbackDelete.error && fallbackDelete.data?.id) {
+          return true;
+        }
+
+        const {
+          data: { session: refreshedSession },
+          error: refreshError,
+        } = await supabase.auth.refreshSession();
+        if (!refreshError && refreshedSession?.access_token) {
+          directAccessToken = refreshedSession.access_token;
+          fallbackDelete = await performDirectDelete();
+          if (!fallbackDelete.error && fallbackDelete.data?.id) {
+            return true;
+          }
+        }
+
+        if (fallbackDelete.error) {
+          throw fallbackDelete.error;
+        }
+
+        const verifyRes = await supabaseWithAccessToken(directAccessToken)
+          .from("pin_comments")
+          .select("id,user_id,pin_id")
+          .eq("id", normalizedCommentId)
+          .maybeSingle();
+        if (verifyRes.error) {
+          throw verifyRes.error;
+        }
+        if (!verifyRes.data?.id) {
+          return true;
+        }
+        const verifyCommentOwner =
+          String(verifyRes.data.user_id || "") === String(userId || "");
+        const verifyPinOwner =
+          String(verifyRes.data.pin_id || "") === String(pinId || "") && isPinOwner;
+        if (!verifyCommentOwner && !verifyPinOwner) {
+          throw new Error(
+            "You can only delete your own comments or comments on your own pin.",
+          );
+        }
+        throw new Error(
+          "Comment delete was blocked by backend policy. Run latest Supabase migrations and deploy the latest social-actions edge function.",
+        );
+      }
+
+      return true;
+    } catch (error) {
+      pinCommentsCacheRef.current.set(pinId, existing);
+      if (selectedPinIdRef.current === pinId) {
+        setPinComments(existing);
+      }
+      console.error("Error deleting comment:", error);
+      Alert.alert("Error", formatErrorMessage(error));
+      return false;
+    } finally {
+      setDeletingCommentId((prev) =>
+        prev === normalizedCommentId ? null : prev,
+      );
+    }
+  };
+
   const handleUpdatePin = async (pinId, updates) => {
     try {
       const normalizedUpdates = { ...(updates || {}) };
@@ -2554,9 +3126,15 @@ const MapScreen = ({ navigation, route }) => {
       ids.forEach((id) => {
         pinVoteSummaryCacheRef.current.delete(id);
         pinVoteRequestRef.current.delete(id);
+        pinCommentsCacheRef.current.delete(id);
+        pinCommentsRequestRef.current.delete(id);
       });
       setShowDetailModal(false);
       setSelectedPin(null);
+      setPinComments([]);
+      setPinCommentsLoading(false);
+      setIsSubmittingComment(false);
+      setDeletingCommentId(null);
     };
 
     const showDeleteResultAlert = (deletedCount, requestedCount) => {
@@ -3035,14 +3613,24 @@ const MapScreen = ({ navigation, route }) => {
         isAdmin={isAdmin}
         pinVoteSummary={pinVoteSummary}
         isSubmittingVote={isSubmittingVote}
+        pinComments={pinComments}
+        isLoadingComments={pinCommentsLoading}
+        isSubmittingComment={isSubmittingComment}
+        deletingCommentId={deletingCommentId}
         associatedLayers={selectedPinLayers}
         onVote={handleVotePin}
+        onAddComment={handleAddPinComment}
+        onDeleteComment={handleDeletePinComment}
         onClose={() => {
           selectedPinIdRef.current = null;
           setShowDetailModal(false);
           setSelectedPin(null);
           setSelectedPinLayers([]);
           setPinVoteSummary({ upvotes: 0, downvotes: 0, userVote: 0 });
+          setPinComments([]);
+          setPinCommentsLoading(false);
+          setIsSubmittingComment(false);
+          setDeletingCommentId(null);
         }}
         onUpdate={handleUpdatePin}
         onDelete={handleDeletePin}

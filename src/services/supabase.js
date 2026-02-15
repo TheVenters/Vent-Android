@@ -418,6 +418,47 @@ export const getPinVoteSummaryViaEdgeFunction = async (
     refreshToken,
   );
 
+export const addPinCommentViaEdgeFunction = async (
+  pinId,
+  content,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+  parentCommentId = null,
+) =>
+  socialAction(
+    'add_comment',
+    { pinId, content, actorUserId, parentCommentId },
+    accessToken,
+    refreshToken,
+  );
+
+export const listPinCommentsViaEdgeFunction = async (
+  pinId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'list_comments',
+    { pinId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const deletePinCommentViaEdgeFunction = async (
+  commentId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'delete_comment',
+    { commentId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
 export const fetchFriendListsViaEdgeFunction = async (
   accessToken,
   refreshToken = null,

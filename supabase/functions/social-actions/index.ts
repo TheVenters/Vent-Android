@@ -19,6 +19,9 @@ type VoteValue = -1 | 1;
 type SocialAction =
   | "vote"
   | "vote_summary"
+  | "add_comment"
+  | "list_comments"
+  | "delete_comment"
   | "friend_lists"
   | "send_friend_request"
   | "accept_friend_request"
@@ -31,6 +34,7 @@ type SocialAction =
   | "delete_pin";
 
 const asString = (value: unknown) => String(value ?? "").trim();
+const MAX_COMMENT_LENGTH = 500;
 
 const isUuid = (value: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -248,6 +252,412 @@ const handleVoteSummary = async (
 
   const summary = await computeVoteSummary(adminClient, pinId, actorId);
   return jsonResponse(200, { success: true, ...summary });
+};
+
+const parseCommentContent = (value: unknown) => {
+  const comment = String(value ?? "").trim();
+  if (!comment) return null;
+  if (comment.length > MAX_COMMENT_LENGTH) return null;
+  return comment;
+};
+
+const parseOptionalCommentId = (value: unknown) => {
+  const commentId = asString(value);
+  if (!commentId) return null;
+  if (!isUuid(commentId)) return null;
+  return commentId;
+};
+
+const isCommentIdentitySchemaError = (error: unknown) => {
+  const code = asString((error as Record<string, unknown>)?.code);
+  const message = asString((error as Record<string, unknown>)?.message).toLowerCase();
+  return (
+    code === "42703" ||
+    message.includes('column "user_id"') ||
+    message.includes('column "author_id"') ||
+    message.includes('column "parent_comment_id"') ||
+    message.includes('column "content"') ||
+    message.includes('column "text"') ||
+    message.includes('null value in column "user_id"') ||
+    message.includes('null value in column "author_id"') ||
+    message.includes('null value in column "parent_comment_id"') ||
+    message.includes('null value in column "content"') ||
+    message.includes('null value in column "text"')
+  );
+};
+
+const isParentCommentColumnError = (error: unknown) => {
+  const code = asString((error as Record<string, unknown>)?.code);
+  const message = asString((error as Record<string, unknown>)?.message).toLowerCase();
+  return code === "42703" && message.includes('column "parent_comment_id"');
+};
+
+const resolveCommentUserId = (row: Record<string, unknown>) => {
+  const userId = asString(row?.user_id);
+  if (userId) return userId;
+  return asString(row?.author_id);
+};
+
+const listCommentRowsFlexible = async (
+  adminClient: ReturnType<typeof createClient>,
+  pinId: string,
+) => {
+  const selectVariants = [
+    "id,pin_id,parent_comment_id,user_id,author_id,content,text,created_at,updated_at",
+    "id,pin_id,parent_comment_id,user_id,author_id,content,created_at,updated_at",
+    "id,pin_id,parent_comment_id,user_id,author_id,text,created_at,updated_at",
+    "id,pin_id,parent_comment_id,user_id,content,text,created_at,updated_at",
+    "id,pin_id,parent_comment_id,author_id,content,text,created_at,updated_at",
+    "id,pin_id,parent_comment_id,user_id,content,created_at,updated_at",
+    "id,pin_id,parent_comment_id,user_id,text,created_at,updated_at",
+    "id,pin_id,parent_comment_id,author_id,content,created_at,updated_at",
+    "id,pin_id,parent_comment_id,author_id,text,created_at,updated_at",
+    "id,pin_id,user_id,author_id,content,text,created_at,updated_at",
+    "id,pin_id,user_id,author_id,content,created_at,updated_at",
+    "id,pin_id,user_id,author_id,text,created_at,updated_at",
+    "id,pin_id,user_id,content,text,created_at,updated_at",
+    "id,pin_id,author_id,content,text,created_at,updated_at",
+    "id,pin_id,user_id,content,created_at,updated_at",
+    "id,pin_id,user_id,text,created_at,updated_at",
+    "id,pin_id,author_id,content,created_at,updated_at",
+    "id,pin_id,author_id,text,created_at,updated_at",
+    "*",
+  ];
+
+  let lastError: unknown = null;
+  for (const selectColumns of selectVariants) {
+    const commentsRes = await adminClient
+      .from("pin_comments")
+      .select(selectColumns)
+      .eq("pin_id", pinId)
+      .order("created_at", { ascending: true })
+      .limit(200);
+    if (!commentsRes.error) return commentsRes.data || [];
+    lastError = commentsRes.error;
+    if (!isCommentIdentitySchemaError(commentsRes.error)) {
+      throw commentsRes.error;
+    }
+  }
+
+  throw lastError || new Error("Failed to load comment rows.");
+};
+
+const insertCommentRowFlexible = async (
+  adminClient: ReturnType<typeof createClient>,
+  pinId: string,
+  actorId: string,
+  content: string,
+  parentCommentId: string | null = null,
+) => {
+  const baseInsertVariants = [
+    {
+      pin_id: pinId,
+      user_id: actorId,
+      author_id: actorId,
+      content,
+      text: content,
+    },
+    {
+      pin_id: pinId,
+      user_id: actorId,
+      author_id: actorId,
+      content,
+    },
+    {
+      pin_id: pinId,
+      user_id: actorId,
+      author_id: actorId,
+      text: content,
+    },
+    { pin_id: pinId, user_id: actorId, content, text: content },
+    { pin_id: pinId, user_id: actorId, content },
+    { pin_id: pinId, user_id: actorId, text: content },
+    { pin_id: pinId, author_id: actorId, content, text: content },
+    { pin_id: pinId, author_id: actorId, content },
+    { pin_id: pinId, author_id: actorId, text: content },
+  ];
+  const insertVariants = parentCommentId
+    ? baseInsertVariants.map((row) => ({ ...row, parent_comment_id: parentCommentId }))
+    : baseInsertVariants;
+
+  let lastError: unknown = null;
+  for (const row of insertVariants) {
+    const insertRes = await adminClient
+      .from("pin_comments")
+      .insert([row])
+      .select("*")
+      .maybeSingle();
+    if (!insertRes.error && insertRes.data) return insertRes.data;
+    lastError = insertRes.error || new Error("Comment insert failed.");
+    if (parentCommentId && isParentCommentColumnError(insertRes.error)) {
+      throw new Error(
+        "Replies are not enabled in the database yet. Run the latest Supabase migrations.",
+      );
+    }
+    if (!isCommentIdentitySchemaError(insertRes.error)) {
+      throw insertRes.error || new Error("Comment insert failed.");
+    }
+  }
+
+  throw lastError || new Error("Comment insert failed.");
+};
+
+const getCommentByIdFlexible = async (
+  adminClient: ReturnType<typeof createClient>,
+  commentId: string,
+) => {
+  const selectVariants = [
+    "id,pin_id,parent_comment_id,user_id,author_id",
+    "id,pin_id,user_id,author_id",
+    "id,pin_id,user_id",
+    "id,pin_id,author_id",
+    "*",
+  ];
+
+  let lastError: unknown = null;
+  for (const selectColumns of selectVariants) {
+    const commentRes = await adminClient
+      .from("pin_comments")
+      .select(selectColumns)
+      .eq("id", commentId)
+      .maybeSingle();
+    if (!commentRes.error) return commentRes.data || null;
+    lastError = commentRes.error;
+    if (!isCommentIdentitySchemaError(commentRes.error)) {
+      throw commentRes.error;
+    }
+  }
+
+  throw lastError || new Error("Failed to load comment row.");
+};
+
+const listPinComments = async (
+  adminClient: ReturnType<typeof createClient>,
+  pinId: string,
+) => {
+  const comments = (await listCommentRowsFlexible(adminClient, pinId)).map(
+    (row) => row as Record<string, unknown>,
+  );
+  const userIds = Array.from(
+    new Set(comments.map((row) => resolveCommentUserId(row)).filter(Boolean)),
+  );
+
+  let profileMap = new Map<string, Record<string, unknown>>();
+  if (userIds.length > 0) {
+    const profilesRes = await adminClient
+      .from("profiles")
+      .select("id,username,display_name,avatar_url")
+      .in("id", userIds);
+    if (profilesRes.error) throw profilesRes.error;
+    profileMap = new Map(
+      (profilesRes.data || []).map((profile) => [profile.id, profile]),
+    );
+  }
+
+  return comments.map((comment) => {
+    const actorUserId = resolveCommentUserId(comment);
+    const profile = profileMap.get(actorUserId);
+    const parentCommentId = asString(comment?.parent_comment_id);
+    return {
+      ...comment,
+      user_id: actorUserId,
+      parent_comment_id: isUuid(parentCommentId) ? parentCommentId : null,
+      content: asString(comment?.content) || asString(comment?.text),
+      author_name: asString(profile?.display_name) || "Anonymous",
+      author_username: asString(profile?.username),
+      author_avatar_url: asString(profile?.avatar_url) || null,
+    };
+  });
+};
+
+const handleListComments = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const pinId = asString(payload.pinId);
+  if (!isUuid(pinId)) {
+    return jsonResponse(400, { error: "pinId is required." });
+  }
+
+  const pinRes = await adminClient
+    .from("pins")
+    .select("id,user_id,layer")
+    .eq("id", pinId)
+    .maybeSingle();
+  if (pinRes.error) {
+    return jsonResponse(400, { error: pinRes.error.message });
+  }
+  if (!pinRes.data) {
+    return jsonResponse(404, { error: "Pin not found." });
+  }
+
+  const visible = await isVisibleToActor(adminClient, actorId, pinRes.data);
+  if (!visible) {
+    return jsonResponse(403, { error: "Pin not accessible for current user." });
+  }
+
+  const comments = await listPinComments(adminClient, pinId);
+  return jsonResponse(200, { success: true, comments });
+};
+
+const handleAddComment = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const pinId = asString(payload.pinId);
+  const content = parseCommentContent(payload.content);
+  const parentCommentIdRaw = asString(payload.parentCommentId);
+  const parentCommentId = parseOptionalCommentId(payload.parentCommentId);
+  if (parentCommentIdRaw && !parentCommentId) {
+    return jsonResponse(400, { error: "parentCommentId must be a valid UUID." });
+  }
+  if (!isUuid(pinId) || !content) {
+    return jsonResponse(400, {
+      error: `pinId and content (1-${MAX_COMMENT_LENGTH} chars) are required.`,
+    });
+  }
+
+  const pinRes = await adminClient
+    .from("pins")
+    .select("id,user_id,layer")
+    .eq("id", pinId)
+    .maybeSingle();
+  if (pinRes.error) {
+    return jsonResponse(400, { error: pinRes.error.message });
+  }
+  if (!pinRes.data) {
+    return jsonResponse(404, { error: "Pin not found." });
+  }
+
+  const visible = await isVisibleToActor(adminClient, actorId, pinRes.data);
+  if (!visible) {
+    return jsonResponse(403, { error: "Pin not accessible for current user." });
+  }
+
+  if (parentCommentId) {
+    let parentCommentRow: Record<string, unknown> | null = null;
+    try {
+      const result = await getCommentByIdFlexible(adminClient, parentCommentId);
+      parentCommentRow = result ? (result as Record<string, unknown>) : null;
+    } catch (error) {
+      return jsonResponse(400, {
+        error:
+          asString((error as Record<string, unknown>)?.message) ||
+          "Failed to load parent comment.",
+      });
+    }
+    if (!parentCommentRow) {
+      return jsonResponse(404, { error: "Parent comment not found." });
+    }
+    if (asString(parentCommentRow.pin_id) !== pinId) {
+      return jsonResponse(400, {
+        error: "Parent comment must belong to the same pin.",
+      });
+    }
+  }
+
+  const insertRes = await adminClient
+    .from("profiles")
+    .select("username,display_name,avatar_url")
+    .eq("id", actorId)
+    .maybeSingle();
+  const profile = insertRes.error ? null : insertRes.data;
+
+  let insertedComment = null;
+  try {
+    insertedComment = await insertCommentRowFlexible(
+      adminClient,
+      pinId,
+      actorId,
+      content,
+      parentCommentId,
+    );
+  } catch (error) {
+    return jsonResponse(400, { error: asString((error as Record<string, unknown>)?.message) || "Comment insert failed." });
+  }
+
+  const comment = {
+    ...(insertedComment as Record<string, unknown>),
+    user_id: actorId,
+    parent_comment_id:
+      parseOptionalCommentId((insertedComment as Record<string, unknown>)?.parent_comment_id) ||
+      parentCommentId,
+    content:
+      asString((insertedComment as Record<string, unknown>)?.content) ||
+      asString((insertedComment as Record<string, unknown>)?.text) ||
+      content,
+    author_name: asString(profile?.display_name) || "Anonymous",
+    author_username: asString(profile?.username),
+    author_avatar_url: asString(profile?.avatar_url) || null,
+  };
+
+  return jsonResponse(200, { success: true, comment });
+};
+
+const handleDeleteComment = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const commentId = asString(payload.commentId);
+  if (!isUuid(commentId)) {
+    return jsonResponse(400, { error: "commentId is required." });
+  }
+
+  let commentRow: Record<string, unknown> | null = null;
+  try {
+    const result = await getCommentByIdFlexible(adminClient, commentId);
+    commentRow = result ? (result as Record<string, unknown>) : null;
+  } catch (error) {
+    return jsonResponse(400, {
+      error:
+        asString((error as Record<string, unknown>)?.message) ||
+        "Failed to load comment.",
+    });
+  }
+  if (!commentRow) {
+    return jsonResponse(404, { error: "Comment not found." });
+  }
+
+  const pinRes = await adminClient
+    .from("pins")
+    .select("id,user_id")
+    .eq("id", asString(commentRow.pin_id))
+    .maybeSingle();
+  if (pinRes.error) {
+    return jsonResponse(400, { error: pinRes.error.message });
+  }
+  if (!pinRes.data) {
+    return jsonResponse(404, { error: "Pin not found." });
+  }
+
+  const actorOwnsComment = resolveCommentUserId(commentRow) === actorId;
+  const actorOwnsPin = pinRes.data.user_id === actorId;
+  if (!actorOwnsComment && !actorOwnsPin) {
+    return jsonResponse(403, {
+      error: "You can only delete your own comments or comments on your own pin.",
+    });
+  }
+
+  const deleteRes = await adminClient
+    .from("pin_comments")
+    .delete()
+    .eq("id", commentId)
+    .select("id")
+    .maybeSingle();
+  if (deleteRes.error) {
+    return jsonResponse(400, { error: deleteRes.error.message });
+  }
+  if (!deleteRes.data?.id) {
+    return jsonResponse(404, { error: "Comment not found." });
+  }
+
+  return jsonResponse(200, {
+    success: true,
+    deletedCommentId: deleteRes.data.id,
+  });
 };
 
 const findFriendshipPair = async (
@@ -804,6 +1214,21 @@ Deno.serve(async (req) => {
     if (action === "vote_summary") {
       return await withRefreshedTokens(
         await handleVoteSummary(adminClient, actorId, payload),
+      );
+    }
+    if (action === "add_comment") {
+      return await withRefreshedTokens(
+        await handleAddComment(adminClient, actorId, payload),
+      );
+    }
+    if (action === "list_comments") {
+      return await withRefreshedTokens(
+        await handleListComments(adminClient, actorId, payload),
+      );
+    }
+    if (action === "delete_comment") {
+      return await withRefreshedTokens(
+        await handleDeleteComment(adminClient, actorId, payload),
       );
     }
     if (action === "friend_lists") {
