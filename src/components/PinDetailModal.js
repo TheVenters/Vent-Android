@@ -14,6 +14,17 @@ import {
 } from "react-native";
 import { COLORS, SIZES } from "../constants/theme";
 
+const VISIBILITY_OPTIONS = ["public", "friends"];
+
+const normalizeVisibility = (value) => {
+  const layer = String(value || "").toLowerCase();
+  if (layer === "private") return "friends";
+  return VISIBILITY_OPTIONS.includes(layer) ? layer : "public";
+};
+
+const visibilityLabel = (value) =>
+  String(value || "").charAt(0).toUpperCase() + String(value || "").slice(1);
+
 const PinDetailModal = ({
   visible,
   pin,
@@ -30,6 +41,7 @@ const PinDetailModal = ({
   const [isEditing, setIsEditing] = useState(false);
   const [content, setContent] = useState("");
   const [caption, setCaption] = useState("");
+  const [visibility, setVisibility] = useState("public");
   const [mediaAspectRatio, setMediaAspectRatio] = useState(4 / 3);
 
   const isOwner = pin?.user_id === currentUserId;
@@ -40,6 +52,7 @@ const PinDetailModal = ({
     if (pin) {
       setContent(pin.content || "");
       setCaption(pin.caption || "");
+      setVisibility(normalizeVisibility(pin.layer));
       setIsEditing(false);
     }
   }, [pin]);
@@ -68,7 +81,7 @@ const PinDetailModal = ({
       Alert.alert("Error", "Content cannot be empty");
       return;
     }
-    const updates = { caption };
+    const updates = { caption, layer: normalizeVisibility(visibility) };
     if (!isMediaPin) {
       updates.content = content;
     }
@@ -168,6 +181,33 @@ const PinDetailModal = ({
                   onChangeText={setCaption}
                   placeholder="Edit title..."
                 />
+                <Text style={[styles.label, { marginTop: SIZES.md }]}>
+                  Visibility
+                </Text>
+                <View style={styles.visibilitySelector}>
+                  {VISIBILITY_OPTIONS.map((option) => {
+                    const selected = visibility === option;
+                    return (
+                      <TouchableOpacity
+                        key={option}
+                        style={[
+                          styles.visibilityButton,
+                          selected && styles.visibilityButtonSelected,
+                        ]}
+                        onPress={() => setVisibility(option)}
+                      >
+                        <Text
+                          style={[
+                            styles.visibilityButtonText,
+                            selected && styles.visibilityButtonTextSelected,
+                          ]}
+                        >
+                          {visibilityLabel(option)}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
                 {!isMediaPin && (
                   <>
                     <Text style={[styles.label, { marginTop: SIZES.md }]}>
@@ -276,6 +316,7 @@ const PinDetailModal = ({
                     onPress={() => {
                       setContent(pin.content || "");
                       setCaption(pin.caption || "");
+                      setVisibility(normalizeVisibility(pin.layer));
                       setIsEditing(false);
                     }}
                   >
@@ -426,6 +467,31 @@ const styles = StyleSheet.create({
   },
   textArea: {
     minHeight: 100,
+  },
+  visibilitySelector: {
+    flexDirection: "row",
+    gap: SIZES.sm,
+  },
+  visibilityButton: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: SIZES.radiusLg,
+    paddingVertical: SIZES.sm,
+    alignItems: "center",
+    backgroundColor: COLORS.white,
+  },
+  visibilityButtonSelected: {
+    borderColor: COLORS.primary,
+    backgroundColor: `${COLORS.primary}20`,
+  },
+  visibilityButtonText: {
+    fontSize: SIZES.sm,
+    fontWeight: "600",
+    color: COLORS.gray,
+  },
+  visibilityButtonTextSelected: {
+    color: COLORS.primary,
   },
   metadata: {
     flexDirection: "row",

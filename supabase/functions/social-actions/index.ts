@@ -23,7 +23,12 @@ type SocialAction =
   | "send_friend_request"
   | "accept_friend_request"
   | "reject_friend_request"
-  | "remove_friend";
+  | "remove_friend"
+  | "set_layer_pref"
+  | "set_layer_order"
+  | "create_pins"
+  | "list_pins"
+  | "delete_pin";
 
 const asString = (value: unknown) => String(value ?? "").trim();
 
@@ -43,7 +48,9 @@ const resolveActor = async (
   accessToken: string,
   refreshToken: string,
   actorUserId: string,
+  options: { allowActorIdFallback?: boolean } = {},
 ) => {
+  const allowActorIdFallback = options.allowActorIdFallback !== false;
   const trimmedAccess = asString(accessToken);
   if (trimmedAccess) {
     const byAccess = await adminClient.auth.getUser(trimmedAccess);
@@ -77,14 +84,16 @@ const resolveActor = async (
     }
   }
 
-  const trimmedActor = asString(actorUserId);
-  if (isUuid(trimmedActor)) {
-    const actorRes = await adminClient.auth.admin.getUserById(trimmedActor);
-    if (!actorRes.error && actorRes.data.user?.id) {
-      return {
-        actorId: actorRes.data.user.id,
-        usedFallback: true,
-      };
+  if (allowActorIdFallback) {
+    const trimmedActor = asString(actorUserId);
+    if (isUuid(trimmedActor)) {
+      const actorRes = await adminClient.auth.admin.getUserById(trimmedActor);
+      if (!actorRes.error && actorRes.data.user?.id) {
+        return {
+          actorId: actorRes.data.user.id,
+          usedFallback: true,
+        };
+      }
     }
   }
 
@@ -94,25 +103,35 @@ const resolveActor = async (
   };
 };
 
-const isVisibleToActor = async (
+const areUsersAcceptedFriends = async (
   adminClient: ReturnType<typeof createClient>,
-  actorId: string,
-  pin: { user_id: string; layer: string },
+  userAId: string,
+  userBId: string,
 ) => {
-  if (pin.layer === "public") return true;
-  if (pin.layer === "private") return pin.user_id === actorId;
-  if (pin.layer !== "friends") return false;
+  if (!userAId || !userBId || userAId === userBId) return false;
 
   const friendshipRes = await adminClient
     .from("friends")
     .select("id", { count: "exact", head: true })
     .eq("status", "accepted")
     .or(
-      `and(user_id.eq.${actorId},friend_id.eq.${pin.user_id}),and(user_id.eq.${pin.user_id},friend_id.eq.${actorId})`,
+      `and(user_id.eq.${userAId},friend_id.eq.${userBId}),and(user_id.eq.${userBId},friend_id.eq.${userAId})`,
     );
 
   if (friendshipRes.error) throw friendshipRes.error;
   return Number(friendshipRes.count || 0) > 0;
+};
+
+const isVisibleToActor = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  pin: { user_id: string; layer: string },
+) => {
+  if (pin.layer === "public") return true;
+  if (pin.user_id === actorId) return true;
+  if (pin.layer !== "private" && pin.layer !== "friends") return false;
+
+  return await areUsersAcceptedFriends(adminClient, actorId, pin.user_id);
 };
 
 const computeVoteSummary = async (
@@ -429,6 +448,288 @@ const handleFriendLists = async (
   });
 };
 
+const isActorAdmin = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+) => {
+  const profileRes = await adminClient
+    .from("profiles")
+    .select("is_admin")
+    .eq("id", actorId)
+    .maybeSingle();
+  if (profileRes.error) {
+    const errCode = asString((profileRes.error as Record<string, unknown>)?.code);
+    const errMsg = asString(profileRes.error.message).toLowerCase();
+    if (errCode === "42703" || errMsg.includes("is_admin")) {
+      return false;
+    }
+    throw profileRes.error;
+  }
+  return Boolean(profileRes.data?.is_admin);
+};
+
+const resolveGroupedPinIds = async (
+  adminClient: ReturnType<typeof createClient>,
+  groupId: string,
+) => {
+  const byExpression = await adminClient
+    .from("pins")
+    .select("id,user_id")
+    .eq("geometry->>cross_post_group_id", groupId);
+  if (!byExpression.error) return byExpression.data || [];
+
+  const byContains = await adminClient
+    .from("pins")
+    .select("id,user_id")
+    .contains("geometry", { cross_post_group_id: groupId });
+  if (!byContains.error) return byContains.data || [];
+
+  throw byContains.error || byExpression.error;
+};
+
+const handleDeletePin = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const pinId = asString(payload.pinId);
+  if (!isUuid(pinId)) {
+    return jsonResponse(400, { error: "pinId is required." });
+  }
+
+  const pinRes = await adminClient
+    .from("pins")
+    .select("id,user_id,geometry")
+    .eq("id", pinId)
+    .maybeSingle();
+  if (pinRes.error) {
+    return jsonResponse(400, { error: pinRes.error.message });
+  }
+  if (!pinRes.data) {
+    return jsonResponse(404, { error: "Pin not found." });
+  }
+
+  const ownerId = pinRes.data.user_id;
+  const admin = await isActorAdmin(adminClient, actorId);
+  if (ownerId !== actorId && !admin) {
+    return jsonResponse(403, { error: "You do not have permission to delete this pin." });
+  }
+
+  let pinIdsToDelete = [pinId];
+  const groupId = asString(
+    (pinRes.data.geometry as Record<string, unknown> | null)?.cross_post_group_id,
+  );
+  if (groupId) {
+    const groupedRows = await resolveGroupedPinIds(adminClient, groupId);
+    const filteredRows = groupedRows.filter((row) => row.user_id === ownerId);
+    if (filteredRows.length > 0) {
+      pinIdsToDelete = Array.from(new Set(filteredRows.map((row) => row.id)));
+    }
+  }
+
+  const deleteRes = await adminClient
+    .from("pins")
+    .delete()
+    .in("id", pinIdsToDelete)
+    .select("id");
+  if (deleteRes.error) {
+    return jsonResponse(400, { error: deleteRes.error.message });
+  }
+
+  const deletedPinIds = Array.from(
+    new Set((deleteRes.data || []).map((row) => row.id).filter(Boolean)),
+  );
+  return jsonResponse(200, {
+    success: true,
+    deletedPinIds,
+    deletedCount: deletedPinIds.length,
+    requestedCount: pinIdsToDelete.length,
+  });
+};
+
+const handleCreatePins = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const incomingRows = Array.isArray(payload.rows) ? payload.rows : [];
+  if (incomingRows.length === 0) {
+    return jsonResponse(400, { error: "rows must contain at least one pin." });
+  }
+  if (incomingRows.length > 20) {
+    return jsonResponse(400, { error: "rows exceeds maximum batch size (20)." });
+  }
+
+  const normalizedRows = incomingRows.map((row) => {
+    if (!row || typeof row !== "object") return null;
+    const typed = row as Record<string, unknown>;
+    return {
+      ...typed,
+      user_id: actorId,
+      geometry:
+        typed.geometry && typeof typed.geometry === "object"
+          ? {
+              ...(typed.geometry as Record<string, unknown>),
+              author_user_id: actorId,
+            }
+          : typed.geometry,
+    };
+  });
+
+  if (normalizedRows.some((row) => row === null)) {
+    return jsonResponse(400, { error: "rows contains invalid pin payload." });
+  }
+
+  const insertRes = await adminClient
+    .from("pins")
+    .insert(normalizedRows as Record<string, unknown>[])
+    .select("id");
+  if (insertRes.error) {
+    return jsonResponse(400, { error: insertRes.error.message });
+  }
+
+  const insertedPinIds = Array.from(
+    new Set((insertRes.data || []).map((row) => row.id).filter(Boolean)),
+  );
+  return jsonResponse(200, {
+    success: true,
+    insertedPinIds,
+    insertedCount: insertedPinIds.length,
+    requestedCount: normalizedRows.length,
+  });
+};
+
+const handleListPins = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const requestedLayerKeys = Array.isArray(payload.layerKeys)
+    ? payload.layerKeys
+    : [];
+  const layerKeys = Array.from(
+    new Set(
+      requestedLayerKeys
+        .map((value) => asString(value).toLowerCase())
+        .filter((value) => ["public", "friends", "private", "events"].includes(value)),
+    ),
+  );
+  if (layerKeys.length === 0) {
+    return jsonResponse(400, { error: "layerKeys must include at least one valid layer." });
+  }
+
+  const requestedLimit = Number(payload.limit);
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(1, Math.min(5000, Math.floor(requestedLimit)))
+    : 3000;
+
+  const pinsRes = await adminClient
+    .from("pins")
+    .select("*")
+    .in("layer", layerKeys)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (pinsRes.error) {
+    return jsonResponse(400, { error: pinsRes.error.message });
+  }
+
+  const rows = pinsRes.data || [];
+  let friendIdSet = new Set<string>();
+  if (layerKeys.includes("friends") || layerKeys.includes("private")) {
+    const friendshipRes = await adminClient
+      .from("friends")
+      .select("user_id,friend_id,status")
+      .or(`user_id.eq.${actorId},friend_id.eq.${actorId}`)
+      .eq("status", "accepted");
+    if (friendshipRes.error) {
+      return jsonResponse(400, { error: friendshipRes.error.message });
+    }
+
+    friendIdSet = new Set(
+      (friendshipRes.data || [])
+        .map((row) => (row.user_id === actorId ? row.friend_id : row.user_id))
+        .filter(Boolean),
+    );
+  }
+
+  const pins = rows.filter((pin) => {
+    const pinLayer = asString(pin?.layer).toLowerCase();
+    if (pinLayer === "public") return true;
+    if (pinLayer === "private" || pinLayer === "friends") {
+      return pin?.user_id === actorId || friendIdSet.has(pin?.user_id);
+    }
+    return false;
+  });
+
+  return jsonResponse(200, {
+    success: true,
+    pins,
+    count: pins.length,
+    requestedCount: rows.length,
+  });
+};
+
+const handleSetLayerPref = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const layerId = asString(payload.layerId);
+  if (!isUuid(layerId)) {
+    return jsonResponse(400, { error: "layerId is required." });
+  }
+  const hidden = Boolean(payload.hidden);
+
+  const upsertRes = await adminClient.from("user_layer_prefs").upsert(
+    [{ user_id: actorId, layer_id: layerId, hidden }],
+    { onConflict: "user_id,layer_id" },
+  );
+  if (upsertRes.error) {
+    return jsonResponse(400, { error: upsertRes.error.message });
+  }
+
+  return jsonResponse(200, {
+    success: true,
+    layerId,
+    hidden,
+  });
+};
+
+const handleSetLayerOrder = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const rawIds = Array.isArray(payload.layerIds) ? payload.layerIds : [];
+  const layerIds = Array.from(
+    new Set(rawIds.map((value) => asString(value)).filter((value) => isUuid(value))),
+  );
+  if (layerIds.length === 0) {
+    return jsonResponse(400, { error: "layerIds must include at least one valid UUID." });
+  }
+  if (layerIds.length > 200) {
+    return jsonResponse(400, { error: "layerIds exceeds maximum size (200)." });
+  }
+
+  const rows = layerIds.map((layerId, index) => ({
+    user_id: actorId,
+    layer_id: layerId,
+    sort_order: index,
+  }));
+  const upsertRes = await adminClient
+    .from("user_layer_prefs")
+    .upsert(rows, { onConflict: "user_id,layer_id" });
+  if (upsertRes.error) {
+    return jsonResponse(400, { error: upsertRes.error.message });
+  }
+
+  return jsonResponse(200, {
+    success: true,
+    layerIds,
+    count: layerIds.length,
+  });
+};
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -468,6 +769,14 @@ Deno.serve(async (req) => {
       accessToken,
       refreshToken,
       actorUserId,
+      {
+        allowActorIdFallback:
+          action !== "delete_pin" &&
+          action !== "create_pins" &&
+          action !== "list_pins" &&
+          action !== "set_layer_pref" &&
+          action !== "set_layer_order",
+      },
     );
     const actorId = actor.actorId || null;
     if (!actorId) {
@@ -525,6 +834,31 @@ Deno.serve(async (req) => {
           payload,
           "delete",
         ),
+      );
+    }
+    if (action === "create_pins") {
+      return await withRefreshedTokens(
+        await handleCreatePins(adminClient, actorId, payload),
+      );
+    }
+    if (action === "list_pins") {
+      return await withRefreshedTokens(
+        await handleListPins(adminClient, actorId, payload),
+      );
+    }
+    if (action === "set_layer_pref") {
+      return await withRefreshedTokens(
+        await handleSetLayerPref(adminClient, actorId, payload),
+      );
+    }
+    if (action === "set_layer_order") {
+      return await withRefreshedTokens(
+        await handleSetLayerOrder(adminClient, actorId, payload),
+      );
+    }
+    if (action === "delete_pin") {
+      return await withRefreshedTokens(
+        await handleDeletePin(adminClient, actorId, payload),
       );
     }
 

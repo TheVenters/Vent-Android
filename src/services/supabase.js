@@ -139,16 +139,9 @@ export const supabaseWithAccessToken = (accessToken) => {
   }
 
   const client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    accessToken: async () => accessToken,
     global: {
       fetch: resilientFetch,
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
-    },
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-      detectSessionInUrl: false,
     },
   });
 
@@ -187,7 +180,22 @@ const isSessionJwtUsable = (session) => {
   const token = session?.access_token;
   if (!userId || !token) return false;
   const payload = parseJwtPayload(token);
-  return payload?.sub === userId;
+  if (payload?.sub !== userId) return false;
+
+  const exp = Number(payload?.exp || 0);
+  if (!Number.isFinite(exp) || exp <= 0) return false;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const tokenSkewBufferSeconds = 30;
+  return exp > nowSeconds + tokenSkewBufferSeconds;
+};
+
+const isAuthSessionMissingError = (error) => {
+  const name = String(error?.name || '').toLowerCase();
+  const message = String(error?.message || '').toLowerCase();
+  return (
+    name.includes('authsessionmissingerror') ||
+    message.includes('auth session missing')
+  );
 };
 
 // Resolve a usable session for writes that depend on auth.uid() in RLS/RPC.
@@ -198,10 +206,13 @@ export const getActiveSession = async () => {
   }
 
   const resolver = (async () => {
+    let currentSession = null;
+
     try {
       const {
         data: { session },
       } = await supabase.auth.getSession();
+      currentSession = session || null;
       if (isSessionJwtUsable(session)) return session;
 
       if (session?.access_token) {
@@ -217,6 +228,11 @@ export const getActiveSession = async () => {
       console.error('Error checking current auth session:', error);
     }
 
+    // No current session means user is signed out; do not attempt refresh.
+    if (!currentSession?.refresh_token) {
+      return null;
+    }
+
     try {
       const {
         data: { session },
@@ -225,6 +241,9 @@ export const getActiveSession = async () => {
       if (error) throw error;
       if (isSessionJwtUsable(session)) return session;
     } catch (error) {
+      if (isAuthSessionMissingError(error)) {
+        return null;
+      }
       console.error('Error refreshing auth session:', error);
     }
 
@@ -459,6 +478,73 @@ export const removeFriendViaEdgeFunction = async (
   socialAction(
     'remove_friend',
     { friendshipId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const createPinsViaEdgeFunction = async (
+  rows,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'create_pins',
+    { rows, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const fetchPinsViaEdgeFunction = async (
+  layerKeys,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+  limit = 3000,
+) =>
+  socialAction(
+    'list_pins',
+    { layerKeys, actorUserId, limit },
+    accessToken,
+    refreshToken,
+  );
+
+export const setLayerPreferenceViaEdgeFunction = async (
+  layerId,
+  hidden,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'set_layer_pref',
+    { layerId, hidden, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const setLayerOrderViaEdgeFunction = async (
+  layerIds,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'set_layer_order',
+    { layerIds, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const deletePinViaEdgeFunction = async (
+  pinId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'delete_pin',
+    { pinId, actorUserId },
     accessToken,
     refreshToken,
   );

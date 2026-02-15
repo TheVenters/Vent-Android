@@ -11,6 +11,7 @@ import {
 } from "react-native";
 import { SIZES } from "../constants/theme";
 import { useAppTheme } from "../context/ThemeContext";
+import { getPinLayerKeyFromLayer } from "../utils/layers";
 
 const OWNER_LABELS = {
   system: "System",
@@ -104,6 +105,7 @@ const LayersControlPanel = ({
                 layers.map((layer, index) => {
                   const badge = getBadgeStyles(layer.owner_type, palette);
                   const isSelected = selectedLayerId === layer.id;
+                  const pinLayerKey = getPinLayerKeyFromLayer(layer);
 
                   return (
                     <TouchableOpacity
@@ -153,6 +155,9 @@ const LayersControlPanel = ({
                               {layer.ownerCommunityName}
                             </Text>
                           ) : null}
+                          <Text style={styles.pinKeyText}>
+                            Posts as {pinLayerKey}
+                          </Text>
                         </View>
                       </View>
 
@@ -379,6 +384,12 @@ const createStyles = (palette, isDark) =>
       fontSize: 11,
       fontWeight: "700",
       color: palette.subtext,
+    },
+    pinKeyText: {
+      fontSize: 11,
+      fontWeight: "700",
+      color: palette.primary,
+      textTransform: "capitalize",
     },
     selectedPill: {
       fontSize: 11,

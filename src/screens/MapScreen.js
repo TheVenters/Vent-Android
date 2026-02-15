@@ -25,7 +25,12 @@ import MapView, {
 } from "react-native-maps";
 import * as Location from "expo-location";
 import {
+  createPinsViaEdgeFunction,
+  deletePinViaEdgeFunction,
+  fetchPinsViaEdgeFunction,
   getPinVoteSummaryViaEdgeFunction,
+  setLayerOrderViaEdgeFunction,
+  setLayerPreferenceViaEdgeFunction,
   supabase,
   getCurrentUser,
   getActiveSession,
@@ -61,14 +66,14 @@ const formatUsernameForLayer = (user) => {
 
 const makeUserPostingLayerName = (user) =>
   `user-${formatUsernameForLayer(user)}-posts`;
-const layerOrderStorageKey = (userId) => `layer_order:${userId || "guest"}`;
 const CLOUD_MIN_POST_COUNT = 2;
 const CLOUD_RADIUS_PADDING_METERS = 40;
 const CLOUD_MIN_RADIUS_METERS = 120;
 const CLOUD_MAX_RADIUS_METERS = 1000;
 const CLUSTER_DISTANCE_PX = 52;
 const CLUSTER_MERGE_DISTANCE_PX = 58;
-const CLUSTER_VIEWPORT_PADDING_PX = 0;
+const CLUSTER_VIEWPORT_PADDING_PX = 64;
+const PIN_VIEWPORT_PADDING_RATIO = 1.2;
 const DEFAULT_MAP_SIZE = { width: 390, height: 780 };
 const PIN_VOTE_PREFETCH_LIMIT = 6;
 const PIN_VOTE_PREFETCH_DELAY_MS = 180;
@@ -101,6 +106,68 @@ const hasValidCoordinate = (post) =>
   Number.isFinite(post.lat) &&
   typeof post?.lng === "number" &&
   Number.isFinite(post.lng);
+
+const normalizeLongitude = (longitude) => {
+  if (!Number.isFinite(longitude)) return longitude;
+  let next = longitude;
+  while (next > 180) next -= 360;
+  while (next < -180) next += 360;
+  return next;
+};
+
+const isLongitudeWithinBounds = (longitude, minLng, maxLng) => {
+  if (minLng <= maxLng) {
+    return longitude >= minLng && longitude <= maxLng;
+  }
+  return longitude >= minLng || longitude <= maxLng;
+};
+
+const isCoordinateWithinRegionBounds = (
+  coordinate,
+  mapRegion,
+  paddingRatio = 0,
+) => {
+  if (
+    !Number.isFinite(coordinate?.latitude) ||
+    !Number.isFinite(coordinate?.longitude)
+  ) {
+    return false;
+  }
+
+  const centerLat = Number(mapRegion?.latitude);
+  const centerLng = Number(mapRegion?.longitude);
+  const latitudeDelta = Number(mapRegion?.latitudeDelta);
+  const longitudeDelta = Number(mapRegion?.longitudeDelta);
+
+  if (
+    !Number.isFinite(centerLat) ||
+    !Number.isFinite(centerLng) ||
+    !Number.isFinite(latitudeDelta) ||
+    !Number.isFinite(longitudeDelta) ||
+    latitudeDelta <= 0 ||
+    longitudeDelta <= 0
+  ) {
+    return true;
+  }
+
+  const latPadding = latitudeDelta * paddingRatio;
+  const lngPadding = longitudeDelta * paddingRatio;
+
+  const minLat = centerLat - latitudeDelta / 2 - latPadding;
+  const maxLat = centerLat + latitudeDelta / 2 + latPadding;
+  if (coordinate.latitude < minLat || coordinate.latitude > maxLat) {
+    return false;
+  }
+
+  if (longitudeDelta + lngPadding * 2 >= 360) {
+    return true;
+  }
+
+  const longitude = normalizeLongitude(coordinate.longitude);
+  const minLng = normalizeLongitude(centerLng - longitudeDelta / 2 - lngPadding);
+  const maxLng = normalizeLongitude(centerLng + longitudeDelta / 2 + lngPadding);
+  return isLongitudeWithinBounds(longitude, minLng, maxLng);
+};
 
 const toScreenPoint = (coordinate, mapRegion, mapSize) => {
   const width = Number(mapSize?.width || 0);
@@ -155,6 +222,10 @@ const isRlsPolicyError = (error) =>
   String(error?.message || "")
     .toLowerCase()
     .includes("row-level security policy");
+const isUuid = (value) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(value || ""),
+  );
 
 const formatErrorMessage = (error) => {
   if (!error) return "Unknown error";
@@ -398,30 +469,79 @@ const mergeNearbyClouds = (clouds, mapRegion, mapSize) => {
 
 const computeMapVisuals = (posts, mapRegion, mapSize) => {
   const normalizedPosts = Array.isArray(posts) ? posts : [];
-  const baseClusters = buildCloudsFromPosts(normalizedPosts, mapRegion, mapSize);
+  const viewportPosts = normalizedPosts.filter(
+    (post) =>
+      hasValidCoordinate(post) &&
+      isCoordinateWithinRegionBounds(
+        { latitude: post.lat, longitude: post.lng },
+        mapRegion,
+        PIN_VIEWPORT_PADDING_RATIO,
+      ),
+  );
+
+  const baseClusters = buildCloudsFromPosts(viewportPosts, mapRegion, mapSize);
   const clusters = mergeNearbyClouds(baseClusters, mapRegion, mapSize);
 
   const visibleClouds = [];
   const clusteredPinnedIds = new Set();
+  const clusteredPostIds = new Set();
 
   clusters.forEach((cloud) => {
     const pinnedCount = cloud.count - cloud.privacyCount;
     const hasPrivacyPosts = cloud.privacyCount > 0;
+    const cloudScreenPoint = toScreenPoint(cloud.center, mapRegion, mapSize);
+    const isCloudCenterVisible = isScreenPointWithinClusterViewport(
+      cloudScreenPoint,
+      mapSize,
+      0,
+    );
     const shouldShowCloud =
-      hasPrivacyPosts || pinnedCount >= CLOUD_MIN_POST_COUNT;
+      isCloudCenterVisible &&
+      (hasPrivacyPosts || pinnedCount >= CLOUD_MIN_POST_COUNT);
+    const shouldHidePinnedPosts =
+      isCloudCenterVisible && pinnedCount >= CLOUD_MIN_POST_COUNT;
 
-    if (!shouldShowCloud) return;
-    const badgeCount = pinnedCount > 0 ? pinnedCount : cloud.count;
-    visibleClouds.push({ ...cloud, badgeCount });
-
-    cloud.posts.forEach((post) => {
-      if (!isCloudOnlyPost(post)) {
-        clusteredPinnedIds.add(post.id);
+    if (!shouldShowCloud && !shouldHidePinnedPosts) return;
+    (cloud.posts || []).forEach((post) => {
+      if (post?.id) {
+        clusteredPostIds.add(post.id);
       }
     });
+    const badgeCount = pinnedCount > 0 ? pinnedCount : cloud.count;
+    if (shouldShowCloud) {
+      visibleClouds.push({ ...cloud, badgeCount });
+    }
+
+    if (shouldHidePinnedPosts) {
+      cloud.posts.forEach((post) => {
+        if (!isCloudOnlyPost(post)) {
+          clusteredPinnedIds.add(post.id);
+        }
+      });
+    }
   });
 
-  const visiblePins = normalizedPosts.filter(
+  // Cloud-only posts must always surface as a cloud, even when isolated.
+  viewportPosts
+    .filter((post) => isCloudOnlyPost(post) && !clusteredPostIds.has(post.id))
+    .forEach((post) => {
+      const cloudCenter = { latitude: post.lat, longitude: post.lng };
+      const cloudScreenPoint = toScreenPoint(cloudCenter, mapRegion, mapSize);
+      if (!isScreenPointWithinClusterViewport(cloudScreenPoint, mapSize, 0)) {
+        return;
+      }
+      visibleClouds.push({
+        id: `cloud-single-${post.id}`,
+        center: cloudCenter,
+        radiusMeters: CLOUD_MIN_RADIUS_METERS,
+        count: 1,
+        privacyCount: 1,
+        posts: [post],
+        badgeCount: 1,
+      });
+    });
+
+  const visiblePins = viewportPosts.filter(
     (post) =>
       hasValidCoordinate(post) &&
       !isCloudOnlyPost(post) &&
@@ -448,6 +568,12 @@ const toTitle = (value) => {
   const str = String(value || "").trim();
   if (!str) return "Unknown";
   return str.charAt(0).toUpperCase() + str.slice(1);
+};
+
+const isUserPostingLayer = (layer) => {
+  const ownerType = layer?.owner_type || "system";
+  const { baseKind } = parseLayerKindMetadata(layer?.kind);
+  return ownerType === "user" && (baseKind || layer?.kind) === "user_posts";
 };
 
 const isFallbackLayer = (layer) =>
@@ -486,22 +612,30 @@ const buildFallbackLayers = (userId) => {
       ownerCommunityName: null,
       sourceCommunityIds: [],
     },
-    {
-      id: "fallback-private",
-      name: "Private",
-      display_name: "Private",
-      kind: "private",
-      raw_kind: "private",
-      owner_type: "system",
-      owner_id: null,
-      is_public: false,
-      enabled: true,
-      isEnabled: asEnabled,
-      layer_icon: null,
-      ownerCommunityName: null,
-      sourceCommunityIds: [],
-    },
   ];
+};
+
+const ensureCoreSystemLayers = (inputLayers, userId) => {
+  const nextLayers = Array.isArray(inputLayers) ? [...inputLayers] : [];
+  const systemKinds = new Set(
+    nextLayers
+      .filter((layer) => (layer.owner_type || "system") === "system")
+      .map((layer) => getPinLayerKeyFromLayer(layer)),
+  );
+  const fallbackByKind = new Map(
+    buildFallbackLayers(userId).map((layer) => [
+      getPinLayerKeyFromLayer(layer),
+      layer,
+    ]),
+  );
+
+  ["public", "friends"].forEach((kind) => {
+    if (!systemKinds.has(kind) && fallbackByKind.has(kind)) {
+      nextLayers.push(fallbackByKind.get(kind));
+    }
+  });
+
+  return nextLayers;
 };
 
 const MapScreen = ({ navigation, route }) => {
@@ -651,39 +785,26 @@ const MapScreen = ({ navigation, route }) => {
     return null;
   }, [currentUser?.id]);
 
-  const persistLayerOrder = useCallback(async (nextLayers, userId) => {
+  const persistLayerOrderToSupabase = useCallback(async (nextLayers, userId) => {
     if (!userId || !Array.isArray(nextLayers)) return;
-    try {
-      const ids = nextLayers.map((layer) => layer.id);
-      await AsyncStorage.setItem(
-        layerOrderStorageKey(userId),
-        JSON.stringify(ids),
-      );
-    } catch (error) {
-      console.error("Error saving layer order:", error);
-    }
-  }, []);
+    const orderedLayerIds = nextLayers
+      .map((layer) => String(layer?.id || ""))
+      .filter((id) => isUuid(id));
+    if (orderedLayerIds.length === 0) return;
 
-  const applySavedLayerOrder = useCallback(async (nextLayers, userId) => {
-    if (!userId || !Array.isArray(nextLayers) || nextLayers.length === 0) {
-      return nextLayers;
-    }
-    try {
-      const raw = await AsyncStorage.getItem(layerOrderStorageKey(userId));
-      if (!raw) return nextLayers;
-      const ids = JSON.parse(raw);
-      if (!Array.isArray(ids) || ids.length === 0) return nextLayers;
+    const session = await getActiveSession();
+    const accessToken = session?.access_token || null;
+    const refreshToken = session?.refresh_token || null;
+    const actorUserId = session?.user?.id || userId;
 
-      const rank = new Map(ids.map((id, index) => [id, index]));
-      return [...nextLayers].sort((a, b) => {
-        const rankA = rank.has(a.id) ? rank.get(a.id) : Number.MAX_SAFE_INTEGER;
-        const rankB = rank.has(b.id) ? rank.get(b.id) : Number.MAX_SAFE_INTEGER;
-        if (rankA !== rankB) return rankA - rankB;
-        return 0;
-      });
-    } catch (error) {
-      console.error("Error applying saved layer order:", error);
-      return nextLayers;
+    const edgeResult = await setLayerOrderViaEdgeFunction(
+      orderedLayerIds,
+      accessToken,
+      refreshToken,
+      actorUserId,
+    );
+    if (edgeResult.error) {
+      throw edgeResult.error;
     }
   }, []);
 
@@ -697,7 +818,7 @@ const MapScreen = ({ navigation, route }) => {
         new Set([
           "public",
           ...layers
-            .filter((layer) => layer.isEnabled)
+            .filter((layer) => layer.isEnabled && !isUserPostingLayer(layer))
             .map((layer) => getPinLayerKeyFromLayer(layer)),
         ]),
       );
@@ -707,7 +828,7 @@ const MapScreen = ({ navigation, route }) => {
     const keys = Array.from(
       new Set(
         layers
-          .filter((layer) => layer.isEnabled)
+          .filter((layer) => layer.isEnabled && !isUserPostingLayer(layer))
           .map((layer) => getPinLayerKeyFromLayer(layer)),
       ),
     );
@@ -746,7 +867,7 @@ const MapScreen = ({ navigation, route }) => {
           userId
             ? supabase
                 .from("user_layer_prefs")
-                .select("layer_id,hidden")
+                .select("layer_id,hidden,sort_order")
                 .eq("user_id", userId)
             : Promise.resolve({ data: [], error: null }),
         ]);
@@ -767,9 +888,9 @@ const MapScreen = ({ navigation, route }) => {
           );
         }
 
-        const activeMemberships = ((membershipsRes.error ? [] : membershipsRes.data) || []).filter(
-          (row) => row.status === "active",
-        );
+        const activeMemberships = (
+          (membershipsRes.error ? [] : membershipsRes.data) || []
+        ).filter((row) => row.status === "active");
         const activeCommunityIds = [
           ...new Set([
             ...activeMemberships.map((row) => row.community_id),
@@ -797,7 +918,13 @@ const MapScreen = ({ navigation, route }) => {
           ...allLayerRows
             .filter((row) => {
               const ownerType = row.owner_type || "system";
-              return ownerType === "system" || ownerType === "user";
+              if (!(ownerType === "system" || ownerType === "user")) return false;
+              const pinKey = getPinLayerKeyFromLayer({
+                kind: row.kind,
+                name: row.name,
+                owner_type: row.owner_type || "system",
+              });
+              return pinKey !== "private";
             })
             .map((row) => row.id),
           ...allLayerRows
@@ -807,7 +934,7 @@ const MapScreen = ({ navigation, route }) => {
                 name: row.name,
                 owner_type: row.owner_type || "system",
               });
-              return ["public", "friends", "private"].includes(pinKey);
+              return ["public", "friends"].includes(pinKey);
             })
             .map((row) => row.id),
           ...communityLayerLinks.map((row) => row.layer_id),
@@ -851,8 +978,8 @@ const MapScreen = ({ navigation, route }) => {
           );
         }
 
-        const prefMap = new Map(
-          prefRows.map((row) => [row.layer_id, row.hidden]),
+        const prefByLayerId = new Map(
+          prefRows.map((row) => [row.layer_id, row]),
         );
 
         const layerCommunitiesMap = new Map();
@@ -871,12 +998,18 @@ const MapScreen = ({ navigation, route }) => {
         const mappedLayers = rawLayers.map((layer) => {
           const ownerType = layer.owner_type || "system";
           const { baseKind, layerIcon } = parseLayerKindMetadata(layer.kind);
-          const hasPref = prefMap.has(layer.id);
+          const prefRow = prefByLayerId.get(layer.id) || null;
+          const hasPref = Boolean(prefRow);
+          const prefHidden = Boolean(prefRow?.hidden);
+          const prefSortOrderRaw = Number(prefRow?.sort_order);
+          const prefSortOrder = Number.isFinite(prefSortOrderRaw)
+            ? prefSortOrderRaw
+            : null;
           const isDbEnabled = layer.enabled !== false;
           const isEnabled = forcedCommunityLayerIds.has(layer.id)
             ? true
             : hasPref
-              ? !prefMap.get(layer.id)
+              ? !prefHidden
               : isDbEnabled && (ownerType === "system" || ownerType === "user");
 
           const ownerCommunity = layer.owner_id
@@ -894,12 +1027,17 @@ const MapScreen = ({ navigation, route }) => {
                 ? "My Posts"
                 : layer.name,
             isEnabled,
+            pref_sort_order: prefSortOrder,
             ownerCommunityName: ownerCommunity?.name || null,
             sourceCommunityIds: layerCommunitiesMap.get(layer.id) || [],
           };
         });
 
-        const ownUserLayersOnly = mappedLayers.filter((layer) => {
+        const nonPrivateLayers = mappedLayers.filter(
+          (layer) => getPinLayerKeyFromLayer(layer) !== "private",
+        );
+
+        const ownUserLayersOnly = nonPrivateLayers.filter((layer) => {
           if (!(layer.owner_type === "user" && layer.kind === "user_posts")) {
             return true;
           }
@@ -912,8 +1050,21 @@ const MapScreen = ({ navigation, route }) => {
           return lowerName.includes(String(userId).toLowerCase());
         });
 
-        const sortedLayers = sortLayers(ownUserLayersOnly);
-        const nextLayers = await applySavedLayerOrder(sortedLayers, userId);
+        const withCoreSystemLayers = ensureCoreSystemLayers(
+          ownUserLayersOnly,
+          userId,
+        );
+        const sortedLayers = sortLayers(withCoreSystemLayers);
+        const nextLayers = [...sortedLayers].sort((a, b) => {
+          const rankA = Number.isFinite(a?.pref_sort_order)
+            ? a.pref_sort_order
+            : Number.MAX_SAFE_INTEGER;
+          const rankB = Number.isFinite(b?.pref_sort_order)
+            ? b.pref_sort_order
+            : Number.MAX_SAFE_INTEGER;
+          if (rankA !== rankB) return rankA - rankB;
+          return 0;
+        });
         setLayers(nextLayers);
         if (communityId) {
           const firstCommunityLayer = nextLayers.find((layer) =>
@@ -965,7 +1116,6 @@ const MapScreen = ({ navigation, route }) => {
       activateNetworkBackoff,
       alertWithThrottle,
       applyFallbackLayers,
-      applySavedLayerOrder,
       isNetworkBackoffActive,
       logErrorWithThrottle,
       warnWithThrottle,
@@ -1236,13 +1386,6 @@ const MapScreen = ({ navigation, route }) => {
         region,
         mapSize,
       );
-      if (
-        allLoadedPosts.length > 0 &&
-        visiblePins.length === 0 &&
-        visibleClouds.length === 0
-      ) {
-        return;
-      }
       setMapVisuals((prev) => {
         const samePins = haveSameEntityIds(prev.pins, visiblePins);
         const sameClouds = haveSameEntityIds(prev.clouds, visibleClouds);
@@ -1289,14 +1432,69 @@ const MapScreen = ({ navigation, route }) => {
           layer.isEnabled && getPinLayerKeyFromLayer(layer) === "friends",
       );
       const enabledPinLayerSet = new Set(pinLayerKeys || []);
-      const queryLayerKeys = friendsLayerEnabled
-        ? Array.from(new Set([...pinLayerKeys, "private", "public", "friends"]))
-        : pinLayerKeys;
-      const { data, error } = await supabase
-        .from("pins")
-        .select("*")
-        .in("layer", queryLayerKeys)
-        .order("created_at", { ascending: false });
+      const queryLayerKeys = pinLayerKeys;
+      let readAccessToken = null;
+      let readRefreshToken = null;
+      let readActorUserId = currentUser?.id || null;
+      const session = await getActiveSession();
+      if (session?.access_token) {
+        readAccessToken = session.access_token;
+        readRefreshToken = session.refresh_token || null;
+        readActorUserId = session?.user?.id || readActorUserId;
+      } else {
+        try {
+          const {
+            data: { session: fallbackSession },
+          } = await supabase.auth.getSession();
+          if (fallbackSession?.access_token) {
+            readAccessToken = fallbackSession.access_token;
+            readRefreshToken = fallbackSession.refresh_token || null;
+            readActorUserId = fallbackSession?.user?.id || readActorUserId;
+          }
+        } catch (_) {
+          // Ignore fallback session lookup errors and continue anon for reads.
+        }
+      }
+      let data = null;
+      let error = null;
+      if (readAccessToken && readActorUserId) {
+        const edgeResult = await fetchPinsViaEdgeFunction(
+          queryLayerKeys,
+          readAccessToken,
+          readRefreshToken,
+          readActorUserId,
+          3000,
+        );
+        if (!edgeResult.error) {
+          data = Array.isArray(edgeResult?.data?.pins) ? edgeResult.data.pins : [];
+        } else {
+          const edgeErrorText = String(
+            edgeResult?.error?.message || "",
+          ).toLowerCase();
+          const canFallbackToDirectRead =
+            edgeResult?.status === 404 ||
+            edgeResult?.status === 405 ||
+            edgeErrorText.includes("unsupported action") ||
+            edgeErrorText.includes("edge function failed (404)") ||
+            edgeErrorText.includes("edge function failed (405)");
+          if (!canFallbackToDirectRead) {
+            throw edgeResult.error;
+          }
+        }
+      }
+
+      if (!Array.isArray(data)) {
+        const reader = readAccessToken
+          ? supabaseWithAccessToken(readAccessToken)
+          : supabase;
+        const directRead = await reader
+          .from("pins")
+          .select("*")
+          .in("layer", queryLayerKeys)
+          .order("created_at", { ascending: false });
+        data = directRead.data;
+        error = directRead.error;
+      }
 
       if (error) throw error;
       const enabledLayerIds = new Set(
@@ -1307,7 +1505,11 @@ const MapScreen = ({ navigation, route }) => {
           ...(currentUser?.id ? [currentUser.id] : []),
           ...friendUserIds,
         ]);
-        if (friendsLayerEnabled && friendScopeUserIds.has(pin.user_id)) {
+        if (
+          friendsLayerEnabled &&
+          pin?.layer === "friends" &&
+          friendScopeUserIds.has(pin.user_id)
+        ) {
           return true;
         }
         if (mapMode === "explore" && pin?.layer === "public") {
@@ -1320,7 +1522,10 @@ const MapScreen = ({ navigation, route }) => {
 
         const selectedLayerId = pin?.geometry?.layer_id;
         if (selectedLayerId && !hasFallbackLayers) {
-          return enabledLayerIds.has(selectedLayerId);
+          if (enabledLayerIds.has(selectedLayerId)) {
+            return true;
+          }
+          return false;
         }
 
         if (
@@ -1379,21 +1584,29 @@ const MapScreen = ({ navigation, route }) => {
       const layerIconById = new Map(
         layers.map((layer) => [layer.id, layer.layer_icon || null]),
       );
-      const withLayerIcon = deduped.map((pin) => ({
-        ...pin,
-        author_avatar_url:
-          profileByUserId.get(pin.user_id)?.avatar_url ||
-          (pin.user_id === currentUser?.id
-            ? currentUser?.user_metadata?.avatar_url || null
-            : null),
-        author_username:
-          pin.author_username ||
-          profileByUserId.get(pin.user_id)?.username ||
-          "",
-        layer_emoji: pin?.geometry?.layer_id
-          ? layerIconById.get(pin.geometry.layer_id) || null
-          : null,
-      }));
+      const withLayerIcon = deduped
+        .map((pin) => {
+          const numericLat = Number(pin?.lat);
+          const numericLng = Number(pin?.lng);
+          return {
+            ...pin,
+            lat: Number.isFinite(numericLat) ? numericLat : pin?.lat,
+            lng: Number.isFinite(numericLng) ? numericLng : pin?.lng,
+            author_avatar_url:
+              profileByUserId.get(pin.user_id)?.avatar_url ||
+              (pin.user_id === currentUser?.id
+                ? currentUser?.user_metadata?.avatar_url || null
+                : null),
+            author_username:
+              pin.author_username ||
+              profileByUserId.get(pin.user_id)?.username ||
+              "",
+            layer_emoji: pin?.geometry?.layer_id
+              ? layerIconById.get(pin.geometry.layer_id) || null
+              : null,
+          };
+        })
+        .filter(hasValidCoordinate);
       setAllLoadedPosts(withLayerIcon);
       try {
         await AsyncStorage.setItem(
@@ -1540,6 +1753,7 @@ const MapScreen = ({ navigation, route }) => {
     }
 
     const previousLayers = layers;
+    const previousSelectedLayerId = selectedLayerId;
     const optimisticLayers = layers.map((layer) =>
       layer.id === layerId ? { ...layer, isEnabled: nextEnabled } : layer,
     );
@@ -1552,38 +1766,26 @@ const MapScreen = ({ navigation, route }) => {
     setSelectedLayerId(nextSelected);
 
     try {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      const authed = supabaseWithAccessToken(session?.access_token || null);
+      const session = await getActiveSession();
+      const accessToken = session?.access_token || null;
+      const refreshToken = session?.refresh_token || null;
+      const actorUserId = session?.user?.id || userId;
 
-      const { error } = await authed.from("user_layer_prefs").upsert(
-        {
-          user_id: userId,
-          layer_id: layerId,
-          hidden: !nextEnabled,
-        },
-        { onConflict: "user_id,layer_id" },
+      const edgeResult = await setLayerPreferenceViaEdgeFunction(
+        layerId,
+        !nextEnabled,
+        accessToken,
+        refreshToken,
+        actorUserId,
       );
-
-      if (error) throw error;
-      await persistLayerOrder(optimisticLayers, userId);
-    } catch (error) {
-      if (isRlsPolicyError(error)) {
-        console.warn("Layer preference blocked by RLS policy:", error);
-      } else {
-        console.error("Error updating layer preference:", error);
+      if (edgeResult.error) {
+        throw edgeResult.error;
       }
+    } catch (error) {
       setLayers(previousLayers);
-      setSelectedLayerId(
-        resolveNextSelectedLayerId(previousLayers, selectedLayerId),
-      );
-      Alert.alert(
-        "Layer Update Blocked",
-        isRlsPolicyError(error)
-          ? "Database policy blocked this layer update. Apply the user_layer_prefs RLS policy migration to allow your account to save layer toggles."
-          : "Failed to update layer preference.",
-      );
+      setSelectedLayerId(previousSelectedLayerId);
+      console.error("Error updating layer preference:", error);
+      Alert.alert("Error", "Failed to sync layer preference to Supabase.");
     }
   };
 
@@ -1599,10 +1801,17 @@ const MapScreen = ({ navigation, route }) => {
       const next = [...layers];
       const [moved] = next.splice(fromIndex, 1);
       next.splice(toIndex, 0, moved);
+      const previousLayers = layers;
       setLayers(next);
-      await persistLayerOrder(next, userId);
+      try {
+        await persistLayerOrderToSupabase(next, userId);
+      } catch (error) {
+        setLayers(previousLayers);
+        console.error("Error syncing layer order:", error);
+        Alert.alert("Error", "Failed to sync layer order to Supabase.");
+      }
     },
-    [layers, persistLayerOrder, resolveCurrentUserId],
+    [layers, persistLayerOrderToSupabase, resolveCurrentUserId],
   );
 
   const handleMapPress = (event) => {
@@ -1659,6 +1868,19 @@ const MapScreen = ({ navigation, route }) => {
     }
 
     try {
+      const session = await getActiveSession();
+      const activeUser = session?.user || currentUser;
+      const activeUserId = activeUser?.id || null;
+      if (!activeUserId || !session?.access_token) {
+        Alert.alert(
+          "Sign In Required",
+          "Your session is missing or expired. Please sign in again.",
+        );
+        navigation.navigate("Account");
+        return;
+      }
+      const authed = supabaseWithAccessToken(session.access_token);
+
       const authorLayerId = await ensureUserPostingLayer();
       if (!authorLayerId) {
         Alert.alert("Error", "Unable to resolve your user posting layer.");
@@ -1688,16 +1910,67 @@ const MapScreen = ({ navigation, route }) => {
       const requestedLayerIds = Array.isArray(postData.layerIds)
         ? postData.layerIds
         : [];
-      const postableLayerIdSet = new Set(
-        layers
-          .filter((layer) => getPinLayerKeyFromLayer(layer) !== "friends")
-          .map((layer) => layer.id),
-      );
+      const baseAudience =
+        postData?.baseAudience === "public" ? "public" : "friends";
+      const basePublicLayerId =
+        typeof postData?.basePublicLayerId === "string"
+          ? postData.basePublicLayerId
+          : null;
+      const baseFriendsLayerId =
+        typeof postData?.baseFriendsLayerId === "string"
+          ? postData.baseFriendsLayerId
+          : null;
+      const postableLayerRows = layers.filter((layer) => {
+        const pinLayerKey = getPinLayerKeyFromLayer(layer);
+        return (
+          layer.owner_type !== "user" &&
+          ["public", "friends"].includes(pinLayerKey)
+        );
+      });
+      const postableLayerIdSet = new Set(postableLayerRows.map((layer) => layer.id));
+      const resolvedPublicBaseLayerId =
+        baseAudience === "public"
+          ? basePublicLayerId && postableLayerIdSet.has(basePublicLayerId)
+            ? basePublicLayerId
+            : postableLayerRows.find(
+                  (layer) =>
+                    postableLayerIdSet.has(layer.id) &&
+                    getPinLayerKeyFromLayer(layer) === "public",
+                )?.id || null
+          : null;
+      const resolvedFriendsBaseLayerId =
+        baseAudience === "friends"
+          ? baseFriendsLayerId && postableLayerIdSet.has(baseFriendsLayerId)
+            ? baseFriendsLayerId
+            : postableLayerRows.find(
+                  (layer) =>
+                    postableLayerIdSet.has(layer.id) &&
+                    getPinLayerKeyFromLayer(layer) === "friends",
+                )?.id || null
+          : null;
+      if (baseAudience === "public" && !resolvedPublicBaseLayerId) {
+        Alert.alert(
+          "Public Layer Unavailable",
+          "No public layer is available for posting right now.",
+        );
+        return;
+      }
+      if (baseAudience === "friends" && !resolvedFriendsBaseLayerId) {
+        Alert.alert(
+          "Friends Layer Unavailable",
+          "No friends layer is available for posting right now.",
+        );
+        return;
+      }
+      const baseLayerIds =
+        baseAudience === "public"
+          ? [resolvedPublicBaseLayerId]
+          : [resolvedFriendsBaseLayerId];
       const extraLayerIds = requestedLayerIds.filter(
         (layerId) =>
-          postableLayerIdSet.has(layerId) && layerId !== authorLayerId,
+          postableLayerIdSet.has(layerId) && !baseLayerIds.includes(layerId),
       );
-      const targetLayerIds = [...new Set([authorLayerId, ...extraLayerIds])];
+      const targetLayerIds = [...new Set([...baseLayerIds, ...extraLayerIds])];
 
       const layerMap = new Map(layers.map((layer) => [layer.id, layer]));
       const crossPostGroupId =
@@ -1719,7 +1992,7 @@ const MapScreen = ({ navigation, route }) => {
             coordinates: [storedLng, storedLat],
             layer_id: targetLayerId,
             author_layer_id: authorLayerId,
-            author_user_id: currentUser.id,
+            author_user_id: activeUserId,
             cross_post_group_id: crossPostGroupId,
             visibility_mode: "cloud_only",
             privacy_radius_m: privacyRadiusMeters,
@@ -1730,7 +2003,7 @@ const MapScreen = ({ navigation, route }) => {
             coordinates: [storedLng, storedLat],
             layer_id: targetLayerId,
             author_layer_id: authorLayerId,
-            author_user_id: currentUser.id,
+            author_user_id: activeUserId,
             cross_post_group_id: crossPostGroupId,
             visibility_mode: "pinned",
           };
@@ -1750,7 +2023,7 @@ const MapScreen = ({ navigation, route }) => {
                 : coordinates,
             layer_id: targetLayerId,
             author_layer_id: authorLayerId,
-            author_user_id: currentUser.id,
+            author_user_id: activeUserId,
             cross_post_group_id: crossPostGroupId,
             visibility_mode: "pinned",
           };
@@ -1760,14 +2033,14 @@ const MapScreen = ({ navigation, route }) => {
             coordinates: [storedLng, storedLat],
             layer_id: targetLayerId,
             author_layer_id: authorLayerId,
-            author_user_id: currentUser.id,
+            author_user_id: activeUserId,
             cross_post_group_id: crossPostGroupId,
             visibility_mode: "pinned",
           };
         }
 
         return {
-          user_id: currentUser.id,
+          user_id: activeUserId,
           type: postData.mediaUrl ? "media" : "text",
           content: postData.content,
           caption: postData.title,
@@ -1776,15 +2049,77 @@ const MapScreen = ({ navigation, route }) => {
           lat: storedLat,
           lng: storedLng,
           layer: postPinLayerKey,
-          author_name: currentUser.user_metadata?.display_name || "Anonymous",
-          author_username: currentUser.user_metadata?.username || "",
+          author_name: activeUser?.user_metadata?.display_name || "Anonymous",
+          author_username: activeUser?.user_metadata?.username || "",
           posted_from_current_location: postData.locationMode === "current",
           geometry,
         };
       });
 
-      const { error } = await supabase.from("pins").insert(insertRows);
-      if (error) throw error;
+      const edgeCreateResult = await createPinsViaEdgeFunction(
+        insertRows,
+        session.access_token,
+        session.refresh_token || null,
+        activeUserId,
+      );
+      if (edgeCreateResult.error) {
+        const edgeErrorText = String(
+          edgeCreateResult?.error?.message || "",
+        ).toLowerCase();
+        const canFallbackToDirectInsert =
+          edgeCreateResult?.status === 404 ||
+          edgeCreateResult?.status === 405 ||
+          edgeErrorText.includes("unsupported action") ||
+          edgeErrorText.includes("edge function failed (404)") ||
+          edgeErrorText.includes("edge function failed (405)");
+        if (!canFallbackToDirectInsert) {
+          throw edgeCreateResult.error;
+        }
+
+        let { error } = await authed.from("pins").insert(insertRows);
+        if (error && isRlsPolicyError(error)) {
+          const {
+            data: { session: refreshedSession },
+            error: refreshError,
+          } = await supabase.auth.refreshSession();
+          if (!refreshError && refreshedSession?.access_token) {
+            const retryAuthed = supabaseWithAccessToken(
+              refreshedSession.access_token,
+            );
+            const retryResult = await retryAuthed.from("pins").insert(insertRows);
+            error = retryResult.error;
+          }
+        }
+        if (error) throw error;
+      } else {
+        const insertedCount = Number(edgeCreateResult?.data?.insertedCount || 0);
+        if (insertedCount <= 0) {
+          throw new Error("Create post returned no affected rows.");
+        }
+      }
+
+      loadPins(enabledPinLayerKeys);
+      if (
+        postVisibilityMode !== "cloud_only" &&
+        postData.geometryType === GEOMETRY_TYPES.POINT
+      ) {
+        const createdCoordinate = {
+          latitude: storedLat,
+          longitude: storedLng,
+        };
+        if (!isCoordinateWithinRegionBounds(createdCoordinate, region, 0)) {
+          const targetRegion = {
+            latitude: storedLat,
+            longitude: storedLng,
+            latitudeDelta: Math.min(region?.latitudeDelta || 0.02, 0.02),
+            longitudeDelta: Math.min(region?.longitudeDelta || 0.02, 0.02),
+          };
+          setRegion(targetRegion);
+          if (mapRef.current?.animateToRegion) {
+            mapRef.current.animateToRegion(targetRegion, 320);
+          }
+        }
+      }
 
       setDrawingCoords([]);
       setDrawingType(null);
@@ -1793,7 +2128,7 @@ const MapScreen = ({ navigation, route }) => {
       Alert.alert("Success", "Post created!");
     } catch (error) {
       console.error("Error creating post:", error);
-      Alert.alert("Error", "Failed to create post. Please try again.");
+      Alert.alert("Error", formatErrorMessage(error));
     }
   };
 
@@ -1809,7 +2144,7 @@ const MapScreen = ({ navigation, route }) => {
     try {
       const { data, error } = await supabase
         .from("pins")
-        .select("id,caption,content,author_name,created_at,layer,geometry")
+        .select("id,user_id,caption,content,author_name,created_at,layer,geometry")
         .eq("layer", pinLayerKey)
         .order("created_at", { ascending: false })
         .limit(50);
@@ -1817,10 +2152,19 @@ const MapScreen = ({ navigation, route }) => {
       if (error) throw error;
       const exactLayerPosts = (data || []).filter((post) => {
         if (isCloudOnlyPost(post)) return false;
+
+        const ownerType = layer?.owner_type || "system";
+        const isSystemCoreLayer =
+          ownerType === "system" &&
+          ["public", "friends"].includes(pinLayerKey);
+        if (isSystemCoreLayer) {
+          return post?.layer === pinLayerKey;
+        }
+
         if (post?.geometry?.layer_id) {
           return post.geometry.layer_id === layer.id;
         }
-        return layer.owner_type === "system";
+        return false;
       });
       setLayerPosts(exactLayerPosts);
     } catch (error) {
@@ -2014,7 +2358,37 @@ const MapScreen = ({ navigation, route }) => {
   };
 
   const handleRegionChangeComplete = useCallback((nextRegion) => {
-    setRegion(nextRegion);
+    const normalizedRegion = {
+      latitude: Number(nextRegion?.latitude),
+      longitude: Number(nextRegion?.longitude),
+      latitudeDelta: Number(nextRegion?.latitudeDelta),
+      longitudeDelta: Number(nextRegion?.longitudeDelta),
+    };
+    if (
+      !Number.isFinite(normalizedRegion.latitude) ||
+      !Number.isFinite(normalizedRegion.longitude) ||
+      !Number.isFinite(normalizedRegion.latitudeDelta) ||
+      !Number.isFinite(normalizedRegion.longitudeDelta) ||
+      normalizedRegion.latitudeDelta <= 0 ||
+      normalizedRegion.longitudeDelta <= 0
+    ) {
+      return;
+    }
+
+    setRegion((prev) => {
+      if (
+        prev &&
+        Math.abs((prev.latitude || 0) - normalizedRegion.latitude) < 1e-8 &&
+        Math.abs((prev.longitude || 0) - normalizedRegion.longitude) < 1e-8 &&
+        Math.abs((prev.latitudeDelta || 0) - normalizedRegion.latitudeDelta) <
+          1e-8 &&
+        Math.abs((prev.longitudeDelta || 0) - normalizedRegion.longitudeDelta) <
+          1e-8
+      ) {
+        return prev;
+      }
+      return normalizedRegion;
+    });
   }, []);
 
   const handleVotePin = async (vote) => {
@@ -2108,37 +2482,229 @@ const MapScreen = ({ navigation, route }) => {
 
   const handleUpdatePin = async (pinId, updates) => {
     try {
-      const { error } = await supabase
+      const normalizedUpdates = { ...(updates || {}) };
+      if (Object.prototype.hasOwnProperty.call(normalizedUpdates, "layer")) {
+        const nextLayer = String(normalizedUpdates.layer || "").toLowerCase();
+        if (nextLayer === "private") {
+          normalizedUpdates.layer = "friends";
+        } else if (!["public", "friends"].includes(nextLayer)) {
+          Alert.alert("Error", "Invalid visibility option.");
+          return;
+        } else {
+          normalizedUpdates.layer = nextLayer;
+        }
+      }
+
+      let session = await getActiveSession();
+      if (!session?.access_token) {
+        try {
+          const {
+            data: { session: fallbackSession },
+          } = await supabase.auth.getSession();
+          session = fallbackSession || session;
+        } catch (_) {
+          // Ignore fallback session lookup errors.
+        }
+      }
+      if (!session?.access_token) {
+        Alert.alert("Sign In Required", "Please sign in to edit your posts.");
+        return;
+      }
+
+      const authed = supabaseWithAccessToken(session.access_token);
+      const { data: updatedPin, error } = await authed
         .from("pins")
-        .update(updates)
-        .eq("id", pinId);
+        .update(normalizedUpdates)
+        .eq("id", pinId)
+        .select("*")
+        .maybeSingle();
 
       if (error) throw error;
+      const appliedUpdates = updatedPin || normalizedUpdates;
 
       setAllLoadedPosts((prev) =>
-        prev.map((pin) => (pin.id === pinId ? { ...pin, ...updates } : pin)),
+        prev.map((pin) => (pin.id === pinId ? { ...pin, ...appliedUpdates } : pin)),
       );
-      setSelectedPin((prev) => (prev ? { ...prev, ...updates } : null));
+      setSelectedPin((prev) => (prev ? { ...prev, ...appliedUpdates } : null));
+      if (selectedPinIdRef.current === pinId) {
+        loadPinAssociations({
+          ...(selectedPin || {}),
+          id: pinId,
+          ...appliedUpdates,
+        });
+      }
+
+      if (Object.prototype.hasOwnProperty.call(normalizedUpdates, "layer")) {
+        await loadPins(enabledPinLayerKeys);
+      }
+
       Alert.alert("Success", "Pin updated!");
     } catch (error) {
       console.error("Error updating pin:", error);
-      Alert.alert("Error", "Failed to update pin");
+      Alert.alert("Error", formatErrorMessage(error));
     }
   };
 
   const handleDeletePin = async (pinId) => {
-    try {
-      const { error } = await supabase.from("pins").delete().eq("id", pinId);
-
-      if (error) throw error;
-
-      setAllLoadedPosts((prev) => prev.filter((pin) => pin.id !== pinId));
+    const applyDeletedPinIds = (ids) => {
+      const deletedIdSet = new Set(ids);
+      setAllLoadedPosts((prev) =>
+        prev.filter((pin) => !deletedIdSet.has(pin.id)),
+      );
+      ids.forEach((id) => {
+        pinVoteSummaryCacheRef.current.delete(id);
+        pinVoteRequestRef.current.delete(id);
+      });
       setShowDetailModal(false);
       setSelectedPin(null);
-      Alert.alert("Success", "Pin deleted!");
+    };
+
+    const showDeleteResultAlert = (deletedCount, requestedCount) => {
+      if (deletedCount < requestedCount) {
+        Alert.alert(
+          "Partially Deleted",
+          `Deleted ${deletedCount} of ${requestedCount} linked pins.`,
+        );
+        return;
+      }
+      Alert.alert(
+        "Success",
+        deletedCount > 1
+          ? `Post deleted across ${deletedCount} linked pins.`
+          : "Pin deleted!",
+      );
+    };
+
+    try {
+      const session = await getActiveSession();
+      const activeUserId = session?.user?.id || currentUser?.id || null;
+      if (!activeUserId || !session?.access_token) {
+        Alert.alert("Sign In Required", "Please sign in to delete posts.");
+        return;
+      }
+
+      const edgeResult = await deletePinViaEdgeFunction(
+        pinId,
+        session.access_token,
+        session.refresh_token || null,
+        activeUserId,
+      );
+      if (!edgeResult.error) {
+        const deletedIds = Array.isArray(edgeResult?.data?.deletedPinIds)
+          ? edgeResult.data.deletedPinIds
+              .map((id) => String(id || ""))
+              .filter(Boolean)
+          : [];
+        const requestedCount = Math.max(
+          deletedIds.length,
+          Number(edgeResult?.data?.requestedCount || deletedIds.length),
+        );
+        if (deletedIds.length === 0) {
+          Alert.alert(
+            "Delete Not Applied",
+            "Delete returned no affected rows. Please try again.",
+          );
+          return;
+        }
+
+        applyDeletedPinIds(deletedIds);
+        showDeleteResultAlert(deletedIds.length, requestedCount);
+        loadPins(enabledPinLayerKeys);
+        return;
+      }
+
+      const edgeErrorText = String(edgeResult?.error?.message || "").toLowerCase();
+      const canFallbackToDirectDelete =
+        edgeResult?.status === 404 ||
+        edgeResult?.status === 405 ||
+        edgeErrorText.includes("unsupported action") ||
+        edgeErrorText.includes("edge function failed (404)") ||
+        edgeErrorText.includes("edge function failed (405)");
+      if (!canFallbackToDirectDelete) {
+        throw edgeResult.error;
+      }
+
+      const authed = supabaseWithAccessToken(session.access_token);
+
+      const targetPin =
+        allLoadedPosts.find((pin) => pin.id === pinId) ||
+        (selectedPin?.id === pinId ? selectedPin : null);
+      const groupId = targetPin?.geometry?.cross_post_group_id || null;
+      let pinIdsToDelete = [pinId];
+
+      if (groupId) {
+        let relatedRows = null;
+        const byExpression = await authed
+          .from("pins")
+          .select("id")
+          .eq("geometry->>cross_post_group_id", groupId);
+
+        if (!byExpression.error) {
+          relatedRows = byExpression.data;
+        } else {
+          const byContains = await authed
+            .from("pins")
+            .select("id")
+            .contains("geometry", { cross_post_group_id: groupId });
+          if (!byContains.error) {
+            relatedRows = byContains.data;
+          } else {
+            console.warn(
+              "Group delete lookup failed; falling back to single pin delete:",
+              formatErrorMessage(byContains.error),
+            );
+          }
+        }
+
+        if (Array.isArray(relatedRows) && relatedRows.length > 0) {
+          pinIdsToDelete = Array.from(
+            new Set(
+              relatedRows
+                .map((row) => row?.id)
+                .filter((id) => typeof id === "string" && id.length > 0),
+            ),
+          );
+        }
+      }
+
+      const { data: deletedRows, error } = await authed
+        .from("pins")
+        .delete()
+        .in("id", pinIdsToDelete)
+        .select("id");
+
+      if (error) throw error;
+      const deletedIds = (deletedRows || [])
+        .map((row) => row?.id)
+        .filter((id) => typeof id === "string" && id.length > 0);
+
+      if (deletedIds.length === 0) {
+        const { data: stillExists, error: verifyError } = await authed
+          .from("pins")
+          .select("id,user_id")
+          .eq("id", pinId)
+          .maybeSingle();
+        if (verifyError) throw verifyError;
+
+        if (stillExists?.id) {
+          Alert.alert(
+            "Delete Not Applied",
+            stillExists.user_id && stillExists.user_id !== activeUserId
+              ? "This post was not deleted because your account does not have permission to delete it."
+              : "Delete returned no affected rows. Please try again.",
+          );
+        } else {
+          Alert.alert("Delete Not Applied", "Post could not be deleted.");
+        }
+        return;
+      }
+
+      applyDeletedPinIds(deletedIds);
+      showDeleteResultAlert(deletedIds.length, pinIdsToDelete.length);
+      loadPins(enabledPinLayerKeys);
     } catch (error) {
       console.error("Error deleting pin:", error);
-      Alert.alert("Error", "Failed to delete pin");
+      Alert.alert("Error", formatErrorMessage(error));
     }
   };
 
@@ -2199,6 +2765,7 @@ const MapScreen = ({ navigation, route }) => {
             <Marker
               coordinate={cloud.center}
               onPress={() => handleCloudPress(cloud)}
+              tracksViewChanges={false}
             >
               <View style={styles.cloudCountBadge}>
                 <Text style={styles.cloudCountText}>

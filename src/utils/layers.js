@@ -15,7 +15,7 @@ export const getPinLayerKeyFromLayer = (layer) => {
   const fromName = normalizeValue(layer.name);
   if (PIN_LAYER_VALUES.includes(fromName)) return fromName;
 
-  if (layer.owner_type === "user") return "private";
+  if (layer.owner_type === "user") return "friends";
   if (layer.owner_type === "community") {
     return "public";
   }
@@ -29,7 +29,7 @@ export const getPreferredUserLayer = (layers) => {
     layers.find((layer) => layer.owner_type === "user" && layer.isEnabled) ||
     layers.find(
       (layer) =>
-        layer.isEnabled && getPinLayerKeyFromLayer(layer) === "private",
+        layer.isEnabled && getPinLayerKeyFromLayer(layer) === "friends",
     ) ||
     null
   );
