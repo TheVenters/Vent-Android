@@ -68,7 +68,14 @@ const CLOUD_MIN_RADIUS_METERS = 120;
 const CLOUD_MAX_RADIUS_METERS = 1000;
 const CLUSTER_DISTANCE_PX = 52;
 const CLUSTER_MERGE_DISTANCE_PX = 58;
+const CLUSTER_VIEWPORT_PADDING_PX = 0;
 const DEFAULT_MAP_SIZE = { width: 390, height: 780 };
+const PIN_VOTE_PREFETCH_LIMIT = 6;
+const PIN_VOTE_PREFETCH_DELAY_MS = 180;
+const ERROR_LOG_COOLDOWN_MS = 120000;
+const ERROR_ALERT_COOLDOWN_MS = 15000;
+const NETWORK_BACKOFF_MS = 20000;
+const MAP_POSTS_CACHE_KEY = "map_posts_cache_v1";
 
 const toRadians = (degrees) => (degrees * Math.PI) / 180;
 
@@ -124,12 +131,67 @@ const toScreenPoint = (coordinate, mapRegion, mapSize) => {
   };
 };
 
+const isScreenPointWithinClusterViewport = (
+  screenPoint,
+  mapSize,
+  paddingPx = CLUSTER_VIEWPORT_PADDING_PX,
+) => {
+  if (!screenPoint) return false;
+  const width = Number(mapSize?.width || 0);
+  const height = Number(mapSize?.height || 0);
+  if (width <= 0 || height <= 0) return false;
+
+  return (
+    screenPoint.x >= -paddingPx &&
+    screenPoint.x <= width + paddingPx &&
+    screenPoint.y >= -paddingPx &&
+    screenPoint.y <= height + paddingPx
+  );
+};
+
 const isCloudOnlyPost = (pin) => pin?.geometry?.visibility_mode === "cloud_only";
 const isRlsPolicyError = (error) =>
   error?.code === "42501" ||
   String(error?.message || "")
     .toLowerCase()
     .includes("row-level security policy");
+
+const formatErrorMessage = (error) => {
+  if (!error) return "Unknown error";
+  if (typeof error === "string") return error;
+
+  const message = String(error?.message || "").trim();
+  const code = String(error?.code || "").trim();
+  const details = String(error?.details || "").trim();
+  const hint = String(error?.hint || "").trim();
+
+  const parts = [message, code && `code ${code}`, details, hint].filter(Boolean);
+  if (parts.length > 0) return parts.join(" | ");
+
+  try {
+    return JSON.stringify(error);
+  } catch (_) {
+    return "Unknown error";
+  }
+};
+
+const isTransientNetworkError = (error) => {
+  const msg = formatErrorMessage(error).toLowerCase();
+  const raw = String(error || "").toLowerCase();
+  const stack = String(error?.stack || "").toLowerCase();
+  const name = String(error?.name || "").toLowerCase();
+  const code = String(error?.code || "").toLowerCase();
+  return (
+    msg.includes("fetch failed") ||
+    msg.includes("failed to fetch") ||
+    msg.includes("network request failed") ||
+    msg.includes("eai_again") ||
+    msg.includes("timeout") ||
+    raw.includes("network request failed") ||
+    stack.includes("fetch.umd.js") ||
+    (name === "typeerror" && !code)
+  );
+};
 
 const getRandomCoordinateWithinRadius = (latitude, longitude, radiusMeters) => {
   const randomDistance = Math.sqrt(Math.random()) * radiusMeters;
@@ -177,8 +239,13 @@ const buildCloudFromPosts = (groupPosts) => {
     Math.max(CLOUD_MIN_RADIUS_METERS, farthest + CLOUD_RADIUS_PADDING_METERS),
   );
 
+  const sortedPostIds = groupPosts
+    .map((post) => String(post?.id || ""))
+    .filter(Boolean)
+    .sort();
+
   return {
-    id: `cloud-${groupPosts.map((post) => post.id).join("-")}`,
+    id: `cloud-${sortedPostIds.join("-")}`,
     center,
     radiusMeters: computedRadius,
     count: groupPosts.length,
@@ -201,10 +268,14 @@ const buildCloudsFromPosts = (posts, mapRegion, mapSize) => {
     .map((post) => {
       const coord = { latitude: post.lat, longitude: post.lng };
       const screenPoint = toScreenPoint(coord, mapRegion, mapSize);
-      if (!screenPoint) return null;
+      if (
+        !screenPoint ||
+        !isScreenPointWithinClusterViewport(screenPoint, mapSize)
+      ) {
+        return null;
+      }
       return {
         post,
-        coord,
         screenX: screenPoint.x,
         screenY: screenPoint.y,
         cellX: toCell(screenPoint.x),
@@ -340,7 +411,8 @@ const computeMapVisuals = (posts, mapRegion, mapSize) => {
       hasPrivacyPosts || pinnedCount >= CLOUD_MIN_POST_COUNT;
 
     if (!shouldShowCloud) return;
-    visibleClouds.push(cloud);
+    const badgeCount = pinnedCount > 0 ? pinnedCount : cloud.count;
+    visibleClouds.push({ ...cloud, badgeCount });
 
     cloud.posts.forEach((post) => {
       if (!isCloudOnlyPost(post)) {
@@ -359,10 +431,77 @@ const computeMapVisuals = (posts, mapRegion, mapSize) => {
   return { visiblePins, visibleClouds };
 };
 
+const haveSameEntityIds = (left, right) => {
+  if (left === right) return true;
+  if (!Array.isArray(left) || !Array.isArray(right)) return false;
+  if (left.length !== right.length) return false;
+
+  for (let i = 0; i < left.length; i += 1) {
+    if (String(left[i]?.id || "") !== String(right[i]?.id || "")) {
+      return false;
+    }
+  }
+  return true;
+};
+
 const toTitle = (value) => {
   const str = String(value || "").trim();
   if (!str) return "Unknown";
   return str.charAt(0).toUpperCase() + str.slice(1);
+};
+
+const isFallbackLayer = (layer) =>
+  String(layer?.id || "").startsWith("fallback-");
+
+const buildFallbackLayers = (userId) => {
+  const asEnabled = Boolean(userId);
+  return [
+    {
+      id: "fallback-public",
+      name: "Public",
+      display_name: "Public",
+      kind: "public",
+      raw_kind: "public",
+      owner_type: "system",
+      owner_id: null,
+      is_public: true,
+      enabled: true,
+      isEnabled: true,
+      layer_icon: null,
+      ownerCommunityName: null,
+      sourceCommunityIds: [],
+    },
+    {
+      id: "fallback-friends",
+      name: "Friends",
+      display_name: "Friends",
+      kind: "friends",
+      raw_kind: "friends",
+      owner_type: "system",
+      owner_id: null,
+      is_public: false,
+      enabled: true,
+      isEnabled: asEnabled,
+      layer_icon: null,
+      ownerCommunityName: null,
+      sourceCommunityIds: [],
+    },
+    {
+      id: "fallback-private",
+      name: "Private",
+      display_name: "Private",
+      kind: "private",
+      raw_kind: "private",
+      owner_type: "system",
+      owner_id: null,
+      is_public: false,
+      enabled: true,
+      isEnabled: asEnabled,
+      layer_icon: null,
+      ownerCommunityName: null,
+      sourceCommunityIds: [],
+    },
+  ];
 };
 
 const MapScreen = ({ navigation, route }) => {
@@ -370,7 +509,7 @@ const MapScreen = ({ navigation, route }) => {
   const styles = createStyles(palette);
 
   const [region, setRegion] = useState(DEFAULT_REGION);
-  const [pins, setPins] = useState([]);
+  const [mapVisuals, setMapVisuals] = useState({ pins: [], clouds: [] });
   const [currentUser, setCurrentUser] = useState(null);
   const [layers, setLayers] = useState([]);
   const [layersLoading, setLayersLoading] = useState(false);
@@ -400,21 +539,96 @@ const MapScreen = ({ navigation, route }) => {
   const [userPostingLayerId, setUserPostingLayerId] = useState(null);
   const [friendUserIds, setFriendUserIds] = useState([]);
   const [selectedPinLayers, setSelectedPinLayers] = useState([]);
-  const [clouds, setClouds] = useState([]);
   const [allLoadedPosts, setAllLoadedPosts] = useState([]);
   const [cloudPostsModalVisible, setCloudPostsModalVisible] = useState(false);
   const [selectedCloud, setSelectedCloud] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [mapSize, setMapSize] = useState(DEFAULT_MAP_SIZE);
+  const pins = mapVisuals.pins;
+  const clouds = mapVisuals.clouds;
 
   const mapRef = useRef(null);
   const selectedPinIdRef = useRef(null);
   const pinVoteSummaryCacheRef = useRef(new Map());
   const pinVoteRequestRef = useRef(new Map());
+  const votePrefetchTimerRef = useRef(null);
+  const layerFetchInFlightRef = useRef({ key: null, promise: null });
+  const errorThrottleRef = useRef(new Map());
+  const networkBackoffUntilRef = useRef(0);
 
   useEffect(() => {
     selectedPinIdRef.current = selectedPin?.id || null;
   }, [selectedPin?.id]);
+
+  const shouldThrottleError = useCallback((key, cooldownMs) => {
+    const now = Date.now();
+    const last = errorThrottleRef.current.get(key) || 0;
+    if (now - last < cooldownMs) {
+      return true;
+    }
+    errorThrottleRef.current.set(key, now);
+    return false;
+  }, []);
+
+  const logErrorWithThrottle = useCallback(
+    (key, label, error, cooldownMs = ERROR_LOG_COOLDOWN_MS) => {
+      if (shouldThrottleError(`log:${key}`, cooldownMs)) return;
+      console.error(label, formatErrorMessage(error));
+    },
+    [shouldThrottleError],
+  );
+
+  const warnWithThrottle = useCallback(
+    (key, label, details = "", cooldownMs = ERROR_LOG_COOLDOWN_MS) => {
+      if (shouldThrottleError(`warn:${key}`, cooldownMs)) return;
+      const text = String(details || "").trim();
+      if (text) {
+        console.warn(label, text);
+      } else {
+        console.warn(label);
+      }
+    },
+    [shouldThrottleError],
+  );
+
+  const alertWithThrottle = useCallback(
+    (key, title, message, cooldownMs = ERROR_ALERT_COOLDOWN_MS) => {
+      if (shouldThrottleError(`alert:${key}`, cooldownMs)) return;
+      Alert.alert(title, message);
+    },
+    [shouldThrottleError],
+  );
+
+  const isNetworkBackoffActive = useCallback(() => {
+    return Date.now() < networkBackoffUntilRef.current;
+  }, []);
+
+  const activateNetworkBackoff = useCallback(() => {
+    networkBackoffUntilRef.current = Date.now() + NETWORK_BACKOFF_MS;
+  }, []);
+
+  const applyFallbackLayers = useCallback((userId) => {
+    const fallback = buildFallbackLayers(userId);
+    setLayers((prev) => {
+      if (Array.isArray(prev) && prev.length > 0) return prev;
+      return fallback;
+    });
+    setSelectedLayerId((prev) => resolveNextSelectedLayerId(fallback, prev));
+  }, []);
+
+  const restoreCachedPosts = useCallback(async () => {
+    if (allLoadedPosts.length > 0) return;
+    try {
+      const raw = await AsyncStorage.getItem(MAP_POSTS_CACHE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        setAllLoadedPosts(parsed);
+      }
+    } catch (_) {
+      // Ignore cache parse/read failures.
+    }
+  }, [allLoadedPosts.length]);
 
   const resolveCurrentUserId = useCallback(async () => {
     // For RLS-gated writes, require an active auth session so auth.uid() is
@@ -502,9 +716,21 @@ const MapScreen = ({ navigation, route }) => {
 
   const fetchAccessibleLayers = useCallback(
     async (userId, communityId) => {
-      setLayersLoading(true);
+      if (isNetworkBackoffActive()) {
+        applyFallbackLayers(userId);
+        return;
+      }
 
-      try {
+      const requestKey = `${userId || "guest"}:${communityId || "none"}`;
+      const inFlight = layerFetchInFlightRef.current;
+      if (inFlight.key === requestKey && inFlight.promise) {
+        return inFlight.promise;
+      }
+
+      const requestPromise = (async () => {
+        setLayersLoading(true);
+
+        try {
         const [allLayersRes, membershipsRes, prefsRes] = await Promise.all([
           supabase
             .from("layers")
@@ -526,10 +752,22 @@ const MapScreen = ({ navigation, route }) => {
         ]);
 
         if (allLayersRes.error) throw allLayersRes.error;
-        if (membershipsRes.error) throw membershipsRes.error;
-        if (prefsRes.error) throw prefsRes.error;
+        if (membershipsRes.error) {
+          warnWithThrottle(
+            "layers-memberships",
+            "Community memberships unavailable, continuing with base layers:",
+            formatErrorMessage(membershipsRes.error),
+          );
+        }
+        if (prefsRes.error) {
+          warnWithThrottle(
+            "layers-prefs",
+            "Layer preferences unavailable, continuing with defaults:",
+            formatErrorMessage(prefsRes.error),
+          );
+        }
 
-        const activeMemberships = (membershipsRes.data || []).filter(
+        const activeMemberships = ((membershipsRes.error ? [] : membershipsRes.data) || []).filter(
           (row) => row.status === "active",
         );
         const activeCommunityIds = [
@@ -552,6 +790,7 @@ const MapScreen = ({ navigation, route }) => {
         }
 
         const prefLayerIds = (prefsRes.data || []).map((row) => row.layer_id);
+        const prefRows = prefsRes.error ? [] : prefsRes.data || [];
         const allLayerRows = allLayersRes.data || [];
 
         const layerIdSet = new Set([
@@ -576,8 +815,7 @@ const MapScreen = ({ navigation, route }) => {
         ]);
 
         if (layerIdSet.size === 0) {
-          setLayers([]);
-          setSelectedLayerId(null);
+          applyFallbackLayers(userId);
           return;
         }
 
@@ -614,7 +852,7 @@ const MapScreen = ({ navigation, route }) => {
         }
 
         const prefMap = new Map(
-          (prefsRes.data || []).map((row) => [row.layer_id, row.hidden]),
+          prefRows.map((row) => [row.layer_id, row.hidden]),
         );
 
         const layerCommunitiesMap = new Map();
@@ -692,13 +930,47 @@ const MapScreen = ({ navigation, route }) => {
           );
         }
       } catch (error) {
-        console.error("Error loading layers:", error);
-        Alert.alert("Error", "Failed to load layers from Supabase.");
+        const transient = isTransientNetworkError(error);
+        if (transient) {
+          activateNetworkBackoff();
+          applyFallbackLayers(userId);
+          warnWithThrottle(
+            "network-unavailable",
+            "Network temporarily unavailable. Showing cached/offline data where possible.",
+          );
+          return;
+        }
+
+        logErrorWithThrottle("layers-load", "Error loading layers:", error);
+        alertWithThrottle("layers-load", "Error", "Failed to load layers from Supabase.");
       } finally {
         setLayersLoading(false);
       }
+    })();
+
+      layerFetchInFlightRef.current = {
+        key: requestKey,
+        promise: requestPromise,
+      };
+
+      try {
+        return await requestPromise;
+      } finally {
+        if (layerFetchInFlightRef.current.promise === requestPromise) {
+          layerFetchInFlightRef.current = { key: null, promise: null };
+        }
+      }
     },
-    [applySavedLayerOrder, userPostingLayerId],
+    [
+      activateNetworkBackoff,
+      alertWithThrottle,
+      applyFallbackLayers,
+      applySavedLayerOrder,
+      isNetworkBackoffActive,
+      logErrorWithThrottle,
+      warnWithThrottle,
+      userPostingLayerId,
+    ],
   );
 
   useEffect(() => {
@@ -710,6 +982,10 @@ const MapScreen = ({ navigation, route }) => {
     initialize();
     requestLocationPermission();
   }, []);
+
+  useEffect(() => {
+    restoreCachedPosts();
+  }, [restoreCachedPosts]);
 
   useEffect(() => {
     const {
@@ -738,12 +1014,29 @@ const MapScreen = ({ navigation, route }) => {
         if (error) throw error;
         setIsAdmin(Boolean(data?.is_admin));
       } catch (error) {
-        console.error("Error fetching admin status:", error);
+        if (isTransientNetworkError(error)) {
+          activateNetworkBackoff();
+          warnWithThrottle(
+            "network-unavailable",
+            "Network temporarily unavailable. Showing cached/offline data where possible.",
+          );
+          return;
+        }
+        logErrorWithThrottle(
+          "admin-status",
+          "Error fetching admin status:",
+          error,
+        );
         setIsAdmin(false);
       }
     };
     fetchAdminStatus();
-  }, [currentUser?.id]);
+  }, [
+    activateNetworkBackoff,
+    currentUser?.id,
+    logErrorWithThrottle,
+    warnWithThrottle,
+  ]);
 
   useEffect(() => {
     const incomingCommunityMap = route?.params?.communityMap;
@@ -755,6 +1048,27 @@ const MapScreen = ({ navigation, route }) => {
   useEffect(() => {
     fetchAccessibleLayers(currentUser?.id, communityMapContext?.id);
   }, [currentUser?.id, communityMapContext?.id, fetchAccessibleLayers]);
+
+  useEffect(() => {
+    const hasFallbackOnly =
+      !Array.isArray(layers) ||
+      layers.length === 0 ||
+      layers.every((layer) => String(layer?.id || "").startsWith("fallback-"));
+    if (!hasFallbackOnly) return undefined;
+
+    const timer = setInterval(() => {
+      if (isNetworkBackoffActive()) return;
+      fetchAccessibleLayers(currentUser?.id, communityMapContext?.id);
+    }, 12000);
+
+    return () => clearInterval(timer);
+  }, [
+    communityMapContext?.id,
+    currentUser?.id,
+    fetchAccessibleLayers,
+    isNetworkBackoffActive,
+    layers,
+  ]);
 
   useEffect(() => {
     const loadFriendIds = async () => {
@@ -779,13 +1093,26 @@ const MapScreen = ({ navigation, route }) => {
         );
         setFriendUserIds(ids);
       } catch (error) {
-        console.error("Error loading friend ids:", error);
+        if (isTransientNetworkError(error)) {
+          activateNetworkBackoff();
+          warnWithThrottle(
+            "network-unavailable",
+            "Network temporarily unavailable. Showing cached/offline data where possible.",
+          );
+          return;
+        }
+        logErrorWithThrottle("friend-ids", "Error loading friend ids:", error);
         setFriendUserIds([]);
       }
     };
 
     loadFriendIds();
-  }, [currentUser?.id]);
+  }, [
+    activateNetworkBackoff,
+    currentUser?.id,
+    logErrorWithThrottle,
+    warnWithThrottle,
+  ]);
 
   const ensureUserPostingLayer = useCallback(async () => {
     if (!currentUser?.id) return null;
@@ -842,10 +1169,28 @@ const MapScreen = ({ navigation, route }) => {
       setUserPostingLayerId(createRes.data.id);
       return createRes.data.id;
     } catch (error) {
-      console.error("Error ensuring user posting layer:", error);
+      if (isTransientNetworkError(error)) {
+        activateNetworkBackoff();
+        warnWithThrottle(
+          "network-unavailable",
+          "Network temporarily unavailable. Showing cached/offline data where possible.",
+        );
+        return userPostingLayerId || null;
+      }
+      logErrorWithThrottle(
+        "ensure-user-layer",
+        "Error ensuring user posting layer:",
+        error,
+      );
       return null;
     }
-  }, [currentUser?.id, userPostingLayerId]);
+  }, [
+    activateNetworkBackoff,
+    currentUser?.id,
+    logErrorWithThrottle,
+    userPostingLayerId,
+    warnWithThrottle,
+  ]);
 
   useEffect(() => {
     if (!currentUser?.id) return;
@@ -874,16 +1219,15 @@ const MapScreen = ({ navigation, route }) => {
 
   useEffect(() => {
     if (enabledPinLayerKeys.length === 0) {
-      setPins([]);
-      setClouds([]);
-      setAllLoadedPosts([]);
+      setMapVisuals({ pins: [], clouds: [] });
+      restoreCachedPosts();
       return undefined;
     }
 
     loadPins(enabledPinLayerKeys);
     const unsubscribe = subscribeToPins(enabledPinLayerKeys);
     return unsubscribe;
-  }, [enabledPinLayerKeys, mapMode, layers]);
+  }, [enabledPinLayerKeys, restoreCachedPosts]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -892,11 +1236,22 @@ const MapScreen = ({ navigation, route }) => {
         region,
         mapSize,
       );
-      setPins(visiblePins);
-      setClouds(visibleClouds);
+      if (
+        allLoadedPosts.length > 0 &&
+        visiblePins.length === 0 &&
+        visibleClouds.length === 0
+      ) {
+        return;
+      }
+      setMapVisuals((prev) => {
+        const samePins = haveSameEntityIds(prev.pins, visiblePins);
+        const sameClouds = haveSameEntityIds(prev.clouds, visibleClouds);
+        if (samePins && sameClouds) return prev;
+        return { pins: visiblePins, clouds: visibleClouds };
+      });
     });
     return () => cancelAnimationFrame(frame);
-  }, [allLoadedPosts, region, mapSize]);
+  }, [allLoadedPosts, mapSize, region]);
 
   const requestLocationPermission = async () => {
     try {
@@ -921,17 +1276,19 @@ const MapScreen = ({ navigation, route }) => {
 
   const loadPins = async (pinLayerKeys) => {
     if (!pinLayerKeys || pinLayerKeys.length === 0) {
-      setPins([]);
-      setClouds([]);
+      setMapVisuals({ pins: [], clouds: [] });
       setAllLoadedPosts([]);
       return;
     }
 
     try {
+      const hasFallbackLayers =
+        Array.isArray(layers) && layers.some((layer) => isFallbackLayer(layer));
       const friendsLayerEnabled = layers.some(
         (layer) =>
           layer.isEnabled && getPinLayerKeyFromLayer(layer) === "friends",
       );
+      const enabledPinLayerSet = new Set(pinLayerKeys || []);
       const queryLayerKeys = friendsLayerEnabled
         ? Array.from(new Set([...pinLayerKeys, "private", "public", "friends"]))
         : pinLayerKeys;
@@ -956,11 +1313,21 @@ const MapScreen = ({ navigation, route }) => {
         if (mapMode === "explore" && pin?.layer === "public") {
           return true;
         }
+
+        if (enabledPinLayerSet.has(pin?.layer)) {
+          return true;
+        }
+
         const selectedLayerId = pin?.geometry?.layer_id;
-        if (selectedLayerId) {
+        if (selectedLayerId && !hasFallbackLayers) {
           return enabledLayerIds.has(selectedLayerId);
         }
-        if (mapMode === "user" && pin?.layer === "public") {
+
+        if (
+          mapMode === "user" &&
+          pin?.layer === "public" &&
+          !hasFallbackLayers
+        ) {
           return false;
         }
         return true;
@@ -1028,10 +1395,26 @@ const MapScreen = ({ navigation, route }) => {
           : null,
       }));
       setAllLoadedPosts(withLayerIcon);
+      try {
+        await AsyncStorage.setItem(
+          MAP_POSTS_CACHE_KEY,
+          JSON.stringify(withLayerIcon),
+        );
+      } catch (_) {
+        // Ignore cache write failures.
+      }
     } catch (error) {
-      console.error("Error loading pins:", error);
-      setPins([]);
-      setClouds([]);
+      if (isTransientNetworkError(error)) {
+        activateNetworkBackoff();
+        warnWithThrottle(
+          "network-unavailable",
+          "Network temporarily unavailable. Showing cached/offline data where possible.",
+        );
+        restoreCachedPosts();
+        return;
+      }
+      logErrorWithThrottle("pins-load", "Error loading pins:", error);
+      setMapVisuals({ pins: [], clouds: [] });
       setAllLoadedPosts([]);
     }
   };
@@ -1556,23 +1939,42 @@ const MapScreen = ({ navigation, route }) => {
   };
 
   useEffect(() => {
-    if (!currentUser?.id || !Array.isArray(pins) || pins.length === 0) return;
-    const candidates = pins
-      .slice(0, 12)
-      .map((pin) => pin?.id)
-      .filter(
-        (pinId) =>
-          pinId &&
-          !pinVoteSummaryCacheRef.current.has(pinId) &&
-          !pinVoteRequestRef.current.has(pinId),
-      );
-    candidates.forEach((pinId) => {
-      loadPinVotes(pinId, {
-        preferCache: false,
-        suppressState: true,
-        backgroundRefresh: false,
-      }).catch(() => {});
-    });
+    if (!currentUser?.id || !Array.isArray(pins) || pins.length === 0) {
+      if (votePrefetchTimerRef.current) {
+        clearTimeout(votePrefetchTimerRef.current);
+        votePrefetchTimerRef.current = null;
+      }
+      return;
+    }
+
+    if (votePrefetchTimerRef.current) {
+      clearTimeout(votePrefetchTimerRef.current);
+    }
+    votePrefetchTimerRef.current = setTimeout(() => {
+      const candidates = pins
+        .slice(0, PIN_VOTE_PREFETCH_LIMIT)
+        .map((pin) => pin?.id)
+        .filter(
+          (pinId) =>
+            pinId &&
+            !pinVoteSummaryCacheRef.current.has(pinId) &&
+            !pinVoteRequestRef.current.has(pinId),
+        );
+      candidates.forEach((pinId) => {
+        loadPinVotes(pinId, {
+          preferCache: false,
+          suppressState: true,
+          backgroundRefresh: false,
+        }).catch(() => {});
+      });
+    }, PIN_VOTE_PREFETCH_DELAY_MS);
+
+    return () => {
+      if (votePrefetchTimerRef.current) {
+        clearTimeout(votePrefetchTimerRef.current);
+        votePrefetchTimerRef.current = null;
+      }
+    };
   }, [pins, currentUser?.id]);
 
   const handleCloudPress = (cloud) => {
@@ -1611,19 +2013,9 @@ const MapScreen = ({ navigation, route }) => {
     }, 180);
   };
 
-  const handleRegionChangeComplete = useCallback(
-    (nextRegion) => {
-      setRegion(nextRegion);
-      const { visiblePins, visibleClouds } = computeMapVisuals(
-        allLoadedPosts,
-        nextRegion,
-        mapSize,
-      );
-      setPins(visiblePins);
-      setClouds(visibleClouds);
-    },
-    [allLoadedPosts, mapSize],
-  );
+  const handleRegionChangeComplete = useCallback((nextRegion) => {
+    setRegion(nextRegion);
+  }, []);
 
   const handleVotePin = async (vote) => {
     if (!selectedPin) return;
@@ -1804,9 +2196,14 @@ const MapScreen = ({ navigation, route }) => {
               fillColor="rgba(129, 140, 248, 0.16)"
               strokeWidth={2}
             />
-            <Marker coordinate={cloud.center} onPress={() => handleCloudPress(cloud)}>
+            <Marker
+              coordinate={cloud.center}
+              onPress={() => handleCloudPress(cloud)}
+            >
               <View style={styles.cloudCountBadge}>
-                <Text style={styles.cloudCountText}>{cloud.count}</Text>
+                <Text style={styles.cloudCountText}>
+                  {cloud.badgeCount || cloud.count}
+                </Text>
               </View>
             </Marker>
           </React.Fragment>
