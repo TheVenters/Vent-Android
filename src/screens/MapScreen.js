@@ -28,6 +28,7 @@ import {
   supabase,
   getCurrentUser,
   getActiveSession,
+  rpcWithAccessToken,
   supabaseWithAccessToken,
 } from "../services/supabase";
 import {
@@ -1286,14 +1287,16 @@ const MapScreen = ({ navigation, route }) => {
       const {
         data: { session },
       } = await supabase.auth.getSession();
-      const authed = supabaseWithAccessToken(session?.access_token || null);
-      const rpcResult = await authed.rpc("get_pin_vote_summary", {
-        target_pin_id: pinId,
-      });
+      const rpcResult = await rpcWithAccessToken(
+        "get_pin_vote_summary",
+        { target_pin_id: pinId },
+        session?.access_token || null,
+      );
 
       if (rpcResult.error) {
         // Local/dev fallback if RPC migrations are not applied.
         const activeUserId = currentUser?.id || session?.user?.id || null;
+        const authed = supabaseWithAccessToken(session?.access_token || null);
         const tableResult = await authed
           .from("pin_votes")
           .select("user_id, vote")
@@ -1366,11 +1369,14 @@ const MapScreen = ({ navigation, route }) => {
     try {
       setIsSubmittingVote(true);
 
-      const authed = supabaseWithAccessToken(session.access_token);
-      const toggleResult = await authed.rpc("toggle_pin_vote", {
-        target_pin_id: selectedPin.id,
-        target_vote: vote,
-      });
+      const toggleResult = await rpcWithAccessToken(
+        "toggle_pin_vote",
+        {
+          target_pin_id: selectedPin.id,
+          target_vote: vote,
+        },
+        session.access_token,
+      );
 
       if (toggleResult.error) {
         throw toggleResult.error;

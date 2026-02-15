@@ -209,6 +209,90 @@ export const resetPassword = async (email) => {
   return { data, error };
 };
 
+const makeRestUrl = (path) => {
+  const normalized = String(path || '').startsWith('/')
+    ? String(path)
+    : `/${String(path || '')}`;
+  return `${SUPABASE_URL}/rest/v1${normalized}`;
+};
+
+const restRequestWithAccessToken = async (
+  path,
+  { method = 'GET', accessToken = null, body = null, headers = {} } = {},
+) => {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    return {
+      data: null,
+      error: { message: 'Missing Supabase environment variables.' },
+      status: null,
+    };
+  }
+
+  try {
+    const response = await fetch(makeRestUrl(path), {
+      method,
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken || SUPABASE_ANON_KEY}`,
+        'Content-Type': 'application/json',
+        ...headers,
+      },
+      ...(body != null ? { body: JSON.stringify(body) } : {}),
+    });
+    const payload = await safeJson(response);
+    if (!response.ok) {
+      return {
+        data: payload,
+        error: payload || {
+          message: `REST request failed with status ${response.status}`,
+        },
+        status: response.status,
+      };
+    }
+    return { data: payload, error: null, status: response.status };
+  } catch (error) {
+    return { data: null, error, status: null };
+  }
+};
+
+export const rpcWithAccessToken = async (fn, args = {}, accessToken = null) =>
+  restRequestWithAccessToken(`/rpc/${fn}`, {
+    method: 'POST',
+    accessToken,
+    body: args,
+  });
+
+export const insertFriendRequestWithAccessToken = async (
+  userId,
+  friendId,
+  accessToken,
+) =>
+  restRequestWithAccessToken('/friends', {
+    method: 'POST',
+    accessToken,
+    headers: { Prefer: 'return=representation' },
+    body: [{ user_id: userId, friend_id: friendId, status: 'pending' }],
+  });
+
+export const updateFriendshipStatusWithAccessToken = async (
+  requestId,
+  status,
+  accessToken,
+) =>
+  restRequestWithAccessToken(`/friends?id=eq.${encodeURIComponent(requestId)}`, {
+    method: 'PATCH',
+    accessToken,
+    headers: { Prefer: 'return=representation' },
+    body: { status },
+  });
+
+export const deleteFriendshipWithAccessToken = async (requestId, accessToken) =>
+  restRequestWithAccessToken(`/friends?id=eq.${encodeURIComponent(requestId)}`, {
+    method: 'DELETE',
+    accessToken,
+    headers: { Prefer: 'return=representation' },
+  });
+
 const safeJson = async (response) => {
   try {
     return await response.json();

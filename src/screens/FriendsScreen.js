@@ -12,9 +12,11 @@ import {
 } from 'react-native';
 import {
   supabase,
+  deleteFriendshipWithAccessToken,
   getCurrentUser,
   getActiveSession,
-  supabaseWithAccessToken,
+  insertFriendRequestWithAccessToken,
+  updateFriendshipStatusWithAccessToken,
 } from '../services/supabase';
 import { COLORS, SIZES } from '../constants/theme';
 
@@ -282,14 +284,11 @@ const FriendsScreen = ({ navigation }) => {
         return;
       }
 
-      const authed = supabaseWithAccessToken(accessToken);
-      const { data, error } = await authed.from('friends').insert([
-        {
-          user_id: actorUserId,
-          friend_id: friendId,
-          status: 'pending',
-        },
-      ]).select();
+      const { data, error } = await insertFriendRequestWithAccessToken(
+        actorUserId,
+        friendId,
+        accessToken,
+      );
 
       console.log('sendFriendRequest result:', { data, error });
       if (error) throw error;
@@ -318,11 +317,11 @@ const FriendsScreen = ({ navigation }) => {
         return;
       }
 
-      const authed = supabaseWithAccessToken(accessToken);
-      const { error } = await authed
-        .from('friends')
-        .update({ status: 'accepted' })
-        .eq('id', requestId);
+      const { error } = await updateFriendshipStatusWithAccessToken(
+        requestId,
+        'accepted',
+        accessToken,
+      );
 
       if (error) throw error;
       Alert.alert('Success', 'Friend request accepted!');
@@ -343,8 +342,10 @@ const FriendsScreen = ({ navigation }) => {
         return;
       }
 
-      const authed = supabaseWithAccessToken(accessToken);
-      const { error } = await authed.from('friends').delete().eq('id', requestId);
+      const { error } = await deleteFriendshipWithAccessToken(
+        requestId,
+        accessToken,
+      );
 
       if (error) throw error;
       Alert.alert('Success', 'Friend request rejected');
@@ -373,11 +374,10 @@ const FriendsScreen = ({ navigation }) => {
                 return;
               }
 
-              const authed = supabaseWithAccessToken(accessToken);
-              const { error } = await authed
-                .from('friends')
-                .delete()
-                .eq('id', friendshipId);
+              const { error } = await deleteFriendshipWithAccessToken(
+                friendshipId,
+                accessToken,
+              );
 
               if (error) throw error;
               loadFriends();
