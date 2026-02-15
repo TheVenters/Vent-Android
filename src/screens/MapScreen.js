@@ -25,10 +25,11 @@ import MapView, {
 } from "react-native-maps";
 import * as Location from "expo-location";
 import {
+  getPinVoteSummaryViaEdgeFunction,
   supabase,
   getCurrentUser,
   getActiveSession,
-  rpcWithAccessToken,
+  votePinViaEdgeFunction,
   supabaseWithAccessToken,
 } from "../services/supabase";
 import {
@@ -276,6 +277,13 @@ const MapScreen = ({ navigation, route }) => {
   const [isAdmin, setIsAdmin] = useState(false);
 
   const mapRef = useRef(null);
+  const selectedPinIdRef = useRef(null);
+  const pinVoteSummaryCacheRef = useRef(new Map());
+  const pinVoteRequestRef = useRef(new Map());
+
+  useEffect(() => {
+    selectedPinIdRef.current = selectedPin?.id || null;
+  }, [selectedPin?.id]);
 
   const resolveCurrentUserId = useCallback(async () => {
     // For RLS-gated writes, require an active auth session so auth.uid() is
@@ -1282,59 +1290,131 @@ const MapScreen = ({ navigation, route }) => {
     }
   };
 
-  const loadPinVotes = async (pinId) => {
-    try {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      const rpcResult = await rpcWithAccessToken(
-        "get_pin_vote_summary",
-        { target_pin_id: pinId },
-        session?.access_token || null,
-      );
+  const loadPinVotes = async (
+    pinId,
+    { preferCache = true, suppressState = false, backgroundRefresh = true } = {},
+  ) => {
+    if (!pinId) return null;
 
-      if (rpcResult.error) {
-        // Local/dev fallback if RPC migrations are not applied.
-        const activeUserId = currentUser?.id || session?.user?.id || null;
-        const authed = supabaseWithAccessToken(session?.access_token || null);
-        const tableResult = await authed
-          .from("pin_votes")
-          .select("user_id, vote")
-          .eq("pin_id", pinId);
-        if (tableResult.error) throw rpcResult.error;
-
-        const summary = { upvotes: 0, downvotes: 0, userVote: 0 };
-        (tableResult.data || []).forEach((voteRow) => {
-          if (voteRow.vote === 1) summary.upvotes += 1;
-          if (voteRow.vote === -1) summary.downvotes += 1;
-          if (activeUserId && voteRow.user_id === activeUserId) {
-            summary.userVote = voteRow.vote;
-          }
-        });
-        setPinVoteSummary(summary);
-        return;
-      }
-
-      const summaryRow = Array.isArray(rpcResult.data)
-        ? rpcResult.data[0]
-        : rpcResult.data;
-      setPinVoteSummary({
-        upvotes: Number(summaryRow?.upvotes || 0),
-        downvotes: Number(summaryRow?.downvotes || 0),
-        userVote: Number(summaryRow?.user_vote || 0),
-      });
-    } catch (error) {
-      console.error("Error loading pin votes:", error);
-      setPinVoteSummary({ upvotes: 0, downvotes: 0, userVote: 0 });
+    const cached = pinVoteSummaryCacheRef.current.get(pinId);
+    if (cached && preferCache && !suppressState) {
+      setPinVoteSummary(cached);
     }
+
+    const inFlight = pinVoteRequestRef.current.get(pinId);
+    if (inFlight) {
+      if (cached && preferCache) {
+        inFlight.catch(() => {});
+        return cached;
+      }
+      return await inFlight;
+    }
+
+    const requestPromise = (async () => {
+      try {
+        const session = await getActiveSession();
+        const activeUserId = session?.user?.id || currentUser?.id || null;
+        const summaryResult = await getPinVoteSummaryViaEdgeFunction(
+          pinId,
+          session?.access_token || null,
+          session?.refresh_token || null,
+          activeUserId,
+        );
+
+        let summary = null;
+
+        if (summaryResult.error) {
+          // Local/dev fallback if edge function is unavailable.
+          const authed = supabaseWithAccessToken(session?.access_token || null);
+          const tableResult = await authed
+            .from("pin_votes")
+            .select("user_id, vote")
+            .eq("pin_id", pinId);
+          if (tableResult.error) throw summaryResult.error;
+
+          summary = { upvotes: 0, downvotes: 0, userVote: 0 };
+          (tableResult.data || []).forEach((voteRow) => {
+            if (voteRow.vote === 1) summary.upvotes += 1;
+            if (voteRow.vote === -1) summary.downvotes += 1;
+            if (activeUserId && voteRow.user_id === activeUserId) {
+              summary.userVote = voteRow.vote;
+            }
+          });
+        } else {
+          const summaryRow = Array.isArray(summaryResult.data)
+            ? summaryResult.data[0]
+            : summaryResult.data;
+          summary = {
+            upvotes: Number(summaryRow?.upvotes || 0),
+            downvotes: Number(summaryRow?.downvotes || 0),
+            userVote: Number(summaryRow?.user_vote || 0),
+          };
+        }
+
+        pinVoteSummaryCacheRef.current.set(pinId, summary);
+        if (!suppressState && selectedPinIdRef.current === pinId) {
+          setPinVoteSummary(summary);
+        }
+        return summary;
+      } catch (error) {
+        console.error("Error loading pin votes:", error);
+        if (!suppressState && selectedPinIdRef.current === pinId && !cached) {
+          setPinVoteSummary({ upvotes: 0, downvotes: 0, userVote: 0 });
+        }
+        throw error;
+      } finally {
+        pinVoteRequestRef.current.delete(pinId);
+      }
+    })();
+
+    pinVoteRequestRef.current.set(pinId, requestPromise);
+
+    if (cached && preferCache && backgroundRefresh) {
+      requestPromise.catch(() => {});
+      return cached;
+    }
+    return await requestPromise;
   };
 
   const handlePinPress = (pin) => {
+    selectedPinIdRef.current = pin.id;
     setSelectedPin(pin);
-    loadPinVotes(pin.id);
+    const cached = pinVoteSummaryCacheRef.current.get(pin.id);
+    setPinVoteSummary(
+      cached || {
+        upvotes: 0,
+        downvotes: 0,
+        userVote: 0,
+      },
+    );
+    loadPinVotes(pin.id, {
+      preferCache: true,
+      suppressState: false,
+      backgroundRefresh: true,
+    }).catch(() => {});
     loadPinAssociations(pin);
     setShowDetailModal(true);
   };
+
+  useEffect(() => {
+    if (!currentUser?.id || !Array.isArray(pins) || pins.length === 0) return;
+    const candidates = pins
+      .slice(0, 12)
+      .map((pin) => pin?.id)
+      .filter(
+        (pinId) =>
+          pinId &&
+          !pinVoteSummaryCacheRef.current.has(pinId) &&
+          !pinVoteRequestRef.current.has(pinId),
+      );
+    candidates.forEach((pinId) => {
+      loadPinVotes(pinId, {
+        preferCache: false,
+        suppressState: true,
+        backgroundRefresh: false,
+      }).catch(() => {});
+    });
+  }, [pins, currentUser?.id]);
 
   const handleCloudPress = (cloud) => {
     setSelectedCloud(cloud);
@@ -1363,19 +1443,46 @@ const MapScreen = ({ navigation, route }) => {
       Alert.alert("Sign In Required", "Please sign in to vote on pins");
       return;
     }
+    if (selectedPin.user_id === userId) {
+      Alert.alert("Not Allowed", "You cannot vote on your own pin.");
+      return;
+    }
 
-    if (selectedPin.user_id === userId) return;
+    const previousSummary = {
+      upvotes: Number(pinVoteSummary?.upvotes || 0),
+      downvotes: Number(pinVoteSummary?.downvotes || 0),
+      userVote: Number(pinVoteSummary?.userVote || 0),
+    };
+    const nextUserVote = previousSummary.userVote === vote ? 0 : vote;
+    const optimisticSummary = {
+      upvotes: previousSummary.upvotes,
+      downvotes: previousSummary.downvotes,
+      userVote: nextUserVote,
+    };
+
+    if (previousSummary.userVote === 1) {
+      optimisticSummary.upvotes = Math.max(0, optimisticSummary.upvotes - 1);
+    } else if (previousSummary.userVote === -1) {
+      optimisticSummary.downvotes = Math.max(0, optimisticSummary.downvotes - 1);
+    }
+    if (nextUserVote === 1) {
+      optimisticSummary.upvotes += 1;
+    } else if (nextUserVote === -1) {
+      optimisticSummary.downvotes += 1;
+    }
+
+    pinVoteSummaryCacheRef.current.set(selectedPin.id, optimisticSummary);
+    setPinVoteSummary(optimisticSummary);
 
     try {
       setIsSubmittingVote(true);
 
-      const toggleResult = await rpcWithAccessToken(
-        "toggle_pin_vote",
-        {
-          target_pin_id: selectedPin.id,
-          target_vote: vote,
-        },
+      const toggleResult = await votePinViaEdgeFunction(
+        selectedPin.id,
+        vote,
         session.access_token,
+        session.refresh_token || null,
+        userId,
       );
 
       if (toggleResult.error) {
@@ -1386,15 +1493,19 @@ const MapScreen = ({ navigation, route }) => {
         ? toggleResult.data[0]
         : toggleResult.data;
       if (summaryRow) {
-        setPinVoteSummary({
+        const confirmedSummary = {
           upvotes: Number(summaryRow?.upvotes || 0),
           downvotes: Number(summaryRow?.downvotes || 0),
           userVote: Number(summaryRow?.user_vote || 0),
-        });
+        };
+        pinVoteSummaryCacheRef.current.set(selectedPin.id, confirmedSummary);
+        setPinVoteSummary(confirmedSummary);
       } else {
-        await loadPinVotes(selectedPin.id);
+        loadPinVotes(selectedPin.id);
       }
     } catch (error) {
+      pinVoteSummaryCacheRef.current.set(selectedPin.id, previousSummary);
+      setPinVoteSummary(previousSummary);
       console.error("Error voting on pin:", error);
       const authRequired =
         error?.code === "42501" &&
@@ -1734,6 +1845,7 @@ const MapScreen = ({ navigation, route }) => {
         associatedLayers={selectedPinLayers}
         onVote={handleVotePin}
         onClose={() => {
+          selectedPinIdRef.current = null;
           setShowDetailModal(false);
           setSelectedPin(null);
           setSelectedPinLayers([]);

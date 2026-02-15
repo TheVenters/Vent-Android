@@ -302,8 +302,9 @@ const safeJson = async (response) => {
 };
 
 const RESET_PASSWORD_FUNCTION_PATH = '/functions/v1/reset-password-with-otp';
+const SOCIAL_ACTIONS_FUNCTION_PATH = '/functions/v1/social-actions';
 
-const resetPasswordViaEdgeFunction = async (email, token, newPassword) => {
+const invokeEdgeFunction = async (path, payload) => {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     return {
       data: null,
@@ -313,33 +314,37 @@ const resetPasswordViaEdgeFunction = async (email, token, newPassword) => {
   }
 
   try {
-    const response = await fetch(
-      `${SUPABASE_URL}${RESET_PASSWORD_FUNCTION_PATH}`,
-      {
-        method: 'POST',
-        headers: {
-          apikey: SUPABASE_ANON_KEY,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ email, token, newPassword }),
+    const response = await fetch(`${SUPABASE_URL}${path}`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        'Content-Type': 'application/json',
       },
-    );
+      body: JSON.stringify(payload || {}),
+    });
 
-    const payload = await safeJson(response);
+    const result = await safeJson(response);
     if (!response.ok) {
       const message =
-        payload?.error ||
-        payload?.msg ||
-        payload?.error_description ||
-        payload?.message ||
-        `Edge password reset failed (${response.status}).`;
-      return { data: payload, error: new Error(message), status: response.status };
+        result?.error ||
+        result?.msg ||
+        result?.error_description ||
+        result?.message ||
+        `Edge function failed (${response.status}).`;
+      return { data: result, error: new Error(message), status: response.status };
     }
-
-    return { data: payload, error: null, status: response.status };
+    return { data: result, error: null, status: response.status };
   } catch (error) {
     return { data: null, error, status: null };
   }
+};
+
+const resetPasswordViaEdgeFunction = async (email, token, newPassword) => {
+  return invokeEdgeFunction(RESET_PASSWORD_FUNCTION_PATH, {
+    email,
+    token,
+    newPassword,
+  });
 };
 
 export const resetPasswordWithOtp = async (email, token, newPassword) => {
@@ -361,3 +366,118 @@ export const resetPasswordWithOtp = async (email, token, newPassword) => {
 
   return { data: edgeResult.data, error: edgeResult.error };
 };
+
+const socialAction = async (action, payload, accessToken, refreshToken = null) => {
+  const result = await invokeEdgeFunction(SOCIAL_ACTIONS_FUNCTION_PATH, {
+    action,
+    accessToken,
+    refreshToken,
+    ...(payload || {}),
+  });
+
+  const refreshedAccessToken = result?.data?.refreshedAccessToken;
+  const refreshedRefreshToken = result?.data?.refreshedRefreshToken;
+  if (!result?.error && refreshedAccessToken && refreshedRefreshToken) {
+    try {
+      await supabase.auth.setSession({
+        access_token: refreshedAccessToken,
+        refresh_token: refreshedRefreshToken,
+      });
+    } catch (error) {
+      console.warn('Failed to apply refreshed session from edge function:', error);
+    }
+  }
+
+  return result;
+};
+
+export const votePinViaEdgeFunction = async (
+  pinId,
+  vote,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'vote',
+    { pinId, vote, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const getPinVoteSummaryViaEdgeFunction = async (
+  pinId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'vote_summary',
+    { pinId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const fetchFriendListsViaEdgeFunction = async (
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'friend_lists',
+    { actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const sendFriendRequestViaEdgeFunction = async (
+  targetUserId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'send_friend_request',
+    { targetUserId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const acceptFriendRequestViaEdgeFunction = async (
+  friendshipId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'accept_friend_request',
+    { friendshipId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const rejectFriendRequestViaEdgeFunction = async (
+  friendshipId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'reject_friend_request',
+    { friendshipId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const removeFriendViaEdgeFunction = async (
+  friendshipId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'remove_friend',
+    { friendshipId, actorUserId },
+    accessToken,
+    refreshToken,
+  );

@@ -273,6 +273,9 @@ auth_token = "env(SUPABASE_AUTH_SMS_TWILIO_AUTH_TOKEN)"
 [functions.reset-password-with-otp]
 verify_jwt = false
 
+[functions.social-actions]
+verify_jwt = false
+
 # Multi-factor-authentication is available to Supabase Pro plan.
 [auth.mfa]
 # Control how many MFA factors can be enrolled at once per user.
