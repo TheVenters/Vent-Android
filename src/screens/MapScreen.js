@@ -27,6 +27,7 @@ import * as Location from "expo-location";
 import {
   supabase,
   getCurrentUser,
+  getActiveSession,
   supabaseWithAccessToken,
 } from "../services/supabase";
 import {
@@ -275,24 +276,18 @@ const MapScreen = ({ navigation, route }) => {
 
   const mapRef = useRef(null);
 
-  const resolveActiveSession = useCallback(async () => {
-    try {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      if (session?.user?.id && session?.access_token) {
-        return session;
-      }
-    } catch (error) {
-      console.error("Error resolving active session:", error);
-    }
-    return null;
-  }, []);
-
   const resolveCurrentUserId = useCallback(async () => {
     // For RLS-gated writes, require an active auth session so auth.uid() is
     // guaranteed on PostgREST/RPC requests.
-    const session = await resolveActiveSession();
+    let session = null;
+    try {
+      const {
+        data: { session: current },
+      } = await supabase.auth.getSession();
+      session = current || null;
+    } catch (error) {
+      console.error("Error resolving current session:", error);
+    }
     if (session?.user?.id) {
       if (currentUser?.id !== session.user.id) {
         setCurrentUser(session.user);
@@ -300,7 +295,7 @@ const MapScreen = ({ navigation, route }) => {
       return session.user.id;
     }
     return null;
-  }, [currentUser?.id, resolveActiveSession]);
+  }, [currentUser?.id]);
 
   const persistLayerOrder = useCallback(async (nextLayers, userId) => {
     if (!userId || !Array.isArray(nextLayers)) return;
@@ -1288,7 +1283,9 @@ const MapScreen = ({ navigation, route }) => {
 
   const loadPinVotes = async (pinId) => {
     try {
-      const session = await resolveActiveSession();
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
       const authed = supabaseWithAccessToken(session?.access_token || null);
       const rpcResult = await authed.rpc("get_pin_vote_summary", {
         target_pin_id: pinId,
@@ -1357,7 +1354,7 @@ const MapScreen = ({ navigation, route }) => {
   const handleVotePin = async (vote) => {
     if (!selectedPin) return;
 
-    const session = await resolveActiveSession();
+    const session = await getActiveSession();
     const userId = session?.user?.id || null;
     if (!userId || !session?.access_token) {
       Alert.alert("Sign In Required", "Please sign in to vote on pins");
@@ -1393,9 +1390,16 @@ const MapScreen = ({ navigation, route }) => {
       }
     } catch (error) {
       console.error("Error voting on pin:", error);
+      const authRequired =
+        error?.code === "42501" &&
+        String(error?.message || "")
+          .toLowerCase()
+          .includes("authentication required");
       Alert.alert(
         "Error",
-        error?.message || "Failed to submit vote. Please try again.",
+        authRequired
+          ? "Your session token is missing or expired. Please sign out and sign back in."
+          : error?.message || "Failed to submit vote. Please try again.",
       );
     } finally {
       setIsSubmittingVote(false);

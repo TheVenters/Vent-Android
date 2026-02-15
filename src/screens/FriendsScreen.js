@@ -10,7 +10,12 @@ import {
   RefreshControl,
   Platform,
 } from 'react-native';
-import { supabase, getCurrentUser } from '../services/supabase';
+import {
+  supabase,
+  getCurrentUser,
+  getActiveSession,
+  supabaseWithAccessToken,
+} from '../services/supabase';
 import { COLORS, SIZES } from '../constants/theme';
 
 const FriendsScreen = ({ navigation }) => {
@@ -269,9 +274,18 @@ const FriendsScreen = ({ navigation }) => {
   const sendFriendRequest = async (friendId) => {
     console.log('sendFriendRequest:', { from: currentUser?.id, to: friendId });
     try {
-      const { data, error } = await supabase.from('friends').insert([
+      const session = await getActiveSession();
+      const actorUserId = session?.user?.id || null;
+      const accessToken = session?.access_token || null;
+      if (!actorUserId || !accessToken) {
+        Alert.alert('Sign In Required', 'Please sign in again to send friend requests.');
+        return;
+      }
+
+      const authed = supabaseWithAccessToken(accessToken);
+      const { data, error } = await authed.from('friends').insert([
         {
-          user_id: currentUser.id,
+          user_id: actorUserId,
           friend_id: friendId,
           status: 'pending',
         },
@@ -285,13 +299,27 @@ const FriendsScreen = ({ navigation }) => {
       loadSentRequests();
     } catch (error) {
       console.error('Error sending friend request:', error);
-      Alert.alert('Error', error.message || 'Failed to send friend request');
+      const authOrRlsError = error?.code === '42501';
+      Alert.alert(
+        'Error',
+        authOrRlsError
+          ? 'Your session is not being applied to this request. Please sign out and sign back in, then try again.'
+          : error.message || 'Failed to send friend request',
+      );
     }
   };
 
   const acceptFriendRequest = async (requestId) => {
     try {
-      const { error } = await supabase
+      const session = await getActiveSession();
+      const accessToken = session?.access_token || null;
+      if (!accessToken) {
+        Alert.alert('Sign In Required', 'Please sign in again to accept requests.');
+        return;
+      }
+
+      const authed = supabaseWithAccessToken(accessToken);
+      const { error } = await authed
         .from('friends')
         .update({ status: 'accepted' })
         .eq('id', requestId);
@@ -308,7 +336,15 @@ const FriendsScreen = ({ navigation }) => {
 
   const rejectFriendRequest = async (requestId) => {
     try {
-      const { error } = await supabase.from('friends').delete().eq('id', requestId);
+      const session = await getActiveSession();
+      const accessToken = session?.access_token || null;
+      if (!accessToken) {
+        Alert.alert('Sign In Required', 'Please sign in again to manage requests.');
+        return;
+      }
+
+      const authed = supabaseWithAccessToken(accessToken);
+      const { error } = await authed.from('friends').delete().eq('id', requestId);
 
       if (error) throw error;
       Alert.alert('Success', 'Friend request rejected');
@@ -330,7 +366,15 @@ const FriendsScreen = ({ navigation }) => {
           style: 'destructive',
           onPress: async () => {
             try {
-              const { error } = await supabase
+              const session = await getActiveSession();
+              const accessToken = session?.access_token || null;
+              if (!accessToken) {
+                Alert.alert('Sign In Required', 'Please sign in again to remove friends.');
+                return;
+              }
+
+              const authed = supabaseWithAccessToken(accessToken);
+              const { error } = await authed
                 .from('friends')
                 .delete()
                 .eq('id', friendshipId);

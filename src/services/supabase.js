@@ -36,6 +36,7 @@ if (!shouldReuseClient) {
   globalThis.__VENT_SUPABASE_HELPER__ = null;
   globalThis.__VENT_SUPABASE_APPSTATE_SUB__ = null;
   globalThis.__VENT_SUPABASE_REFRESH_ACTIVE__ = null;
+  globalThis.__VENT_ACTIVE_SESSION_PROMISE__ = null;
 }
 
 export const supabase = globalThis.__VENT_SUPABASE_CLIENT__;
@@ -92,10 +93,88 @@ export const supabaseWithAccessToken = (accessToken) => {
 
 // Helper functions
 export const getCurrentUser = async () => {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
+  const session = await getActiveSession();
   return session?.user || null;
+};
+
+const parseJwtPayload = (token) => {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length < 2) return null;
+  try {
+    const normalized = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+    const json =
+      typeof globalThis.atob === 'function'
+        ? globalThis.atob(padded)
+        : typeof globalThis.Buffer?.from === 'function'
+          ? globalThis.Buffer.from(padded, 'base64').toString('utf8')
+          : null;
+    if (!json) return null;
+    return JSON.parse(json);
+  } catch (_) {
+    return null;
+  }
+};
+
+const isSessionJwtUsable = (session) => {
+  const userId = session?.user?.id;
+  const token = session?.access_token;
+  if (!userId || !token) return false;
+  const payload = parseJwtPayload(token);
+  return payload?.sub === userId;
+};
+
+// Resolve a usable session for writes that depend on auth.uid() in RLS/RPC.
+// This is intentionally stricter than getSession() and only refreshes on demand.
+export const getActiveSession = async () => {
+  if (globalThis.__VENT_ACTIVE_SESSION_PROMISE__) {
+    return globalThis.__VENT_ACTIVE_SESSION_PROMISE__;
+  }
+
+  const resolver = (async () => {
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (isSessionJwtUsable(session)) return session;
+
+      if (session?.access_token) {
+        const {
+          data: { user },
+          error,
+        } = await supabase.auth.getUser(session.access_token);
+        if (!error && user?.id && user.id === session?.user?.id) {
+          return session;
+        }
+      }
+    } catch (error) {
+      console.error('Error checking current auth session:', error);
+    }
+
+    try {
+      const {
+        data: { session },
+        error,
+      } = await supabase.auth.refreshSession();
+      if (error) throw error;
+      if (isSessionJwtUsable(session)) return session;
+    } catch (error) {
+      console.error('Error refreshing auth session:', error);
+    }
+
+    return null;
+  })();
+
+  globalThis.__VENT_ACTIVE_SESSION_PROMISE__ = resolver;
+
+  try {
+    return await resolver;
+  } finally {
+    if (globalThis.__VENT_ACTIVE_SESSION_PROMISE__ === resolver) {
+      globalThis.__VENT_ACTIVE_SESSION_PROMISE__ = null;
+    }
+  }
 };
 
 export const signIn = async (email, password) => {
