@@ -62,13 +62,13 @@ const formatUsernameForLayer = (user) => {
 const makeUserPostingLayerName = (user) =>
   `user-${formatUsernameForLayer(user)}-posts`;
 const layerOrderStorageKey = (userId) => `layer_order:${userId || "guest"}`;
-const CLOUD_DISTANCE_THRESHOLD_METERS = 250;
 const CLOUD_MIN_POST_COUNT = 2;
 const CLOUD_RADIUS_PADDING_METERS = 40;
 const CLOUD_MIN_RADIUS_METERS = 120;
 const CLOUD_MAX_RADIUS_METERS = 1000;
-const NORMAL_CLUSTER_MIN_COUNT = 4;
-const NORMAL_CLUSTER_ZOOM_DELTA_THRESHOLD = 0.02;
+const CLUSTER_DISTANCE_PX = 52;
+const CLUSTER_MERGE_DISTANCE_PX = 58;
+const DEFAULT_MAP_SIZE = { width: 390, height: 780 };
 
 const toRadians = (degrees) => (degrees * Math.PI) / 180;
 
@@ -87,6 +87,41 @@ const haversineMeters = (a, b) => {
       Math.cos(lat2);
   const y = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
   return earthRadiusMeters * y;
+};
+
+const hasValidCoordinate = (post) =>
+  typeof post?.lat === "number" &&
+  Number.isFinite(post.lat) &&
+  typeof post?.lng === "number" &&
+  Number.isFinite(post.lng);
+
+const toScreenPoint = (coordinate, mapRegion, mapSize) => {
+  const width = Number(mapSize?.width || 0);
+  const height = Number(mapSize?.height || 0);
+  const latitudeDelta = Number(mapRegion?.latitudeDelta || 0);
+  const longitudeDelta = Number(mapRegion?.longitudeDelta || 0);
+  const centerLat = Number(mapRegion?.latitude || 0);
+  const centerLng = Number(mapRegion?.longitude || 0);
+
+  if (
+    width <= 0 ||
+    height <= 0 ||
+    latitudeDelta <= 0 ||
+    longitudeDelta <= 0 ||
+    !Number.isFinite(centerLat) ||
+    !Number.isFinite(centerLng)
+  ) {
+    return null;
+  }
+
+  const minLat = centerLat - latitudeDelta / 2;
+  const maxLat = centerLat + latitudeDelta / 2;
+  const minLng = centerLng - longitudeDelta / 2;
+
+  return {
+    x: ((coordinate.longitude - minLng) / longitudeDelta) * width,
+    y: ((maxLat - coordinate.latitude) / latitudeDelta) * height,
+  };
 };
 
 const isCloudOnlyPost = (pin) => pin?.geometry?.visibility_mode === "cloud_only";
@@ -112,95 +147,188 @@ const getRandomCoordinateWithinRadius = (latitude, longitude, radiusMeters) => {
   };
 };
 
-const buildCloudsFromPosts = (posts) => {
-  const candidates = (posts || []).filter(
-    (post) =>
-      typeof post?.lat === "number" &&
-      Number.isFinite(post.lat) &&
-      typeof post?.lng === "number" &&
-      Number.isFinite(post.lng),
+const buildCloudFromPosts = (groupPosts) => {
+  if (!Array.isArray(groupPosts) || groupPosts.length === 0) {
+    return null;
+  }
+
+  const sum = groupPosts.reduce(
+    (acc, post) => ({
+      lat: acc.lat + post.lat,
+      lng: acc.lng + post.lng,
+    }),
+    { lat: 0, lng: 0 },
   );
+  const center = {
+    latitude: sum.lat / groupPosts.length,
+    longitude: sum.lng / groupPosts.length,
+  };
+
+  const farthest = groupPosts.reduce((maxDistance, post) => {
+    const distance = haversineMeters(center, {
+      latitude: post.lat,
+      longitude: post.lng,
+    });
+    return Math.max(maxDistance, distance);
+  }, 0);
+
+  const computedRadius = Math.min(
+    CLOUD_MAX_RADIUS_METERS,
+    Math.max(CLOUD_MIN_RADIUS_METERS, farthest + CLOUD_RADIUS_PADDING_METERS),
+  );
+
+  return {
+    id: `cloud-${groupPosts.map((post) => post.id).join("-")}`,
+    center,
+    radiusMeters: computedRadius,
+    count: groupPosts.length,
+    privacyCount: groupPosts.filter(isCloudOnlyPost).length,
+    posts: groupPosts,
+  };
+};
+
+const buildCloudsFromPosts = (posts, mapRegion, mapSize) => {
+  const candidates = (posts || []).filter(hasValidCoordinate);
   if (candidates.length < CLOUD_MIN_POST_COUNT) return [];
 
-  const visited = new Set();
+  const clusterDistancePx = CLUSTER_DISTANCE_PX;
+  const clusterDistancePxSq = clusterDistancePx * clusterDistancePx;
+  const cellSize = clusterDistancePx;
+  const toCell = (value) => Math.floor(value / cellSize);
+  const cellKey = (x, y) => `${x}:${y}`;
+
+  const points = candidates
+    .map((post) => {
+      const coord = { latitude: post.lat, longitude: post.lng };
+      const screenPoint = toScreenPoint(coord, mapRegion, mapSize);
+      if (!screenPoint) return null;
+      return {
+        post,
+        coord,
+        screenX: screenPoint.x,
+        screenY: screenPoint.y,
+        cellX: toCell(screenPoint.x),
+        cellY: toCell(screenPoint.y),
+      };
+    })
+    .filter(Boolean);
+
+  if (points.length < CLOUD_MIN_POST_COUNT) return [];
+
+  const grid = new Map();
+  points.forEach((point, index) => {
+    const key = cellKey(point.cellX, point.cellY);
+    const bucket = grid.get(key) || [];
+    bucket.push(index);
+    grid.set(key, bucket);
+  });
+
+  const visited = new Array(points.length).fill(false);
   const clouds = [];
 
-  for (let i = 0; i < candidates.length; i += 1) {
-    if (visited.has(i)) continue;
+  for (let i = 0; i < points.length; i += 1) {
+    if (visited[i]) continue;
     const queue = [i];
-    const groupIndexes = [i];
-    visited.add(i);
+    const groupIndexes = [];
+    visited[i] = true;
 
     while (queue.length > 0) {
       const sourceIndex = queue.shift();
-      const source = candidates[sourceIndex];
-      const sourceCoord = { latitude: source.lat, longitude: source.lng };
+      const source = points[sourceIndex];
+      groupIndexes.push(sourceIndex);
 
-      for (let j = 0; j < candidates.length; j += 1) {
-        if (visited.has(j)) continue;
-        const target = candidates[j];
-        const targetCoord = { latitude: target.lat, longitude: target.lng };
-        if (
-          haversineMeters(sourceCoord, targetCoord) <=
-          CLOUD_DISTANCE_THRESHOLD_METERS
-        ) {
-          visited.add(j);
-          groupIndexes.push(j);
-          queue.push(j);
+      for (let x = source.cellX - 1; x <= source.cellX + 1; x += 1) {
+        for (let y = source.cellY - 1; y <= source.cellY + 1; y += 1) {
+          const neighborIndexes = grid.get(cellKey(x, y)) || [];
+          for (let k = 0; k < neighborIndexes.length; k += 1) {
+            const targetIndex = neighborIndexes[k];
+            if (visited[targetIndex]) continue;
+            const target = points[targetIndex];
+            const deltaX = source.screenX - target.screenX;
+            const deltaY = source.screenY - target.screenY;
+            const distanceSq = deltaX * deltaX + deltaY * deltaY;
+            if (distanceSq <= clusterDistancePxSq) {
+              visited[targetIndex] = true;
+              queue.push(targetIndex);
+            }
+          }
         }
       }
     }
 
     if (groupIndexes.length < CLOUD_MIN_POST_COUNT) continue;
 
-    const groupPosts = groupIndexes.map((index) => candidates[index]);
-    const sum = groupPosts.reduce(
-      (acc, post) => ({
-        lat: acc.lat + post.lat,
-        lng: acc.lng + post.lng,
-      }),
-      { lat: 0, lng: 0 },
-    );
-    const center = {
-      latitude: sum.lat / groupPosts.length,
-      longitude: sum.lng / groupPosts.length,
-    };
-
-    const farthest = groupPosts.reduce((maxDistance, post) => {
-      const distance = haversineMeters(center, {
-        latitude: post.lat,
-        longitude: post.lng,
-      });
-      return Math.max(maxDistance, distance);
-    }, 0);
-
-    const computedRadius = Math.min(
-      CLOUD_MAX_RADIUS_METERS,
-      Math.max(
-        CLOUD_MIN_RADIUS_METERS,
-        farthest + CLOUD_RADIUS_PADDING_METERS,
-      ),
-    );
-
-    clouds.push({
-      id: `cloud-${groupPosts.map((post) => post.id).join("-")}`,
-      center,
-      radiusMeters: computedRadius,
-      count: groupPosts.length,
-      privacyCount: groupPosts.filter(isCloudOnlyPost).length,
-      posts: groupPosts,
-    });
+    const groupPosts = groupIndexes.map((index) => points[index].post);
+    const cloud = buildCloudFromPosts(groupPosts);
+    if (cloud) {
+      clouds.push(cloud);
+    }
   }
 
   return clouds;
 };
 
-const computeMapVisuals = (posts, latitudeDelta) => {
+const mergeNearbyClouds = (clouds, mapRegion, mapSize) => {
+  if (!Array.isArray(clouds) || clouds.length < 2) return clouds || [];
+
+  const mergeDistanceSq = CLUSTER_MERGE_DISTANCE_PX * CLUSTER_MERGE_DISTANCE_PX;
+  const visited = new Array(clouds.length).fill(false);
+  const merged = [];
+
+  const cloudNodes = clouds.map((cloud) => ({
+    cloud,
+    screenPoint: toScreenPoint(cloud.center, mapRegion, mapSize),
+  }));
+
+  for (let i = 0; i < cloudNodes.length; i += 1) {
+    if (visited[i]) continue;
+    visited[i] = true;
+    const queue = [i];
+    const groupIndexes = [];
+
+    while (queue.length > 0) {
+      const sourceIndex = queue.shift();
+      groupIndexes.push(sourceIndex);
+      const source = cloudNodes[sourceIndex];
+      if (!source?.screenPoint) continue;
+
+      for (let j = 0; j < cloudNodes.length; j += 1) {
+        if (visited[j]) continue;
+        const target = cloudNodes[j];
+        if (!target?.screenPoint) continue;
+
+        const deltaX = source.screenPoint.x - target.screenPoint.x;
+        const deltaY = source.screenPoint.y - target.screenPoint.y;
+        const distanceSq = deltaX * deltaX + deltaY * deltaY;
+        if (distanceSq <= mergeDistanceSq) {
+          visited[j] = true;
+          queue.push(j);
+        }
+      }
+    }
+
+    if (groupIndexes.length === 1) {
+      merged.push(cloudNodes[groupIndexes[0]].cloud);
+      continue;
+    }
+
+    const mergedPosts = [];
+    groupIndexes.forEach((index) => {
+      mergedPosts.push(...(cloudNodes[index].cloud?.posts || []));
+    });
+    const mergedCloud = buildCloudFromPosts(mergedPosts);
+    if (mergedCloud) {
+      merged.push(mergedCloud);
+    }
+  }
+
+  return merged;
+};
+
+const computeMapVisuals = (posts, mapRegion, mapSize) => {
   const normalizedPosts = Array.isArray(posts) ? posts : [];
-  const clusters = buildCloudsFromPosts(normalizedPosts);
-  const zoomedOut =
-    Number(latitudeDelta || DEFAULT_REGION.latitudeDelta) >=
-    NORMAL_CLUSTER_ZOOM_DELTA_THRESHOLD;
+  const baseClusters = buildCloudsFromPosts(normalizedPosts, mapRegion, mapSize);
+  const clusters = mergeNearbyClouds(baseClusters, mapRegion, mapSize);
 
   const visibleClouds = [];
   const clusteredPinnedIds = new Set();
@@ -208,9 +336,8 @@ const computeMapVisuals = (posts, latitudeDelta) => {
   clusters.forEach((cloud) => {
     const pinnedCount = cloud.count - cloud.privacyCount;
     const hasPrivacyPosts = cloud.privacyCount > 0;
-    const shouldShowCloudForPinned =
-      pinnedCount >= NORMAL_CLUSTER_MIN_COUNT || zoomedOut;
-    const shouldShowCloud = hasPrivacyPosts || shouldShowCloudForPinned;
+    const shouldShowCloud =
+      hasPrivacyPosts || pinnedCount >= CLOUD_MIN_POST_COUNT;
 
     if (!shouldShowCloud) return;
     visibleClouds.push(cloud);
@@ -223,7 +350,10 @@ const computeMapVisuals = (posts, latitudeDelta) => {
   });
 
   const visiblePins = normalizedPosts.filter(
-    (post) => !isCloudOnlyPost(post) && !clusteredPinnedIds.has(post.id),
+    (post) =>
+      hasValidCoordinate(post) &&
+      !isCloudOnlyPost(post) &&
+      !clusteredPinnedIds.has(post.id),
   );
 
   return { visiblePins, visibleClouds };
@@ -275,6 +405,7 @@ const MapScreen = ({ navigation, route }) => {
   const [cloudPostsModalVisible, setCloudPostsModalVisible] = useState(false);
   const [selectedCloud, setSelectedCloud] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [mapSize, setMapSize] = useState(DEFAULT_MAP_SIZE);
 
   const mapRef = useRef(null);
   const selectedPinIdRef = useRef(null);
@@ -758,13 +889,14 @@ const MapScreen = ({ navigation, route }) => {
     const frame = requestAnimationFrame(() => {
       const { visiblePins, visibleClouds } = computeMapVisuals(
         allLoadedPosts,
-        region?.latitudeDelta,
+        region,
+        mapSize,
       );
       setPins(visiblePins);
       setClouds(visibleClouds);
     });
     return () => cancelAnimationFrame(frame);
-  }, [allLoadedPosts, region]);
+  }, [allLoadedPosts, region, mapSize]);
 
   const requestLocationPermission = async () => {
     try {
@@ -1421,17 +1553,49 @@ const MapScreen = ({ navigation, route }) => {
     setCloudPostsModalVisible(true);
   };
 
+  const handleCloudPostPress = (post) => {
+    if (!post) return;
+
+    setCloudPostsModalVisible(false);
+    setSelectedCloud(null);
+
+    const hasCoordinate =
+      typeof post?.lat === "number" &&
+      Number.isFinite(post.lat) &&
+      typeof post?.lng === "number" &&
+      Number.isFinite(post.lng);
+
+    if (hasCoordinate) {
+      const targetRegion = {
+        latitude: post.lat,
+        longitude: post.lng,
+        latitudeDelta: Math.min(region?.latitudeDelta || 0.012, 0.012),
+        longitudeDelta: Math.min(region?.longitudeDelta || 0.012, 0.012),
+      };
+      setRegion(targetRegion);
+      if (mapRef.current?.animateToRegion) {
+        mapRef.current.animateToRegion(targetRegion, 320);
+      }
+    }
+
+    const selected = allLoadedPosts.find((item) => item.id === post.id) || post;
+    setTimeout(() => {
+      handlePinPress(selected);
+    }, 180);
+  };
+
   const handleRegionChangeComplete = useCallback(
     (nextRegion) => {
       setRegion(nextRegion);
       const { visiblePins, visibleClouds } = computeMapVisuals(
         allLoadedPosts,
-        nextRegion?.latitudeDelta,
+        nextRegion,
+        mapSize,
       );
       setPins(visiblePins);
       setClouds(visibleClouds);
     },
-    [allLoadedPosts],
+    [allLoadedPosts, mapSize],
   );
 
   const handleVotePin = async (vote) => {
@@ -1566,6 +1730,26 @@ const MapScreen = ({ navigation, route }) => {
         style={styles.map}
         provider={PROVIDER_GOOGLE}
         initialRegion={region}
+        onLayout={(event) => {
+          const { width, height } = event.nativeEvent.layout || {};
+          if (
+            !Number.isFinite(width) ||
+            !Number.isFinite(height) ||
+            width <= 0 ||
+            height <= 0
+          ) {
+            return;
+          }
+          setMapSize((prev) => {
+            if (
+              Math.abs((prev?.width || 0) - width) < 1 &&
+              Math.abs((prev?.height || 0) - height) < 1
+            ) {
+              return prev;
+            }
+            return { width, height };
+          });
+        }}
         onRegionChangeComplete={handleRegionChangeComplete}
         mapType={mapType}
         customMapStyle={isDark ? MAP_DARK_STYLE : []}
@@ -1797,8 +1981,25 @@ const MapScreen = ({ navigation, route }) => {
               {selectedCloud?.posts?.length ? (
                 selectedCloud.posts.map((post) => {
                   const privacyProtected = isCloudOnlyPost(post);
+                  const authorUsername = String(
+                    post?.author_username || "",
+                  ).trim();
+                  const fallbackHandle = String(
+                    post?.author_name || "anonymous",
+                  )
+                    .trim()
+                    .replace(/\s+/g, "")
+                    .toLowerCase();
+                  const authorHandle = authorUsername
+                    ? `@${authorUsername}`
+                    : `@${fallbackHandle || "anonymous"}`;
                   return (
-                    <View key={post.id} style={styles.postRow}>
+                    <TouchableOpacity
+                      key={post.id}
+                      style={styles.postRow}
+                      activeOpacity={0.85}
+                      onPress={() => handleCloudPostPress(post)}
+                    >
                       <View style={styles.cloudPostHeaderRow}>
                         <Text style={styles.postTitle}>
                           {post.caption || "Untitled"}
@@ -1814,6 +2015,7 @@ const MapScreen = ({ navigation, route }) => {
                           {privacyProtected ? "Privacy Protected" : "Pinned"}
                         </Text>
                       </View>
+                      <Text style={styles.cloudPostAuthor}>{authorHandle}</Text>
                       {post.content ? (
                         <Text style={styles.postContent} numberOfLines={4}>
                           {post.content}
@@ -1822,7 +2024,7 @@ const MapScreen = ({ navigation, route }) => {
                       <Text style={styles.postMeta}>
                         {new Date(post.created_at).toLocaleString()}
                       </Text>
-                    </View>
+                    </TouchableOpacity>
                   );
                 })
               ) : (
@@ -2046,6 +2248,12 @@ const createStyles = (palette) =>
     cloudPrivacyBadgePinned: {
       color: "#bfdbfe",
       backgroundColor: "rgba(30, 64, 175, 0.32)",
+    },
+    cloudPostAuthor: {
+      color: palette.primary,
+      fontSize: 12,
+      fontWeight: "700",
+      marginBottom: 4,
     },
     postMeta: {
       color: palette.subtext,
