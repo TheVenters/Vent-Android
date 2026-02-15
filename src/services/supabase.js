@@ -98,10 +98,20 @@ const safeJson = async (response) => {
   }
 };
 
+const RESET_PASSWORD_FUNCTION_PATH = '/functions/v1/reset-password-with-otp';
+
 const resetPasswordViaEdgeFunction = async (email, token, newPassword) => {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    return {
+      data: null,
+      error: new Error('Missing Supabase environment variables.'),
+      status: null,
+    };
+  }
+
   try {
     const response = await fetch(
-      `${SUPABASE_URL}/functions/v1/reset-password-with-otp`,
+      `${SUPABASE_URL}${RESET_PASSWORD_FUNCTION_PATH}`,
       {
         method: 'POST',
         headers: {
@@ -130,21 +140,21 @@ const resetPasswordViaEdgeFunction = async (email, token, newPassword) => {
 };
 
 export const resetPasswordWithOtp = async (email, token, newPassword) => {
-  try {
-    const edgeResult = await resetPasswordViaEdgeFunction(email, token, newPassword);
-    if (!edgeResult.error) return { data: edgeResult.data, error: null };
+  const edgeResult = await resetPasswordViaEdgeFunction(
+    email,
+    token,
+    newPassword,
+  );
+  if (!edgeResult.error) return { data: edgeResult.data, error: null };
 
-    if ([401, 403, 404].includes(edgeResult.status || 0)) {
-      return {
-        data: edgeResult.data,
-        error: new Error(
-          'Password reset service is unavailable. Ensure edge function `reset-password-with-otp` is deployed with JWT verification disabled.',
-        ),
-      };
-    }
-
-    return { data: edgeResult.data, error: edgeResult.error };
-  } catch (error) {
-    return { data: null, error };
+  if ([401, 403, 404].includes(edgeResult.status || 0)) {
+    return {
+      data: edgeResult.data,
+      error: new Error(
+        'Password reset service is unavailable. Ensure edge function `reset-password-with-otp` is deployed with JWT verification disabled.',
+      ),
+    };
   }
+
+  return { data: edgeResult.data, error: edgeResult.error };
 };

@@ -42,3 +42,13 @@ On an Emulator
 - Launch your iOS Simulator or Android Emulator
 - Download and launch Expo Go on the emulator
 - Enter the URL returned by npx expo start
+
+---
+
+## Password Reset Smoke Test
+
+Use a fresh OTP code from your reset email:
+
+`npm run smoke:reset -- --email you@example.com --token 123456 --password NewPass123`
+
+This directly calls the `reset-password-with-otp` edge function and fails fast with the backend error message.
