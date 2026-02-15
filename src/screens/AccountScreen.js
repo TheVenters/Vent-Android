@@ -88,7 +88,13 @@ const AccountScreen = ({ navigation }) => {
       if (error) throw error;
       setAvatarUrl(data?.avatar_url || null);
     } catch (error) {
-      console.error("Error loading profile avatar:", error);
+      const message = String(error?.message || "").toLowerCase();
+      const isNetworkError =
+        message.includes("network request failed") ||
+        message.includes("fetch failed");
+      if (!isNetworkError) {
+        console.error("Error loading profile avatar:", error);
+      }
       setAvatarUrl(null);
     }
   };

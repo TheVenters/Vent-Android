@@ -12,9 +12,73 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
 }
 
 const SUPABASE_CLIENT_VERSION = 'v2-no-lock';
+const NETWORK_RETRY_ATTEMPTS = 3;
+const NETWORK_RETRY_BASE_DELAY_MS = 180;
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isRetryableNetworkError = (error) => {
+  const message = String(
+    error?.message || error?.details || error || '',
+  ).toLowerCase();
+  return (
+    message.includes('fetch failed') ||
+    message.includes('failed to fetch') ||
+    message.includes('network request failed') ||
+    message.includes('eai_again') ||
+    message.includes('timed out') ||
+    message.includes('socket hang up')
+  );
+};
+
+const resilientFetch = async (input, init) => {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= NETWORK_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await globalThis.fetch(input, init);
+      if (
+        response?.status >= 500 &&
+        response?.status <= 599 &&
+        attempt < NETWORK_RETRY_ATTEMPTS
+      ) {
+        await delay(NETWORK_RETRY_BASE_DELAY_MS * attempt);
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableNetworkError(error) || attempt >= NETWORK_RETRY_ATTEMPTS) {
+        throw error;
+      }
+      await delay(NETWORK_RETRY_BASE_DELAY_MS * attempt);
+    }
+  }
+
+  if (isRetryableNetworkError(lastError)) {
+    return new Response(
+      JSON.stringify({
+        error: 'Network request failed',
+        message: String(lastError?.message || 'Network request failed'),
+      }),
+      {
+        status: 503,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Vent-Network-Fallback': '1',
+        },
+      },
+    );
+  }
+
+  throw lastError || new Error('Network request failed');
+};
 
 const createSupabaseClient = () =>
   createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    global: {
+      fetch: resilientFetch,
+    },
     auth: {
       ...(Platform.OS !== 'web' ? { storage: AsyncStorage } : {}),
       autoRefreshToken: true,
@@ -76,6 +140,7 @@ export const supabaseWithAccessToken = (accessToken) => {
 
   const client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     global: {
+      fetch: resilientFetch,
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
@@ -230,7 +295,7 @@ const invokeEdgeFunction = async (path, payload) => {
   }
 
   try {
-    const response = await fetch(`${SUPABASE_URL}${path}`, {
+    const response = await resilientFetch(`${SUPABASE_URL}${path}`, {
       method: 'POST',
       headers: {
         apikey: SUPABASE_ANON_KEY,
