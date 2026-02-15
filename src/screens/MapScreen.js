@@ -275,24 +275,32 @@ const MapScreen = ({ navigation, route }) => {
 
   const mapRef = useRef(null);
 
-  const resolveCurrentUserId = useCallback(async () => {
-    // For RLS-gated writes, require an active auth session so auth.uid() is
-    // guaranteed on PostgREST/RPC requests.
+  const resolveActiveSession = useCallback(async () => {
     try {
       const {
         data: { session },
       } = await supabase.auth.getSession();
-      if (session?.user?.id) {
-        if (currentUser?.id !== session.user.id) {
-          setCurrentUser(session.user);
-        }
-        return session.user.id;
+      if (session?.user?.id && session?.access_token) {
+        return session;
       }
     } catch (error) {
-      console.error("Error resolving current session:", error);
+      console.error("Error resolving active session:", error);
     }
     return null;
-  }, [currentUser?.id]);
+  }, []);
+
+  const resolveCurrentUserId = useCallback(async () => {
+    // For RLS-gated writes, require an active auth session so auth.uid() is
+    // guaranteed on PostgREST/RPC requests.
+    const session = await resolveActiveSession();
+    if (session?.user?.id) {
+      if (currentUser?.id !== session.user.id) {
+        setCurrentUser(session.user);
+      }
+      return session.user.id;
+    }
+    return null;
+  }, [currentUser?.id, resolveActiveSession]);
 
   const persistLayerOrder = useCallback(async (nextLayers, userId) => {
     if (!userId || !Array.isArray(nextLayers)) return;
@@ -1280,17 +1288,16 @@ const MapScreen = ({ navigation, route }) => {
 
   const loadPinVotes = async (pinId) => {
     try {
-      const rpcResult = await supabase.rpc("get_pin_vote_summary", {
+      const session = await resolveActiveSession();
+      const authed = supabaseWithAccessToken(session?.access_token || null);
+      const rpcResult = await authed.rpc("get_pin_vote_summary", {
         target_pin_id: pinId,
       });
 
       if (rpcResult.error) {
         // Local/dev fallback if RPC migrations are not applied.
-        const {
-          data: { session },
-        } = await supabase.auth.getSession();
         const activeUserId = currentUser?.id || session?.user?.id || null;
-        const tableResult = await supabase
+        const tableResult = await authed
           .from("pin_votes")
           .select("user_id, vote")
           .eq("pin_id", pinId);
@@ -1350,8 +1357,9 @@ const MapScreen = ({ navigation, route }) => {
   const handleVotePin = async (vote) => {
     if (!selectedPin) return;
 
-    const userId = await resolveCurrentUserId();
-    if (!userId) {
+    const session = await resolveActiveSession();
+    const userId = session?.user?.id || null;
+    if (!userId || !session?.access_token) {
       Alert.alert("Sign In Required", "Please sign in to vote on pins");
       return;
     }
@@ -1361,7 +1369,8 @@ const MapScreen = ({ navigation, route }) => {
     try {
       setIsSubmittingVote(true);
 
-      const toggleResult = await supabase.rpc("toggle_pin_vote", {
+      const authed = supabaseWithAccessToken(session.access_token);
+      const toggleResult = await authed.rpc("toggle_pin_vote", {
         target_pin_id: selectedPin.id,
         target_vote: vote,
       });
