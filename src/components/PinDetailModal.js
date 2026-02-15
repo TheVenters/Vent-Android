@@ -219,16 +219,16 @@ const PinDetailModal = ({
                 style={[
                   styles.voteButton,
                   styles.voteButtonLeft,
-                  pinVoteSummary?.userVote === 1 && styles.voteButtonActive,
+                  pinVoteSummary?.userVote === 1 && styles.voteButtonUpActive,
                 ]}
-                disabled={!currentUserId || isSubmittingVote || isOwner}
+                disabled={isSubmittingVote || isOwner}
                 onPress={() => onVote && onVote(1)}
               >
                 <Text
                   style={[
                     styles.voteButtonText,
                     pinVoteSummary?.userVote === 1 &&
-                      styles.voteButtonTextActive,
+                      styles.voteButtonTextUpActive,
                   ]}
                 >
                   👍 {pinVoteSummary?.upvotes || 0}
@@ -238,16 +238,17 @@ const PinDetailModal = ({
               <TouchableOpacity
                 style={[
                   styles.voteButton,
-                  pinVoteSummary?.userVote === -1 && styles.voteButtonActive,
+                  pinVoteSummary?.userVote === -1 &&
+                    styles.voteButtonDownActive,
                 ]}
-                disabled={!currentUserId || isSubmittingVote || isOwner}
+                disabled={isSubmittingVote || isOwner}
                 onPress={() => onVote && onVote(-1)}
               >
                 <Text
                   style={[
                     styles.voteButtonText,
                     pinVoteSummary?.userVote === -1 &&
-                      styles.voteButtonTextActive,
+                      styles.voteButtonTextDownActive,
                   ]}
                 >
                   👎 {pinVoteSummary?.downvotes || 0}
@@ -466,16 +467,23 @@ const styles = StyleSheet.create({
   voteButtonLeft: {
     marginRight: SIZES.sm,
   },
-  voteButtonActive: {
-    backgroundColor: COLORS.primary,
-    borderColor: COLORS.primary,
+  voteButtonUpActive: {
+    backgroundColor: COLORS.success,
+    borderColor: COLORS.success,
+  },
+  voteButtonDownActive: {
+    backgroundColor: COLORS.danger,
+    borderColor: COLORS.danger,
   },
   voteButtonText: {
     fontSize: SIZES.lg,
     fontWeight: "600",
     color: COLORS.dark,
   },
-  voteButtonTextActive: {
+  voteButtonTextUpActive: {
+    color: COLORS.white,
+  },
+  voteButtonTextDownActive: {
     color: COLORS.white,
   },
   voteHint: {

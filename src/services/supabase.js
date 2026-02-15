@@ -1,6 +1,6 @@
 import 'react-native-url-polyfill/auto';
 import { AppState, Platform } from 'react-native';
-import { createClient, processLock } from '@supabase/supabase-js';
+import { createClient } from '@supabase/supabase-js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Load from environment variables (set in .env file)
@@ -11,51 +11,170 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   console.error('Missing Supabase environment variables. Check your .env file.');
 }
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: {
-    ...(Platform.OS !== 'web' ? { storage: AsyncStorage } : {}),
-    autoRefreshToken: true,
-    persistSession: true,
-    detectSessionInUrl: false,
-    lock: processLock,
-  },
-});
+const SUPABASE_CLIENT_VERSION = 'v2-no-lock';
 
-if (Platform.OS !== 'web' && !globalThis.__SUPABASE_APPSTATE_LISTENER__) {
-  globalThis.__SUPABASE_APPSTATE_LISTENER__ = true;
-  AppState.addEventListener('change', (state) => {
-    if (state === 'active') {
-      supabase.auth.startAutoRefresh();
-    } else {
-      supabase.auth.stopAutoRefresh();
-    }
+const createSupabaseClient = () =>
+  createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: {
+      ...(Platform.OS !== 'web' ? { storage: AsyncStorage } : {}),
+      autoRefreshToken: true,
+      persistSession: true,
+      detectSessionInUrl: false,
+    },
   });
+
+const shouldReuseClient =
+  globalThis.__VENT_SUPABASE_CLIENT__ &&
+  globalThis.__VENT_SUPABASE_CLIENT_VERSION__ === SUPABASE_CLIENT_VERSION;
+
+if (!shouldReuseClient) {
+  try {
+    globalThis.__VENT_SUPABASE_APPSTATE_SUB__?.remove?.();
+  } catch (_) {}
+  globalThis.__VENT_SUPABASE_CLIENT__ = createSupabaseClient();
+  globalThis.__VENT_SUPABASE_CLIENT_VERSION__ = SUPABASE_CLIENT_VERSION;
+  globalThis.__VENT_SUPABASE_HELPER__ = null;
+  globalThis.__VENT_SUPABASE_APPSTATE_SUB__ = null;
+  globalThis.__VENT_SUPABASE_REFRESH_ACTIVE__ = null;
+  globalThis.__VENT_ACTIVE_SESSION_PROMISE__ = null;
+}
+
+export const supabase = globalThis.__VENT_SUPABASE_CLIENT__;
+
+if (Platform.OS !== 'web' && !globalThis.__VENT_SUPABASE_APPSTATE_SUB__) {
+  globalThis.__VENT_SUPABASE_REFRESH_ACTIVE__ =
+    AppState.currentState === 'active';
+  if (globalThis.__VENT_SUPABASE_REFRESH_ACTIVE__) {
+    supabase.auth.startAutoRefresh().catch(() => {});
+  } else {
+    supabase.auth.stopAutoRefresh().catch(() => {});
+  }
+
+  globalThis.__VENT_SUPABASE_APPSTATE_SUB__ = AppState.addEventListener(
+    'change',
+    (state) => {
+      const isActive = state === 'active';
+      if (globalThis.__VENT_SUPABASE_REFRESH_ACTIVE__ === isActive) return;
+      globalThis.__VENT_SUPABASE_REFRESH_ACTIVE__ = isActive;
+
+      if (isActive) {
+        supabase.auth.startAutoRefresh().catch(() => {});
+      } else {
+        supabase.auth.stopAutoRefresh().catch(() => {});
+      }
+    },
+  );
 }
 
 // For rare cases where we must guarantee the Authorization header is present
 // (e.g. debugging RLS writes), create a short-lived client pinned to a token.
 export const supabaseWithAccessToken = (accessToken) => {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !accessToken) return supabase;
-  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  if (globalThis.__VENT_SUPABASE_HELPER__?.token === accessToken) {
+    return globalThis.__VENT_SUPABASE_HELPER__.client;
+  }
+
+  const client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     global: {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
     },
     auth: {
-      ...(Platform.OS !== 'web' ? { storage: AsyncStorage } : {}),
       autoRefreshToken: false,
       persistSession: false,
       detectSessionInUrl: false,
-      lock: processLock,
     },
   });
+
+  globalThis.__VENT_SUPABASE_HELPER__ = { token: accessToken, client };
+  return client;
 };
 
 // Helper functions
 export const getCurrentUser = async () => {
-  const { data: { user } } = await supabase.auth.getUser();
-  return user;
+  const session = await getActiveSession();
+  return session?.user || null;
+};
+
+const parseJwtPayload = (token) => {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length < 2) return null;
+  try {
+    const normalized = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+    const json =
+      typeof globalThis.atob === 'function'
+        ? globalThis.atob(padded)
+        : typeof globalThis.Buffer?.from === 'function'
+          ? globalThis.Buffer.from(padded, 'base64').toString('utf8')
+          : null;
+    if (!json) return null;
+    return JSON.parse(json);
+  } catch (_) {
+    return null;
+  }
+};
+
+const isSessionJwtUsable = (session) => {
+  const userId = session?.user?.id;
+  const token = session?.access_token;
+  if (!userId || !token) return false;
+  const payload = parseJwtPayload(token);
+  return payload?.sub === userId;
+};
+
+// Resolve a usable session for writes that depend on auth.uid() in RLS/RPC.
+// This is intentionally stricter than getSession() and only refreshes on demand.
+export const getActiveSession = async () => {
+  if (globalThis.__VENT_ACTIVE_SESSION_PROMISE__) {
+    return globalThis.__VENT_ACTIVE_SESSION_PROMISE__;
+  }
+
+  const resolver = (async () => {
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (isSessionJwtUsable(session)) return session;
+
+      if (session?.access_token) {
+        const {
+          data: { user },
+          error,
+        } = await supabase.auth.getUser(session.access_token);
+        if (!error && user?.id && user.id === session?.user?.id) {
+          return session;
+        }
+      }
+    } catch (error) {
+      console.error('Error checking current auth session:', error);
+    }
+
+    try {
+      const {
+        data: { session },
+        error,
+      } = await supabase.auth.refreshSession();
+      if (error) throw error;
+      if (isSessionJwtUsable(session)) return session;
+    } catch (error) {
+      console.error('Error refreshing auth session:', error);
+    }
+
+    return null;
+  })();
+
+  globalThis.__VENT_ACTIVE_SESSION_PROMISE__ = resolver;
+
+  try {
+    return await resolver;
+  } finally {
+    if (globalThis.__VENT_ACTIVE_SESSION_PROMISE__ === resolver) {
+      globalThis.__VENT_ACTIVE_SESSION_PROMISE__ = null;
+    }
+  }
 };
 
 export const signIn = async (email, password) => {
@@ -90,6 +209,90 @@ export const resetPassword = async (email) => {
   return { data, error };
 };
 
+const makeRestUrl = (path) => {
+  const normalized = String(path || '').startsWith('/')
+    ? String(path)
+    : `/${String(path || '')}`;
+  return `${SUPABASE_URL}/rest/v1${normalized}`;
+};
+
+const restRequestWithAccessToken = async (
+  path,
+  { method = 'GET', accessToken = null, body = null, headers = {} } = {},
+) => {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    return {
+      data: null,
+      error: { message: 'Missing Supabase environment variables.' },
+      status: null,
+    };
+  }
+
+  try {
+    const response = await fetch(makeRestUrl(path), {
+      method,
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken || SUPABASE_ANON_KEY}`,
+        'Content-Type': 'application/json',
+        ...headers,
+      },
+      ...(body != null ? { body: JSON.stringify(body) } : {}),
+    });
+    const payload = await safeJson(response);
+    if (!response.ok) {
+      return {
+        data: payload,
+        error: payload || {
+          message: `REST request failed with status ${response.status}`,
+        },
+        status: response.status,
+      };
+    }
+    return { data: payload, error: null, status: response.status };
+  } catch (error) {
+    return { data: null, error, status: null };
+  }
+};
+
+export const rpcWithAccessToken = async (fn, args = {}, accessToken = null) =>
+  restRequestWithAccessToken(`/rpc/${fn}`, {
+    method: 'POST',
+    accessToken,
+    body: args,
+  });
+
+export const insertFriendRequestWithAccessToken = async (
+  userId,
+  friendId,
+  accessToken,
+) =>
+  restRequestWithAccessToken('/friends', {
+    method: 'POST',
+    accessToken,
+    headers: { Prefer: 'return=representation' },
+    body: [{ user_id: userId, friend_id: friendId, status: 'pending' }],
+  });
+
+export const updateFriendshipStatusWithAccessToken = async (
+  requestId,
+  status,
+  accessToken,
+) =>
+  restRequestWithAccessToken(`/friends?id=eq.${encodeURIComponent(requestId)}`, {
+    method: 'PATCH',
+    accessToken,
+    headers: { Prefer: 'return=representation' },
+    body: { status },
+  });
+
+export const deleteFriendshipWithAccessToken = async (requestId, accessToken) =>
+  restRequestWithAccessToken(`/friends?id=eq.${encodeURIComponent(requestId)}`, {
+    method: 'DELETE',
+    accessToken,
+    headers: { Prefer: 'return=representation' },
+  });
+
 const safeJson = async (response) => {
   try {
     return await response.json();
@@ -99,8 +302,9 @@ const safeJson = async (response) => {
 };
 
 const RESET_PASSWORD_FUNCTION_PATH = '/functions/v1/reset-password-with-otp';
+const SOCIAL_ACTIONS_FUNCTION_PATH = '/functions/v1/social-actions';
 
-const resetPasswordViaEdgeFunction = async (email, token, newPassword) => {
+const invokeEdgeFunction = async (path, payload) => {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     return {
       data: null,
@@ -110,33 +314,37 @@ const resetPasswordViaEdgeFunction = async (email, token, newPassword) => {
   }
 
   try {
-    const response = await fetch(
-      `${SUPABASE_URL}${RESET_PASSWORD_FUNCTION_PATH}`,
-      {
-        method: 'POST',
-        headers: {
-          apikey: SUPABASE_ANON_KEY,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ email, token, newPassword }),
+    const response = await fetch(`${SUPABASE_URL}${path}`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        'Content-Type': 'application/json',
       },
-    );
+      body: JSON.stringify(payload || {}),
+    });
 
-    const payload = await safeJson(response);
+    const result = await safeJson(response);
     if (!response.ok) {
       const message =
-        payload?.error ||
-        payload?.msg ||
-        payload?.error_description ||
-        payload?.message ||
-        `Edge password reset failed (${response.status}).`;
-      return { data: payload, error: new Error(message), status: response.status };
+        result?.error ||
+        result?.msg ||
+        result?.error_description ||
+        result?.message ||
+        `Edge function failed (${response.status}).`;
+      return { data: result, error: new Error(message), status: response.status };
     }
-
-    return { data: payload, error: null, status: response.status };
+    return { data: result, error: null, status: response.status };
   } catch (error) {
     return { data: null, error, status: null };
   }
+};
+
+const resetPasswordViaEdgeFunction = async (email, token, newPassword) => {
+  return invokeEdgeFunction(RESET_PASSWORD_FUNCTION_PATH, {
+    email,
+    token,
+    newPassword,
+  });
 };
 
 export const resetPasswordWithOtp = async (email, token, newPassword) => {
@@ -158,3 +366,118 @@ export const resetPasswordWithOtp = async (email, token, newPassword) => {
 
   return { data: edgeResult.data, error: edgeResult.error };
 };
+
+const socialAction = async (action, payload, accessToken, refreshToken = null) => {
+  const result = await invokeEdgeFunction(SOCIAL_ACTIONS_FUNCTION_PATH, {
+    action,
+    accessToken,
+    refreshToken,
+    ...(payload || {}),
+  });
+
+  const refreshedAccessToken = result?.data?.refreshedAccessToken;
+  const refreshedRefreshToken = result?.data?.refreshedRefreshToken;
+  if (!result?.error && refreshedAccessToken && refreshedRefreshToken) {
+    try {
+      await supabase.auth.setSession({
+        access_token: refreshedAccessToken,
+        refresh_token: refreshedRefreshToken,
+      });
+    } catch (error) {
+      console.warn('Failed to apply refreshed session from edge function:', error);
+    }
+  }
+
+  return result;
+};
+
+export const votePinViaEdgeFunction = async (
+  pinId,
+  vote,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'vote',
+    { pinId, vote, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const getPinVoteSummaryViaEdgeFunction = async (
+  pinId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'vote_summary',
+    { pinId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const fetchFriendListsViaEdgeFunction = async (
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'friend_lists',
+    { actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const sendFriendRequestViaEdgeFunction = async (
+  targetUserId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'send_friend_request',
+    { targetUserId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const acceptFriendRequestViaEdgeFunction = async (
+  friendshipId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'accept_friend_request',
+    { friendshipId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const rejectFriendRequestViaEdgeFunction = async (
+  friendshipId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'reject_friend_request',
+    { friendshipId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const removeFriendViaEdgeFunction = async (
+  friendshipId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'remove_friend',
+    { friendshipId, actorUserId },
+    accessToken,
+    refreshToken,
+  );

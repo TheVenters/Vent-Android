@@ -439,17 +439,6 @@ const CommunitiesScreen = ({ navigation }) => {
       console.error("Error resolving session:", error);
     }
     if (!sessionUserId) {
-      try {
-        const {
-          data: { session },
-        } = await supabase.auth.refreshSession();
-        sessionUserId = session?.user?.id || null;
-        accessToken = session?.access_token || null;
-      } catch (error) {
-        console.error("Error refreshing session:", error);
-      }
-    }
-    if (!sessionUserId) {
       Alert.alert(
         "Sign In Required",
         "Your session is missing or expired. Please sign out and sign back in.",

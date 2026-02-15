@@ -10,7 +10,16 @@ import {
   RefreshControl,
   Platform,
 } from 'react-native';
-import { supabase, getCurrentUser } from '../services/supabase';
+import {
+  acceptFriendRequestViaEdgeFunction,
+  fetchFriendListsViaEdgeFunction,
+  getActiveSession,
+  getCurrentUser,
+  rejectFriendRequestViaEdgeFunction,
+  removeFriendViaEdgeFunction,
+  sendFriendRequestViaEdgeFunction,
+  supabase,
+} from '../services/supabase';
 import { COLORS, SIZES } from '../constants/theme';
 
 const FriendsScreen = ({ navigation }) => {
@@ -30,9 +39,7 @@ const FriendsScreen = ({ navigation }) => {
   // Separate effect for loading data
   useEffect(() => {
     if (currentUser) {
-      loadFriends();
-      loadRequests();
-      loadSentRequests();
+      loadFriendCollections();
     }
   }, [currentUser]);
 
@@ -62,9 +69,7 @@ const FriendsScreen = ({ navigation }) => {
             console.log('Reloading friends data due to', eventType);
             // Small delay to ensure database is updated
             setTimeout(() => {
-              loadFriends();
-              loadRequests();
-              loadSentRequests();
+              loadFriendCollections();
             }, 100);
           }
         }
@@ -88,142 +93,37 @@ const FriendsScreen = ({ navigation }) => {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await Promise.all([loadFriends(), loadRequests(), loadSentRequests()]);
+    await loadFriendCollections();
     setRefreshing(false);
   };
 
-  const loadFriends = async () => {
+  const loadFriendCollections = async () => {
     if (!currentUser?.id) {
-      console.log('loadFriends: No currentUser');
+      console.log('loadFriendCollections: No currentUser');
+      setFriends([]);
+      setRequests([]);
+      setSentRequests([]);
       return;
     }
-    console.log('loadFriends: Loading for user', currentUser.id);
+    console.log('loadFriendCollections: Loading for user', currentUser.id);
+
     try {
-      // Get friendships where I sent the request
-      const { data: sentData, error: sentError } = await supabase
-        .from('friends')
-        .select('id, friend_id, status, created_at')
-        .eq('user_id', currentUser.id)
-        .eq('status', 'accepted');
-
-      // Get friendships where I received the request
-      const { data: receivedData, error: receivedError } = await supabase
-        .from('friends')
-        .select('id, user_id, status, created_at')
-        .eq('friend_id', currentUser.id)
-        .eq('status', 'accepted');
-
-      if (sentError) throw sentError;
-      if (receivedError) throw receivedError;
-
-      // Get friend IDs from both directions
-      const friendIds = [
-        ...(sentData || []).map(f => f.friend_id),
-        ...(receivedData || []).map(f => f.user_id),
-      ];
-
-      if (friendIds.length === 0) {
-        setFriends([]);
-        return;
+      const session = await getActiveSession();
+      const result = await fetchFriendListsViaEdgeFunction(
+        session?.access_token || null,
+        session?.refresh_token || null,
+        session?.user?.id || currentUser.id,
+      );
+      if (result.error) {
+        throw result.error;
       }
-
-      // Fetch profiles for all friends
-      const { data: profiles, error: profilesError } = await supabase
-        .from('profiles')
-        .select('*')
-        .in('id', friendIds);
-
-      if (profilesError) throw profilesError;
-
-      // Combine friendship data with profiles
-      const friendsWithProfiles = [
-        ...(sentData || []).map(f => ({
-          ...f,
-          friend: profiles?.find(p => p.id === f.friend_id) || {},
-        })),
-        ...(receivedData || []).map(f => ({
-          ...f,
-          friend: profiles?.find(p => p.id === f.user_id) || {},
-        })),
-      ];
-
-      setFriends(friendsWithProfiles);
+      setFriends(Array.isArray(result.data?.friends) ? result.data.friends : []);
+      setRequests(Array.isArray(result.data?.requests) ? result.data.requests : []);
+      setSentRequests(
+        Array.isArray(result.data?.sentRequests) ? result.data.sentRequests : [],
+      );
     } catch (error) {
-      console.error('Error loading friends:', error);
-    }
-  };
-
-  const loadRequests = async () => {
-    if (!currentUser?.id) return;
-    try {
-      // Get pending requests sent to me
-      const { data, error } = await supabase
-        .from('friends')
-        .select('id, user_id, status, created_at')
-        .eq('friend_id', currentUser.id)
-        .eq('status', 'pending');
-
-      if (error) throw error;
-
-      if (!data || data.length === 0) {
-        setRequests([]);
-        return;
-      }
-
-      // Get profiles of requesters
-      const requesterIds = data.map(r => r.user_id);
-      const { data: profiles, error: profilesError } = await supabase
-        .from('profiles')
-        .select('*')
-        .in('id', requesterIds);
-
-      if (profilesError) throw profilesError;
-
-      const requestsWithProfiles = data.map(r => ({
-        ...r,
-        requester: profiles?.find(p => p.id === r.user_id) || {},
-      }));
-
-      setRequests(requestsWithProfiles);
-    } catch (error) {
-      console.error('Error loading requests:', error);
-    }
-  };
-
-  const loadSentRequests = async () => {
-    if (!currentUser?.id) return;
-    try {
-      // Get pending requests I sent
-      const { data, error } = await supabase
-        .from('friends')
-        .select('id, friend_id, status, created_at')
-        .eq('user_id', currentUser.id)
-        .eq('status', 'pending');
-
-      if (error) throw error;
-
-      if (!data || data.length === 0) {
-        setSentRequests([]);
-        return;
-      }
-
-      // Get profiles of people I sent requests to
-      const friendIds = data.map(r => r.friend_id);
-      const { data: profiles, error: profilesError } = await supabase
-        .from('profiles')
-        .select('*')
-        .in('id', friendIds);
-
-      if (profilesError) throw profilesError;
-
-      const sentWithProfiles = data.map(r => ({
-        ...r,
-        friend: profiles?.find(p => p.id === r.friend_id) || {},
-      }));
-
-      setSentRequests(sentWithProfiles);
-    } catch (error) {
-      console.error('Error loading sent requests:', error);
+      console.error('Error loading friend collections:', error);
     }
   };
 
@@ -269,37 +169,84 @@ const FriendsScreen = ({ navigation }) => {
   const sendFriendRequest = async (friendId) => {
     console.log('sendFriendRequest:', { from: currentUser?.id, to: friendId });
     try {
-      const { data, error } = await supabase.from('friends').insert([
-        {
-          user_id: currentUser.id,
-          friend_id: friendId,
-          status: 'pending',
-        },
-      ]).select();
+      const session = await getActiveSession();
+      const actorUserId = session?.user?.id || null;
+      const accessToken = session?.access_token || null;
+      if (!actorUserId || !accessToken) {
+        Alert.alert('Sign In Required', 'Please sign in again to send friend requests.');
+        return;
+      }
+
+      const { data, error } = await sendFriendRequestViaEdgeFunction(
+        friendId,
+        accessToken,
+        session?.refresh_token || null,
+        actorUserId,
+      );
 
       console.log('sendFriendRequest result:', { data, error });
       if (error) throw error;
+
+      const status = String(data?.status || 'pending');
+      const requestedProfile = searchResults.find((user) => user.id === friendId) || null;
+
+      if (status === 'accepted') {
+        Alert.alert('Success', 'Friend request accepted. You are now friends.');
+        setSearchQuery('');
+        setSearchResults((prev) => prev.filter((user) => user.id !== friendId));
+        await loadFriendCollections();
+        return;
+      }
+
+      if (requestedProfile) {
+        setSentRequests((prev) => {
+          const exists = prev.some((entry) => entry?.friend?.id === friendId);
+          if (exists) return prev;
+          return [
+            {
+              id: `tmp-${Date.now()}`,
+              friend_id: friendId,
+              status: 'pending',
+              created_at: new Date().toISOString(),
+              friend: requestedProfile,
+            },
+            ...prev,
+          ];
+        });
+      }
+
       Alert.alert('Success', 'Friend request sent!');
       setSearchQuery('');
-      setSearchResults([]);
-      loadSentRequests();
+      setSearchResults((prev) => prev.filter((user) => user.id !== friendId));
+      await loadFriendCollections();
     } catch (error) {
       console.error('Error sending friend request:', error);
-      Alert.alert('Error', error.message || 'Failed to send friend request');
+      Alert.alert(
+        'Error',
+        error?.message || 'Failed to send friend request',
+      );
     }
   };
 
   const acceptFriendRequest = async (requestId) => {
     try {
-      const { error } = await supabase
-        .from('friends')
-        .update({ status: 'accepted' })
-        .eq('id', requestId);
+      const session = await getActiveSession();
+      const accessToken = session?.access_token || null;
+      if (!accessToken) {
+        Alert.alert('Sign In Required', 'Please sign in again to accept requests.');
+        return;
+      }
+
+      const { error } = await acceptFriendRequestViaEdgeFunction(
+        requestId,
+        accessToken,
+        session?.refresh_token || null,
+        session?.user?.id || null,
+      );
 
       if (error) throw error;
       Alert.alert('Success', 'Friend request accepted!');
-      loadFriends();
-      loadRequests();
+      await loadFriendCollections();
     } catch (error) {
       console.error('Error accepting friend request:', error);
       Alert.alert('Error', 'Failed to accept friend request');
@@ -308,11 +255,23 @@ const FriendsScreen = ({ navigation }) => {
 
   const rejectFriendRequest = async (requestId) => {
     try {
-      const { error } = await supabase.from('friends').delete().eq('id', requestId);
+      const session = await getActiveSession();
+      const accessToken = session?.access_token || null;
+      if (!accessToken) {
+        Alert.alert('Sign In Required', 'Please sign in again to manage requests.');
+        return;
+      }
+
+      const { error } = await rejectFriendRequestViaEdgeFunction(
+        requestId,
+        accessToken,
+        session?.refresh_token || null,
+        session?.user?.id || null,
+      );
 
       if (error) throw error;
-      Alert.alert('Success', 'Friend request rejected');
-      loadRequests();
+      Alert.alert('Success', 'Friend request cancelled');
+      await loadFriendCollections();
     } catch (error) {
       console.error('Error rejecting friend request:', error);
       Alert.alert('Error', 'Failed to reject friend request');
@@ -330,13 +289,22 @@ const FriendsScreen = ({ navigation }) => {
           style: 'destructive',
           onPress: async () => {
             try {
-              const { error } = await supabase
-                .from('friends')
-                .delete()
-                .eq('id', friendshipId);
+              const session = await getActiveSession();
+              const accessToken = session?.access_token || null;
+              if (!accessToken) {
+                Alert.alert('Sign In Required', 'Please sign in again to remove friends.');
+                return;
+              }
+
+              const { error } = await removeFriendViaEdgeFunction(
+                friendshipId,
+                accessToken,
+                session?.refresh_token || null,
+                session?.user?.id || null,
+              );
 
               if (error) throw error;
-              loadFriends();
+              await loadFriendCollections();
             } catch (error) {
               console.error('Error removing friend:', error);
               Alert.alert('Error', 'Failed to remove friend');
@@ -434,6 +402,26 @@ const FriendsScreen = ({ navigation }) => {
         onPress={() => sendFriendRequest(item.id)}
       >
         <Text style={styles.addText}>Add</Text>
+      </TouchableOpacity>
+    </View>
+  );
+
+  const renderSentItem = ({ item }) => (
+    <View style={styles.friendItem}>
+      <View style={styles.friendInfo}>
+        <Text style={styles.friendName}>
+          {item.friend?.display_name || 'User'}
+        </Text>
+        {item.friend?.username && (
+          <Text style={styles.friendUsername}>@{item.friend.username}</Text>
+        )}
+        <Text style={styles.pendingLabel}>Pending</Text>
+      </View>
+      <TouchableOpacity
+        style={styles.rejectButton}
+        onPress={() => rejectFriendRequest(item.id)}
+      >
+        <Text style={styles.rejectText}>Cancel</Text>
       </TouchableOpacity>
     </View>
   );
@@ -539,7 +527,7 @@ const FriendsScreen = ({ navigation }) => {
       {activeTab === 'sent' && (
         <FlatList
           data={sentRequests}
-          renderItem={renderFriendItem}
+          renderItem={renderSentItem}
           keyExtractor={(item) => item.id}
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
@@ -672,6 +660,12 @@ const styles = StyleSheet.create({
     fontSize: SIZES.sm,
     color: COLORS.primary,
     marginTop: SIZES.xs,
+  },
+  pendingLabel: {
+    marginTop: SIZES.xs,
+    fontSize: SIZES.xs,
+    color: COLORS.gray,
+    fontWeight: '600',
   },
   requestActions: {
     flexDirection: 'row',
