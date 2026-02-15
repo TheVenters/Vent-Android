@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from "react";
+import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import {
   View,
   StyleSheet,
@@ -25,6 +25,7 @@ const ActionButtonCluster = ({
   navigation,
   mapRef,
   pins,
+  allPins,
   layers,
   selectedLayerId,
   layersLoading,
@@ -38,13 +39,47 @@ const ActionButtonCluster = ({
   onSearch,
   mapMode,
   onToggleMapMode,
+  onArrowPinFocus,
 }) => {
+  const toRadians = useCallback((degrees) => (degrees * Math.PI) / 180, []);
+  const distanceMeters = useCallback(
+    (origin, pin) => {
+      const originLat = Number(origin?.latitude);
+      const originLng = Number(origin?.longitude);
+      const pinLat = Number(pin?.lat);
+      const pinLng = Number(pin?.lng);
+      if (
+        !Number.isFinite(originLat) ||
+        !Number.isFinite(originLng) ||
+        !Number.isFinite(pinLat) ||
+        !Number.isFinite(pinLng)
+      ) {
+        return Number.POSITIVE_INFINITY;
+      }
+      const earthRadiusMeters = 6371000;
+      const deltaLat = toRadians(pinLat - originLat);
+      const deltaLng = toRadians(pinLng - originLng);
+      const lat1 = toRadians(originLat);
+      const lat2 = toRadians(pinLat);
+      const x =
+        Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+        Math.sin(deltaLng / 2) *
+          Math.sin(deltaLng / 2) *
+          Math.cos(lat1) *
+          Math.cos(lat2);
+      const y = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+      return earthRadiusMeters * y;
+    },
+    [toRadians],
+  );
+
   const { palette } = useAppTheme();
   const styles = createStyles(palette);
   const [expanded, setExpanded] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [showPostForm, setShowPostForm] = useState(false);
   const [showLayersPanel, setShowLayersPanel] = useState(false);
+  const nextNearestPinIndexRef = useRef(0);
 
   const expandProgress = useSharedValue(0);
   const keyboardOffset = useSharedValue(0);
@@ -109,21 +144,78 @@ const ActionButtonCluster = ({
     setExpanded(true);
   }, [collapse, expanded, expandProgress, showLayersPanel, showPostForm]);
 
-  const goToRandomPin = useCallback(() => {
-    if (!pins || pins.length === 0) return;
-    const randomPin = pins[Math.floor(Math.random() * pins.length)];
+  const nearestPinTargets = useMemo(() => {
+    const sourcePins =
+      Array.isArray(allPins) && allPins.length > 0
+        ? allPins
+        : Array.isArray(pins)
+          ? pins
+          : [];
+    const validPins = sourcePins.filter((pin) => {
+      const lat = Number(pin?.lat);
+      const lng = Number(pin?.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+      return pin?.geometry?.visibility_mode !== "cloud_only";
+    });
+    const dedupedById = [];
+    const seenIds = new Set();
+    validPins.forEach((pin) => {
+      const id = String(pin?.id || "");
+      if (!id || seenIds.has(id)) return;
+      seenIds.add(id);
+      dedupedById.push(pin);
+    });
+
+    const sorted = [...dedupedById];
+    if (Number.isFinite(Number(userLocation?.latitude))) {
+      sorted.sort((left, right) => {
+        const delta =
+          distanceMeters(userLocation, left) - distanceMeters(userLocation, right);
+        if (Math.abs(delta) > 0.001) return delta;
+        return String(left?.id || "").localeCompare(String(right?.id || ""));
+      });
+      return sorted;
+    }
+
+    sorted.sort((left, right) =>
+      String(left?.id || "").localeCompare(String(right?.id || "")),
+    );
+    return sorted;
+  }, [allPins, pins, userLocation, distanceMeters]);
+
+  const nearestPinTargetsKey = useMemo(
+    () => nearestPinTargets.map((pin) => String(pin?.id || "")).join("|"),
+    [nearestPinTargets],
+  );
+
+  useEffect(() => {
+    nextNearestPinIndexRef.current = 0;
+  }, [nearestPinTargetsKey]);
+
+  const goToNearestPin = useCallback(() => {
+    if (!nearestPinTargets.length) return;
+    const nextIndex =
+      nextNearestPinIndexRef.current % Math.max(1, nearestPinTargets.length);
+    const targetPin = nearestPinTargets[nextIndex];
+    nextNearestPinIndexRef.current =
+      (nextIndex + 1) % Math.max(1, nearestPinTargets.length);
+    if (!targetPin) return;
+
     if (mapRef?.current) {
       mapRef.current.animateToRegion(
         {
-          latitude: randomPin.lat,
-          longitude: randomPin.lng,
+          latitude: Number(targetPin.lat),
+          longitude: Number(targetPin.lng),
           latitudeDelta: 0.01,
           longitudeDelta: 0.01,
         },
         500,
       );
     }
-  }, [pins, mapRef]);
+    if (onArrowPinFocus) {
+      onArrowPinFocus(targetPin);
+    }
+  }, [nearestPinTargets, mapRef, onArrowPinFocus]);
 
   const handleMenuPress = useCallback(
     (item) => {
@@ -311,7 +403,7 @@ const ActionButtonCluster = ({
         <Animated.View style={arrowButtonStyle}>
           <TouchableOpacity
             style={[styles.button, styles.arrowButton]}
-            onPress={goToRandomPin}
+            onPress={goToNearestPin}
           >
             <Text style={styles.buttonText}>{"➜"}</Text>
           </TouchableOpacity>
