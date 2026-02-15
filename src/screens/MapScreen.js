@@ -470,7 +470,7 @@ const mergeNearbyClouds = (clouds, mapRegion, mapSize) => {
   return merged;
 };
 
-const computeMapVisuals = (posts, mapRegion, mapSize) => {
+const computeMapVisuals = (posts, mapRegion, mapSize, focusedPinId = null) => {
   const normalizedPosts = (Array.isArray(posts) ? posts : []).filter(
     hasValidCoordinate,
   );
@@ -542,8 +542,14 @@ const computeMapVisuals = (posts, mapRegion, mapSize) => {
 
   // Hide only pins represented by visible clusters; this keeps transitions
   // stable while preserving cluster readability.
+  const focusedPinIdText = String(focusedPinId || "");
   const visiblePins = normalizedPosts.filter(
-    (post) => !isCloudOnlyPost(post) && !clusteredPinnedIds.has(post.id),
+    (post) => {
+      if (isCloudOnlyPost(post)) return false;
+      const postIdText = String(post?.id || "");
+      const isFocusedPin = focusedPinIdText && postIdText === focusedPinIdText;
+      return isFocusedPin || !clusteredPinnedIds.has(post.id);
+    },
   );
 
   return { visiblePins, visibleClouds };
@@ -726,6 +732,7 @@ const MapScreen = ({ navigation, route }) => {
   const [friendUserIds, setFriendUserIds] = useState([]);
   const [selectedPinLayers, setSelectedPinLayers] = useState([]);
   const [allLoadedPosts, setAllLoadedPosts] = useState([]);
+  const [arrowFocusedPinId, setArrowFocusedPinId] = useState(null);
   const [cloudPostsModalVisible, setCloudPostsModalVisible] = useState(false);
   const [selectedCloud, setSelectedCloud] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -743,10 +750,22 @@ const MapScreen = ({ navigation, route }) => {
   const layerFetchInFlightRef = useRef({ key: null, promise: null });
   const errorThrottleRef = useRef(new Map());
   const networkBackoffUntilRef = useRef(0);
+  const markerRefsByIdRef = useRef(new Map());
+  const arrowCalloutTimerRef = useRef(null);
+  const lastArrowCalloutPinIdRef = useRef(null);
 
   useEffect(() => {
     selectedPinIdRef.current = selectedPin?.id || null;
   }, [selectedPin?.id]);
+
+  useEffect(() => {
+    return () => {
+      if (arrowCalloutTimerRef.current) {
+        clearTimeout(arrowCalloutTimerRef.current);
+        arrowCalloutTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const shouldThrottleError = useCallback((key, cooldownMs) => {
     const now = Date.now();
@@ -1460,6 +1479,7 @@ const MapScreen = ({ navigation, route }) => {
         allLoadedPosts,
         region,
         mapSize,
+        arrowFocusedPinId,
       );
       setMapVisuals((prev) => {
         const samePins = haveSameEntityIds(prev.pins, visiblePins);
@@ -1469,7 +1489,7 @@ const MapScreen = ({ navigation, route }) => {
       });
     });
     return () => cancelAnimationFrame(frame);
-  }, [allLoadedPosts, mapSize, region]);
+  }, [allLoadedPosts, arrowFocusedPinId, mapSize, region]);
 
   const requestLocationPermission = async () => {
     try {
@@ -2639,6 +2659,44 @@ const MapScreen = ({ navigation, route }) => {
     });
   }, []);
 
+  const showArrowPinCallout = useCallback((pinId, attempt = 0) => {
+    const marker = markerRefsByIdRef.current.get(pinId);
+    if (marker?.showCallout) {
+      marker.showCallout();
+      lastArrowCalloutPinIdRef.current = pinId;
+      return;
+    }
+    if (attempt >= 6) return;
+    arrowCalloutTimerRef.current = setTimeout(() => {
+      showArrowPinCallout(pinId, attempt + 1);
+    }, 120);
+  }, []);
+
+  const handleArrowPinFocus = useCallback(
+    (pin) => {
+      const pinId = String(pin?.id || "");
+      if (!pinId) return;
+
+      setArrowFocusedPinId(pinId);
+
+      const previousId = String(lastArrowCalloutPinIdRef.current || "");
+      if (previousId && previousId !== pinId) {
+        const previousMarker = markerRefsByIdRef.current.get(previousId);
+        previousMarker?.hideCallout?.();
+      }
+
+      if (arrowCalloutTimerRef.current) {
+        clearTimeout(arrowCalloutTimerRef.current);
+        arrowCalloutTimerRef.current = null;
+      }
+
+      arrowCalloutTimerRef.current = setTimeout(() => {
+        showArrowPinCallout(pinId, 0);
+      }, 420);
+    },
+    [showArrowPinCallout],
+  );
+
   const handleVotePin = async (vote) => {
     if (!selectedPin) return;
 
@@ -3376,7 +3434,18 @@ const MapScreen = ({ navigation, route }) => {
         showsMyLocationButton={false}
       >
         {pins.map((pin) => (
-          <CustomMarker key={pin.id} pin={pin} onPress={handlePinPress} />
+          <CustomMarker
+            key={pin.id}
+            ref={(markerRef) => {
+              if (markerRef) {
+                markerRefsByIdRef.current.set(String(pin.id), markerRef);
+              } else {
+                markerRefsByIdRef.current.delete(String(pin.id));
+              }
+            }}
+            pin={pin}
+            onPress={handlePinPress}
+          />
         ))}
         {clouds.map((cloud) => (
           <React.Fragment key={cloud.id}>
@@ -3480,6 +3549,7 @@ const MapScreen = ({ navigation, route }) => {
           navigation={navigation}
           mapRef={mapRef}
           pins={pins}
+          allPins={allLoadedPosts}
           layers={layers}
           selectedLayerId={selectedLayerId}
           layersLoading={layersLoading}
@@ -3497,6 +3567,7 @@ const MapScreen = ({ navigation, route }) => {
           onToggleMapMode={() =>
             setMapMode((prev) => (prev === "explore" ? "user" : "explore"))
           }
+          onArrowPinFocus={handleArrowPinFocus}
         />
       )}
 
