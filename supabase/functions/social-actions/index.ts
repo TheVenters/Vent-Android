@@ -135,7 +135,8 @@ const isVisibleToActor = async (
 ) => {
   if (pin.layer === "public") return true;
   if (pin.user_id === actorId) return true;
-  if (pin.layer !== "private" && pin.layer !== "friends") return false;
+  if (pin.layer === "private") return false;
+  if (pin.layer !== "friends") return false;
 
   return await areUsersAcceptedFriends(adminClient, actorId, pin.user_id);
 };
@@ -1154,7 +1155,7 @@ const handleListPins = async (
 
   const rows = pinsRes.data || [];
   let friendIdSet = new Set<string>();
-  if (layerKeys.includes("friends") || layerKeys.includes("private")) {
+  if (layerKeys.includes("friends")) {
     const friendshipRes = await adminClient
       .from("friends")
       .select("user_id,friend_id,status")
@@ -1174,7 +1175,10 @@ const handleListPins = async (
   const pins = rows.filter((pin) => {
     const pinLayer = asString(pin?.layer).toLowerCase();
     if (pinLayer === "public") return true;
-    if (pinLayer === "private" || pinLayer === "friends") {
+    if (pinLayer === "private") {
+      return pin?.user_id === actorId;
+    }
+    if (pinLayer === "friends") {
       return pin?.user_id === actorId || friendIdSet.has(pin?.user_id);
     }
     return false;
