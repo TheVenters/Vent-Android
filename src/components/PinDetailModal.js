@@ -221,7 +221,7 @@ const PinDetailModal = ({
                   styles.voteButtonLeft,
                   pinVoteSummary?.userVote === 1 && styles.voteButtonActive,
                 ]}
-                disabled={!currentUserId || isSubmittingVote || isOwner}
+                disabled={isSubmittingVote || isOwner}
                 onPress={() => onVote && onVote(1)}
               >
                 <Text
@@ -240,7 +240,7 @@ const PinDetailModal = ({
                   styles.voteButton,
                   pinVoteSummary?.userVote === -1 && styles.voteButtonActive,
                 ]}
-                disabled={!currentUserId || isSubmittingVote || isOwner}
+                disabled={isSubmittingVote || isOwner}
                 onPress={() => onVote && onVote(-1)}
               >
                 <Text

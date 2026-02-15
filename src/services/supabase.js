@@ -1,6 +1,6 @@
 import 'react-native-url-polyfill/auto';
 import { AppState, Platform } from 'react-native';
-import { createClient, processLock } from '@supabase/supabase-js';
+import { createClient } from '@supabase/supabase-js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Load from environment variables (set in .env file)
@@ -11,51 +11,91 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   console.error('Missing Supabase environment variables. Check your .env file.');
 }
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: {
-    ...(Platform.OS !== 'web' ? { storage: AsyncStorage } : {}),
-    autoRefreshToken: true,
-    persistSession: true,
-    detectSessionInUrl: false,
-    lock: processLock,
-  },
-});
+const SUPABASE_CLIENT_VERSION = 'v2-no-lock';
 
-if (Platform.OS !== 'web' && !globalThis.__SUPABASE_APPSTATE_LISTENER__) {
-  globalThis.__SUPABASE_APPSTATE_LISTENER__ = true;
-  AppState.addEventListener('change', (state) => {
-    if (state === 'active') {
-      supabase.auth.startAutoRefresh();
-    } else {
-      supabase.auth.stopAutoRefresh();
-    }
+const createSupabaseClient = () =>
+  createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: {
+      ...(Platform.OS !== 'web' ? { storage: AsyncStorage } : {}),
+      autoRefreshToken: true,
+      persistSession: true,
+      detectSessionInUrl: false,
+    },
   });
+
+const shouldReuseClient =
+  globalThis.__VENT_SUPABASE_CLIENT__ &&
+  globalThis.__VENT_SUPABASE_CLIENT_VERSION__ === SUPABASE_CLIENT_VERSION;
+
+if (!shouldReuseClient) {
+  try {
+    globalThis.__VENT_SUPABASE_APPSTATE_SUB__?.remove?.();
+  } catch (_) {}
+  globalThis.__VENT_SUPABASE_CLIENT__ = createSupabaseClient();
+  globalThis.__VENT_SUPABASE_CLIENT_VERSION__ = SUPABASE_CLIENT_VERSION;
+  globalThis.__VENT_SUPABASE_HELPER__ = null;
+  globalThis.__VENT_SUPABASE_APPSTATE_SUB__ = null;
+  globalThis.__VENT_SUPABASE_REFRESH_ACTIVE__ = null;
+}
+
+export const supabase = globalThis.__VENT_SUPABASE_CLIENT__;
+
+if (Platform.OS !== 'web' && !globalThis.__VENT_SUPABASE_APPSTATE_SUB__) {
+  globalThis.__VENT_SUPABASE_REFRESH_ACTIVE__ =
+    AppState.currentState === 'active';
+  if (globalThis.__VENT_SUPABASE_REFRESH_ACTIVE__) {
+    supabase.auth.startAutoRefresh().catch(() => {});
+  } else {
+    supabase.auth.stopAutoRefresh().catch(() => {});
+  }
+
+  globalThis.__VENT_SUPABASE_APPSTATE_SUB__ = AppState.addEventListener(
+    'change',
+    (state) => {
+      const isActive = state === 'active';
+      if (globalThis.__VENT_SUPABASE_REFRESH_ACTIVE__ === isActive) return;
+      globalThis.__VENT_SUPABASE_REFRESH_ACTIVE__ = isActive;
+
+      if (isActive) {
+        supabase.auth.startAutoRefresh().catch(() => {});
+      } else {
+        supabase.auth.stopAutoRefresh().catch(() => {});
+      }
+    },
+  );
 }
 
 // For rare cases where we must guarantee the Authorization header is present
 // (e.g. debugging RLS writes), create a short-lived client pinned to a token.
 export const supabaseWithAccessToken = (accessToken) => {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !accessToken) return supabase;
-  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  if (globalThis.__VENT_SUPABASE_HELPER__?.token === accessToken) {
+    return globalThis.__VENT_SUPABASE_HELPER__.client;
+  }
+
+  const client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     global: {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
     },
     auth: {
-      ...(Platform.OS !== 'web' ? { storage: AsyncStorage } : {}),
       autoRefreshToken: false,
       persistSession: false,
       detectSessionInUrl: false,
-      lock: processLock,
     },
   });
+
+  globalThis.__VENT_SUPABASE_HELPER__ = { token: accessToken, client };
+  return client;
 };
 
 // Helper functions
 export const getCurrentUser = async () => {
-  const { data: { user } } = await supabase.auth.getUser();
-  return user;
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  return session?.user || null;
 };
 
 export const signIn = async (email, password) => {

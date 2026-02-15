@@ -276,8 +276,8 @@ const MapScreen = ({ navigation, route }) => {
   const mapRef = useRef(null);
 
   const resolveCurrentUserId = useCallback(async () => {
-    // For RLS-gated writes, we must ensure there is an active session so auth.uid()
-    // is set on the PostgREST request. A stale cached user object is not enough.
+    // For RLS-gated writes, require an active auth session so auth.uid() is
+    // guaranteed on PostgREST/RPC requests.
     try {
       const {
         data: { session },
@@ -290,32 +290,6 @@ const MapScreen = ({ navigation, route }) => {
       }
     } catch (error) {
       console.error("Error resolving current session:", error);
-    }
-
-    // Try to refresh tokens/session if the local session is missing/stale.
-    try {
-      const {
-        data: { session: refreshed },
-        error,
-      } = await supabase.auth.refreshSession();
-      if (error) throw error;
-      if (refreshed?.user?.id) {
-        setCurrentUser(refreshed.user);
-        return refreshed.user.id;
-      }
-    } catch (error) {
-      console.error("Error refreshing session:", error);
-    }
-
-    // Fallback: may return user even when session isn't usable for PostgREST.
-    try {
-      const user = await getCurrentUser();
-      if (user?.id) {
-        setCurrentUser(user);
-        return user.id;
-      }
-    } catch (error) {
-      console.error("Error resolving current user:", error);
     }
     return null;
   }, [currentUser?.id]);
@@ -1306,23 +1280,42 @@ const MapScreen = ({ navigation, route }) => {
 
   const loadPinVotes = async (pinId) => {
     try {
-      const { data, error } = await supabase
-        .from("pin_votes")
-        .select("user_id, vote")
-        .eq("pin_id", pinId);
-
-      if (error) throw error;
-
-      const summary = { upvotes: 0, downvotes: 0, userVote: 0 };
-      (data || []).forEach((voteRow) => {
-        if (voteRow.vote === 1) summary.upvotes += 1;
-        if (voteRow.vote === -1) summary.downvotes += 1;
-        if (voteRow.user_id === currentUser?.id) {
-          summary.userVote = voteRow.vote;
-        }
+      const rpcResult = await supabase.rpc("get_pin_vote_summary", {
+        target_pin_id: pinId,
       });
 
-      setPinVoteSummary(summary);
+      if (rpcResult.error) {
+        // Local/dev fallback if RPC migrations are not applied.
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        const activeUserId = currentUser?.id || session?.user?.id || null;
+        const tableResult = await supabase
+          .from("pin_votes")
+          .select("user_id, vote")
+          .eq("pin_id", pinId);
+        if (tableResult.error) throw rpcResult.error;
+
+        const summary = { upvotes: 0, downvotes: 0, userVote: 0 };
+        (tableResult.data || []).forEach((voteRow) => {
+          if (voteRow.vote === 1) summary.upvotes += 1;
+          if (voteRow.vote === -1) summary.downvotes += 1;
+          if (activeUserId && voteRow.user_id === activeUserId) {
+            summary.userVote = voteRow.vote;
+          }
+        });
+        setPinVoteSummary(summary);
+        return;
+      }
+
+      const summaryRow = Array.isArray(rpcResult.data)
+        ? rpcResult.data[0]
+        : rpcResult.data;
+      setPinVoteSummary({
+        upvotes: Number(summaryRow?.upvotes || 0),
+        downvotes: Number(summaryRow?.downvotes || 0),
+        userVote: Number(summaryRow?.user_vote || 0),
+      });
     } catch (error) {
       console.error("Error loading pin votes:", error);
       setPinVoteSummary({ upvotes: 0, downvotes: 0, userVote: 0 });
@@ -1355,44 +1348,46 @@ const MapScreen = ({ navigation, route }) => {
   );
 
   const handleVotePin = async (vote) => {
-    if (!selectedPin || !currentUser) {
+    if (!selectedPin) return;
+
+    const userId = await resolveCurrentUserId();
+    if (!userId) {
       Alert.alert("Sign In Required", "Please sign in to vote on pins");
       return;
     }
 
-    if (selectedPin.user_id === currentUser.id) return;
+    if (selectedPin.user_id === userId) return;
 
     try {
       setIsSubmittingVote(true);
 
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      const authed = supabaseWithAccessToken(session?.access_token || null);
+      const toggleResult = await supabase.rpc("toggle_pin_vote", {
+        target_pin_id: selectedPin.id,
+        target_vote: vote,
+      });
 
-      if (pinVoteSummary.userVote === vote) {
-        const { error } = await authed
-          .from("pin_votes")
-          .delete()
-          .eq("pin_id", selectedPin.id)
-          .eq("user_id", currentUser.id);
-        if (error) throw error;
-      } else {
-        const { error } = await authed.from("pin_votes").upsert(
-          {
-            pin_id: selectedPin.id,
-            user_id: currentUser.id,
-            vote,
-          },
-          { onConflict: "pin_id,user_id" },
-        );
-        if (error) throw error;
+      if (toggleResult.error) {
+        throw toggleResult.error;
       }
 
-      await loadPinVotes(selectedPin.id);
+      const summaryRow = Array.isArray(toggleResult.data)
+        ? toggleResult.data[0]
+        : toggleResult.data;
+      if (summaryRow) {
+        setPinVoteSummary({
+          upvotes: Number(summaryRow?.upvotes || 0),
+          downvotes: Number(summaryRow?.downvotes || 0),
+          userVote: Number(summaryRow?.user_vote || 0),
+        });
+      } else {
+        await loadPinVotes(selectedPin.id);
+      }
     } catch (error) {
       console.error("Error voting on pin:", error);
-      Alert.alert("Error", "Failed to submit vote. Please try again.");
+      Alert.alert(
+        "Error",
+        error?.message || "Failed to submit vote. Please try again.",
+      );
     } finally {
       setIsSubmittingVote(false);
     }
