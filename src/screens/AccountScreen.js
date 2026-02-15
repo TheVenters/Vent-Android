@@ -18,6 +18,8 @@ import {
   signIn,
   signUp,
   signOut,
+  resetPassword,
+  resetPasswordWithOtp,
 } from "../services/supabase";
 import { SIZES } from "../constants/theme";
 import { useAppTheme } from "../context/ThemeContext";
@@ -30,6 +32,11 @@ const AccountScreen = ({ navigation }) => {
   const [currentUser, setCurrentUser] = useState(null);
   const [loading, setLoading] = useState(false);
   const [isSignUp, setIsSignUp] = useState(false);
+  const [resetStep, setResetStep] = useState(null);
+  const [resetEmail, setResetEmail] = useState("");
+  const [otpCode, setOtpCode] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [avatarUrl, setAvatarUrl] = useState(null);
   const { palette } = useAppTheme();
   const styles = createStyles(palette);
@@ -39,18 +46,27 @@ const AccountScreen = ({ navigation }) => {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_, session) => {
+    } = supabase.auth.onAuthStateChange((_, session) => {
       if (session?.user) {
         setCurrentUser(session.user);
-        await loadProfile(session.user.id);
       } else {
         setCurrentUser(null);
         setAvatarUrl(null);
+        setResetStep(null);
+        setResetEmail("");
+        setOtpCode("");
+        setNewPassword("");
+        setConfirmPassword("");
       }
     });
 
     return () => subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!currentUser?.id) return;
+    loadProfile(currentUser.id);
+  }, [currentUser?.id]);
 
   const loadUser = async () => {
     const user = await getCurrentUser();
@@ -145,11 +161,104 @@ const AccountScreen = ({ navigation }) => {
     setPassword("");
     setUsername("");
     setDisplayName("");
+    setResetStep(null);
+    setResetEmail("");
+    setOtpCode("");
+    setNewPassword("");
+    setConfirmPassword("");
   };
 
   const toggleMode = () => {
     setIsSignUp(!isSignUp);
     clearForm();
+  };
+
+  const handleForgotPassword = () => {
+    setResetStep("email");
+    setResetEmail(email.trim());
+  };
+
+  const cancelReset = () => {
+    setResetStep(null);
+    setResetEmail("");
+    setOtpCode("");
+    setNewPassword("");
+    setConfirmPassword("");
+  };
+
+  const handleSendResetCode = async () => {
+    const trimmedEmail = resetEmail.trim();
+    if (!trimmedEmail) {
+      Alert.alert("Error", "Please enter your email address");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const { error } = await resetPassword(trimmedEmail);
+      if (error) throw error;
+
+      Alert.alert(
+        "Code Sent",
+        "If an account exists with that email, you will receive a reset code. Please check your inbox.",
+      );
+      setResetStep("otp");
+    } catch (error) {
+      Alert.alert("Error", error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResetPassword = async () => {
+    const trimmedOtp = otpCode.trim();
+    if (!trimmedOtp || trimmedOtp.length < 6) {
+      Alert.alert("Error", "Please enter the code from your email");
+      return;
+    }
+    if (!newPassword.trim()) {
+      Alert.alert("Error", "Please enter a new password");
+      return;
+    }
+    if (newPassword.length < 6) {
+      Alert.alert("Error", "Password must be at least 6 characters");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      Alert.alert("Error", "Passwords do not match");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const resetResult = await resetPasswordWithOtp(
+        resetEmail.trim(),
+        trimmedOtp,
+        newPassword,
+      );
+      if (resetResult.error) throw resetResult.error;
+
+      Alert.alert("Success", "Your password has been reset successfully!", [
+        {
+          text: "OK",
+          onPress: () => {
+            setResetStep(null);
+            setResetEmail("");
+            setOtpCode("");
+            setNewPassword("");
+            setConfirmPassword("");
+          },
+        },
+      ]);
+    } catch (error) {
+      Alert.alert(
+        "Error",
+        error?.message ||
+          "Failed to reset password. Please request a new code and try again.",
+      );
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleSignOut = async () => {
@@ -335,94 +444,205 @@ const AccountScreen = ({ navigation }) => {
           <Text style={styles.tagline}>Share your world</Text>
         </View>
 
-        <View style={styles.form}>
-          {isSignUp && (
-            <>
+        {resetStep === "email" ? (
+          <View style={styles.form}>
+            <Text style={styles.resetTitle}>Reset Password</Text>
+            <Text style={styles.resetSubtitle}>
+              Enter your email address and we'll send you a code to reset your
+              password.
+            </Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Email"
+              placeholderTextColor={palette.subtext}
+              value={resetEmail}
+              onChangeText={setResetEmail}
+              autoCapitalize="none"
+              keyboardType="email-address"
+              autoComplete="email"
+              autoFocus
+            />
+            <TouchableOpacity
+              style={styles.button}
+              onPress={handleSendResetCode}
+              disabled={loading}
+            >
+              <Text style={styles.buttonText}>
+                {loading ? "Sending..." : "Send Reset Code"}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.cancelButton}
+              onPress={cancelReset}
+            >
+              <Text style={styles.cancelButtonText}>Back to Sign In</Text>
+            </TouchableOpacity>
+          </View>
+        ) : resetStep === "otp" ? (
+          <View style={styles.form}>
+            <Text style={styles.resetTitle}>Reset Password</Text>
+            <Text style={styles.resetSubtitle}>
+              We sent a code to {resetEmail}. Enter it below along with your
+              new password.
+            </Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Reset code"
+              placeholderTextColor={palette.subtext}
+              value={otpCode}
+              onChangeText={setOtpCode}
+              keyboardType="number-pad"
+              maxLength={8}
+              autoFocus
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="New password"
+              placeholderTextColor={palette.subtext}
+              value={newPassword}
+              onChangeText={setNewPassword}
+              secureTextEntry
+              autoCapitalize="none"
+              autoComplete="new-password"
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="Confirm new password"
+              placeholderTextColor={palette.subtext}
+              value={confirmPassword}
+              onChangeText={setConfirmPassword}
+              secureTextEntry
+              autoCapitalize="none"
+              autoComplete="new-password"
+            />
+            <TouchableOpacity
+              style={styles.button}
+              onPress={handleResetPassword}
+              disabled={loading}
+            >
+              <Text style={styles.buttonText}>
+                {loading ? "Resetting..." : "Reset Password"}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.resendButton}
+              onPress={handleSendResetCode}
+              disabled={loading}
+            >
+              <Text style={styles.cancelButtonText}>Resend Code</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.cancelButton}
+              onPress={cancelReset}
+            >
+              <Text style={styles.cancelButtonText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <>
+            <View style={styles.form}>
+              {isSignUp && (
+                <>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="Username"
+                    placeholderTextColor={palette.subtext}
+                    value={username}
+                    onChangeText={setUsername}
+                    autoCapitalize="none"
+                    autoComplete="username"
+                  />
+                  <TextInput
+                    style={styles.input}
+                    placeholder="Display Name (optional)"
+                    placeholderTextColor={palette.subtext}
+                    value={displayName}
+                    onChangeText={setDisplayName}
+                    autoCapitalize="words"
+                  />
+                </>
+              )}
               <TextInput
                 style={styles.input}
-                placeholder="Username"
+                placeholder="Email"
                 placeholderTextColor={palette.subtext}
-                value={username}
-                onChangeText={setUsername}
+                value={email}
+                onChangeText={setEmail}
                 autoCapitalize="none"
-                autoComplete="username"
+                keyboardType="email-address"
+                autoComplete="email"
               />
               <TextInput
                 style={styles.input}
-                placeholder="Display Name (optional)"
+                placeholder="Password"
                 placeholderTextColor={palette.subtext}
-                value={displayName}
-                onChangeText={setDisplayName}
-                autoCapitalize="words"
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry
+                autoCapitalize="none"
+                autoComplete={isSignUp ? "new-password" : "password"}
               />
-            </>
-          )}
-          <TextInput
-            style={styles.input}
-            placeholder="Email"
-            placeholderTextColor={palette.subtext}
-            value={email}
-            onChangeText={setEmail}
-            autoCapitalize="none"
-            keyboardType="email-address"
-            autoComplete="email"
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Password"
-            placeholderTextColor={palette.subtext}
-            value={password}
-            onChangeText={setPassword}
-            secureTextEntry
-            autoCapitalize="none"
-            autoComplete={isSignUp ? "new-password" : "password"}
-          />
 
-          <TouchableOpacity
-            style={styles.button}
-            onPress={isSignUp ? handleSignUp : handleSignIn}
-            disabled={loading}
-          >
-            <Text style={styles.buttonText}>
-              {loading
-                ? isSignUp
-                  ? "Creating account..."
-                  : "Signing in..."
-                : isSignUp
-                  ? "Create Account"
-                  : "Sign In"}
-            </Text>
-          </TouchableOpacity>
-        </View>
+              <TouchableOpacity
+                style={styles.button}
+                onPress={isSignUp ? handleSignUp : handleSignIn}
+                disabled={loading}
+              >
+                <Text style={styles.buttonText}>
+                  {loading
+                    ? isSignUp
+                      ? "Creating account..."
+                      : "Signing in..."
+                    : isSignUp
+                      ? "Create Account"
+                      : "Sign In"}
+                </Text>
+              </TouchableOpacity>
+            </View>
 
-        <View style={styles.divider}>
-          <View style={styles.dividerLine} />
-          <Text style={styles.dividerText}>or continue with</Text>
-          <View style={styles.dividerLine} />
-        </View>
+            {!isSignUp && (
+              <TouchableOpacity
+                style={styles.forgotPasswordButton}
+                onPress={handleForgotPassword}
+              >
+                <Text style={styles.forgotPasswordText}>
+                  Forgot Password?
+                </Text>
+              </TouchableOpacity>
+            )}
 
-        <View style={styles.socialButtons}>
-          <TouchableOpacity style={styles.socialButton}>
-            <Text style={styles.socialIcon}>🌐</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.socialButton}>
-            <Text style={styles.socialIcon}>🍎</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.socialButton}>
-            <Text style={styles.socialIcon}>📱</Text>
-          </TouchableOpacity>
-        </View>
+            <View style={styles.divider}>
+              <View style={styles.dividerLine} />
+              <Text style={styles.dividerText}>or continue with</Text>
+              <View style={styles.dividerLine} />
+            </View>
 
-        <View style={styles.footer}>
-          <Text style={styles.footerText}>
-            {isSignUp ? "Already have an account? " : "Don't have an account? "}
-          </Text>
-          <TouchableOpacity onPress={toggleMode}>
-            <Text style={styles.footerLink}>
-              {isSignUp ? "Sign In" : "Sign Up"}
-            </Text>
-          </TouchableOpacity>
-        </View>
+            <View style={styles.socialButtons}>
+              <TouchableOpacity style={styles.socialButton}>
+                <Text style={styles.socialIcon}>🌐</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.socialButton}>
+                <Text style={styles.socialIcon}>🍎</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.socialButton}>
+                <Text style={styles.socialIcon}>📱</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.footer}>
+              <Text style={styles.footerText}>
+                {isSignUp
+                  ? "Already have an account? "
+                  : "Don't have an account? "}
+              </Text>
+              <TouchableOpacity onPress={toggleMode}>
+                <Text style={styles.footerLink}>
+                  {isSignUp ? "Sign In" : "Sign Up"}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </>
+        )}
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -486,6 +706,43 @@ const createStyles = (palette) =>
       color: palette.onPrimary,
       fontSize: SIZES.md,
       fontWeight: "600",
+    },
+    resetTitle: {
+      fontSize: SIZES.xxl,
+      fontWeight: "700",
+      color: palette.text,
+      marginBottom: SIZES.sm,
+    },
+    resetSubtitle: {
+      fontSize: SIZES.sm,
+      color: palette.subtext,
+      marginBottom: SIZES.xxl,
+      lineHeight: SIZES.xl,
+    },
+    forgotPasswordButton: {
+      alignItems: "center",
+      marginTop: SIZES.md,
+      marginBottom: SIZES.sm,
+    },
+    forgotPasswordText: {
+      color: palette.primary,
+      fontSize: SIZES.sm,
+      fontWeight: "600",
+    },
+    cancelButton: {
+      alignItems: "center",
+      marginTop: SIZES.lg,
+      padding: SIZES.sm,
+    },
+    cancelButtonText: {
+      color: palette.subtext,
+      fontSize: SIZES.sm,
+      fontWeight: "600",
+    },
+    resendButton: {
+      alignItems: "center",
+      marginTop: SIZES.lg,
+      padding: SIZES.sm,
     },
     divider: {
       flexDirection: "row",
