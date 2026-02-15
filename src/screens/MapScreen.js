@@ -1046,13 +1046,37 @@ const MapScreen = ({ navigation, route }) => {
       const groupId = pin?.geometry?.cross_post_group_id;
       let relatedRows = [pin];
       if (groupId) {
-        const { data, error } = await supabase
+        let associationRows = null;
+        let lastError = null;
+
+        // Try expression filter first (works for JSON/JSONB), then fallback.
+        const byExpression = await supabase
           .from("pins")
           .select("id,layer,geometry")
-          .contains("geometry", { cross_post_group_id: groupId });
-        if (error) throw error;
-        if (Array.isArray(data) && data.length > 0) {
-          relatedRows = data;
+          .eq("geometry->>cross_post_group_id", groupId);
+        if (!byExpression.error) {
+          associationRows = byExpression.data;
+        } else {
+          lastError = byExpression.error;
+          const byContains = await supabase
+            .from("pins")
+            .select("id,layer,geometry")
+            .contains("geometry", { cross_post_group_id: groupId });
+          if (!byContains.error) {
+            associationRows = byContains.data;
+            lastError = null;
+          } else {
+            lastError = byContains.error;
+          }
+        }
+
+        if (Array.isArray(associationRows) && associationRows.length > 0) {
+          relatedRows = associationRows;
+        } else if (lastError) {
+          console.warn(
+            "Pin association lookup failed, falling back to current pin only:",
+            lastError?.message || lastError,
+          );
         }
       }
 
@@ -1089,7 +1113,10 @@ const MapScreen = ({ navigation, route }) => {
       ).filter(Boolean);
       setSelectedPinLayers(labels);
     } catch (error) {
-      console.error("Error loading pin associations:", error);
+      console.error(
+        "Error loading pin associations:",
+        error?.message || error,
+      );
       setSelectedPinLayers([]);
     }
   };

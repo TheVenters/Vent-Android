@@ -48,7 +48,6 @@ const FriendsScreen = ({ navigation }) => {
     if (!currentUser?.id) return;
 
     const userId = currentUser.id;
-    console.log('Setting up realtime subscription for user:', userId);
 
     const channel = supabase
       .channel(`friends-realtime-${userId}`)
@@ -60,13 +59,11 @@ const FriendsScreen = ({ navigation }) => {
           table: 'friends',
         },
         (payload) => {
-          console.log('Friends realtime update:', payload);
-          const { new: newRecord, old: oldRecord, eventType } = payload;
+          const { new: newRecord, old: oldRecord } = payload;
           const record = newRecord || oldRecord;
 
           // Check if this change involves the current user
           if (record?.user_id === userId || record?.friend_id === userId) {
-            console.log('Reloading friends data due to', eventType);
             // Small delay to ensure database is updated
             setTimeout(() => {
               loadFriendCollections();
@@ -74,20 +71,17 @@ const FriendsScreen = ({ navigation }) => {
           }
         }
       )
-      .subscribe((status, err) => {
-        console.log('Friends subscription status:', status);
+      .subscribe((_status, err) => {
         if (err) console.error('Subscription error:', err);
       });
 
     return () => {
-      console.log('Cleaning up realtime subscription');
       supabase.removeChannel(channel);
     };
   }, [currentUser?.id]);
 
   const initializeUser = async () => {
     const user = await getCurrentUser();
-    console.log('FriendsScreen: initializeUser', user?.id);
     setCurrentUser(user);
   };
 
@@ -99,13 +93,11 @@ const FriendsScreen = ({ navigation }) => {
 
   const loadFriendCollections = async () => {
     if (!currentUser?.id) {
-      console.log('loadFriendCollections: No currentUser');
       setFriends([]);
       setRequests([]);
       setSentRequests([]);
       return;
     }
-    console.log('loadFriendCollections: Loading for user', currentUser.id);
 
     try {
       const session = await getActiveSession();
@@ -134,12 +126,10 @@ const FriendsScreen = ({ navigation }) => {
     }
 
     if (!currentUser?.id) {
-      console.log('handleSearch: No currentUser');
       Alert.alert('Error', 'Please sign in to search for friends');
       return;
     }
 
-    console.log('handleSearch: Searching for', searchQuery);
     try {
       const { data, error } = await supabase
         .from('profiles')
@@ -148,7 +138,6 @@ const FriendsScreen = ({ navigation }) => {
         .neq('id', currentUser.id) // Exclude self
         .limit(10);
 
-      console.log('handleSearch: Results', data, 'Error', error);
       if (error) throw error;
 
       // Filter out existing friends and pending requests
@@ -167,7 +156,6 @@ const FriendsScreen = ({ navigation }) => {
   };
 
   const sendFriendRequest = async (friendId) => {
-    console.log('sendFriendRequest:', { from: currentUser?.id, to: friendId });
     try {
       const session = await getActiveSession();
       const actorUserId = session?.user?.id || null;
@@ -184,7 +172,6 @@ const FriendsScreen = ({ navigation }) => {
         actorUserId,
       );
 
-      console.log('sendFriendRequest result:', { data, error });
       if (error) throw error;
 
       const status = String(data?.status || 'pending');
