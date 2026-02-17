@@ -1243,9 +1243,22 @@ const handleSetLayerOrder = async (
     return jsonResponse(400, { error: "layerIds exceeds maximum size (200)." });
   }
 
+  const existingRes = await adminClient
+    .from("user_layer_prefs")
+    .select("layer_id,hidden")
+    .eq("user_id", actorId)
+    .in("layer_id", layerIds);
+  if (existingRes.error) {
+    return jsonResponse(400, { error: existingRes.error.message });
+  }
+
+  const hiddenByLayerId = new Map(
+    (existingRes.data || []).map((row) => [row.layer_id, Boolean(row.hidden)]),
+  );
   const rows = layerIds.map((layerId, index) => ({
     user_id: actorId,
     layer_id: layerId,
+    hidden: hiddenByLayerId.has(layerId) ? hiddenByLayerId.get(layerId) : false,
     sort_order: index,
   }));
   const upsertRes = await adminClient

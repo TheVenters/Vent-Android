@@ -43,7 +43,6 @@ as $$
       and lc.lead_user_id = auth.uid()
   );
 $$;
-
 create or replace function public.guard_community_lead_admin_update()
 returns trigger
 language plpgsql
@@ -75,7 +74,6 @@ begin
   return new;
 end;
 $$;
-
 drop trigger if exists community_lead_admin_guard on public.communities;
 create trigger community_lead_admin_guard
   before update on public.communities

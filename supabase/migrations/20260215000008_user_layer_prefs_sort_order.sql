@@ -1,10 +1,8 @@
 -- Add per-user layer ordering for cross-device layer order sync.
 alter table if exists public.user_layer_prefs
   add column if not exists sort_order integer;
-
 create index if not exists user_layer_prefs_user_sort_order_idx
   on public.user_layer_prefs(user_id, sort_order, layer_id);
-
 with ranked as (
   select
     user_id,

@@ -81,7 +81,6 @@ begin
   return v_layer_id;
 end;
 $$;
-
 create or replace function public.is_community_lead_admin(
   p_community_id uuid
 )
@@ -101,7 +100,6 @@ as $$
     limit 1
   ), false);
 $$;
-
 create or replace function public.delete_community_layer(
   p_layer_id uuid
 )
@@ -161,7 +159,6 @@ begin
   return v_deleted;
 end;
 $$;
-
 create or replace function public.delete_community_with_layers(
   p_community_id uuid
 )
@@ -202,22 +199,18 @@ begin
   return v_deleted;
 end;
 $$;
-
 drop policy if exists "Community admins can delete communities"
   on public.communities;
 drop policy if exists "Community lead admins can delete communities"
   on public.communities;
-
 create policy "Community lead admins can delete communities"
   on public.communities
   for delete
   using (public.is_community_lead_admin(id));
-
 revoke all on function public.create_community_layer(uuid, text, text) from public;
 revoke all on function public.delete_community_layer(uuid) from public;
 revoke all on function public.delete_community_with_layers(uuid) from public;
 revoke all on function public.is_community_lead_admin(uuid) from public;
-
 grant execute on function public.create_community_layer(uuid, text, text) to authenticated;
 grant execute on function public.delete_community_layer(uuid) to authenticated;
 grant execute on function public.delete_community_with_layers(uuid) to authenticated;

@@ -48,12 +48,10 @@ begin
   return resolved;
 end;
 $$;
-
 revoke all on function public.request_user_id() from public;
 grant execute on function public.request_user_id() to anon;
 grant execute on function public.request_user_id() to authenticated;
 grant execute on function public.request_user_id() to service_role;
-
 create or replace function public.can_view_pin_for_votes(target_pin_id uuid)
 returns boolean
 language sql
@@ -90,7 +88,6 @@ as $$
       )
   );
 $$;
-
 create or replace function public.can_vote_on_pin(target_pin_id uuid)
 returns boolean
 language sql
@@ -110,7 +107,6 @@ as $$
       and p.user_id <> actor.uid
   );
 $$;
-
 create or replace function public.get_pin_vote_summary(target_pin_id uuid)
 returns table (
   upvotes integer,
@@ -143,7 +139,6 @@ begin
   where v.pin_id = target_pin_id;
 end;
 $$;
-
 create or replace function public.toggle_pin_vote(
   target_pin_id uuid,
   target_vote smallint
@@ -224,7 +219,6 @@ begin
   where v.pin_id = target_pin_id;
 end;
 $$;
-
 drop policy if exists "Users can view their own friendships" on public.friends;
 create policy "Users can view their own friendships"
   on public.friends
@@ -233,13 +227,11 @@ create policy "Users can view their own friendships"
     public.request_user_id() = user_id
     or public.request_user_id() = friend_id
   );
-
 drop policy if exists "Users can send friend requests" on public.friends;
 create policy "Users can send friend requests"
   on public.friends
   for insert
   with check (public.request_user_id() = user_id);
-
 drop policy if exists "Users can update their friendships" on public.friends;
 create policy "Users can update their friendships"
   on public.friends
@@ -252,7 +244,6 @@ create policy "Users can update their friendships"
     public.request_user_id() = user_id
     or public.request_user_id() = friend_id
   );
-
 drop policy if exists "Users can delete their friendships" on public.friends;
 create policy "Users can delete their friendships"
   on public.friends

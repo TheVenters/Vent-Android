@@ -5,12 +5,10 @@ update public.community_members
 set status = 'accepted',
     updated_at = now()
 where lower(coalesce(status, '')) = 'active';
-
 update public.community_members
 set role = 'admin',
     updated_at = now()
 where lower(coalesce(role, '')) in ('owner', 'mod');
-
 create or replace function public.is_community_member(
   p_community_id uuid
 )
@@ -30,7 +28,6 @@ as $$
         and cm.status in ('accepted', 'active')
     );
 $$;
-
 create or replace function public.is_community_admin(
   p_community_id uuid
 )
@@ -51,7 +48,6 @@ as $$
         and cm.role in ('admin', 'owner', 'mod')
     );
 $$;
-
 create or replace function public.is_community_lead_admin(
   p_community_id uuid
 )

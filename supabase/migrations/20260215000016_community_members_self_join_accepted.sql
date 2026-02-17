@@ -3,7 +3,6 @@
 
 drop policy if exists "Users can request to join communities"
   on public.community_members;
-
 create policy "Users can request to join communities"
   on public.community_members
   for insert

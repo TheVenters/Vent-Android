@@ -19,16 +19,13 @@ create table if not exists public.client_issue_reports (
   metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
-
 create index if not exists client_issue_reports_created_at_idx
   on public.client_issue_reports(created_at desc);
 create index if not exists client_issue_reports_user_id_idx
   on public.client_issue_reports(user_id);
 create index if not exists client_issue_reports_category_idx
   on public.client_issue_reports(category);
-
 alter table public.client_issue_reports enable row level security;
-
 drop policy if exists "Users can insert client issue reports" on public.client_issue_reports;
 create policy "Users can insert client issue reports"
   on public.client_issue_reports
@@ -40,7 +37,6 @@ create policy "Users can insert client issue reports"
     )
     or public.request_user_id() = user_id
   );
-
 drop policy if exists "Users can view their own client issue reports" on public.client_issue_reports;
 create policy "Users can view their own client issue reports"
   on public.client_issue_reports
@@ -49,7 +45,6 @@ create policy "Users can view their own client issue reports"
     public.request_user_id() is not null
     and user_id = public.request_user_id()
   );
-
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values (
   'bug-report-screenshots',
@@ -59,7 +54,6 @@ values (
   array['image/jpeg', 'image/png', 'image/webp']
 )
 on conflict (id) do nothing;
-
 drop policy if exists "Users can upload bug report screenshots" on storage.objects;
 create policy "Users can upload bug report screenshots"
   on storage.objects
@@ -69,7 +63,6 @@ create policy "Users can upload bug report screenshots"
     bucket_id = 'bug-report-screenshots'
     and (storage.foldername(name))[1] = auth.uid()::text
   );
-
 drop policy if exists "Users can read bug report screenshots" on storage.objects;
 create policy "Users can read bug report screenshots"
   on storage.objects

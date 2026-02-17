@@ -45,7 +45,6 @@ begin
   return new;
 end;
 $$;
-
 create or replace function public.community_member_interaction_score(
   p_community_id uuid,
   p_user_id uuid
@@ -109,7 +108,6 @@ begin
   return coalesce(v_messages, 0) + coalesce(v_pins, 0) + coalesce(v_comments, 0);
 end;
 $$;
-
 create or replace function public.reassign_community_lead_admin(
   p_community_id uuid
 )
@@ -208,7 +206,6 @@ begin
   return v_candidate;
 end;
 $$;
-
 create or replace function public.handle_community_member_change_for_lead()
 returns trigger
 language plpgsql
@@ -241,13 +238,11 @@ begin
   return old;
 end;
 $$;
-
 drop trigger if exists community_members_reassign_lead on public.community_members;
 create trigger community_members_reassign_lead
   after insert or update or delete on public.community_members
   for each row
   execute function public.handle_community_member_change_for_lead();
-
 -- Reconcile existing communities once with current rules.
 do $$
 declare
@@ -260,10 +255,8 @@ begin
   end loop;
 end
 $$;
-
 revoke all on function public.community_member_interaction_score(uuid, uuid) from public;
 revoke all on function public.reassign_community_lead_admin(uuid) from public;
 revoke all on function public.handle_community_member_change_for_lead() from public;
-
 grant execute on function public.community_member_interaction_score(uuid, uuid) to authenticated, anon;
 grant execute on function public.reassign_community_lead_admin(uuid) to authenticated;

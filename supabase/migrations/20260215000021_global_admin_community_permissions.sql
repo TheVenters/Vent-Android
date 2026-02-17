@@ -15,7 +15,6 @@ as $$
       and coalesce(p.is_admin, false) = true
   );
 $$;
-
 create or replace function public.is_community_member(
   p_community_id uuid
 )
@@ -35,7 +34,6 @@ as $$
         and cm.status = 'accepted'
     );
 $$;
-
 create or replace function public.is_community_admin(
   p_community_id uuid
 )
@@ -56,7 +54,6 @@ as $$
         and cm.role = 'admin'
     );
 $$;
-
 create or replace function public.is_community_lead_admin(
   p_community_id uuid
 )
@@ -101,6 +98,5 @@ as $$
         and lc.lead_user_id = auth.uid()
     );
 $$;
-
 revoke all on function public.is_global_admin() from public;
 grant execute on function public.is_global_admin() to authenticated, anon;

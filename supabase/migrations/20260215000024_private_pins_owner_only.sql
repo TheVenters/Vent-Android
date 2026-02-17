@@ -2,14 +2,12 @@
 
 drop policy if exists "Private pins are viewable by owner and friends" on public.pins;
 drop policy if exists "Private pins are viewable by owner" on public.pins;
-
 create policy "Private pins are viewable by owner"
   on public.pins for select
   using (
     layer = 'private'
     and public.request_user_id() = user_id
   );
-
 create or replace function public.can_view_pin_for_votes(target_pin_id uuid)
 returns boolean
 language sql

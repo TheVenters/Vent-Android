@@ -20,7 +20,6 @@ as $$
     limit 1
   ), false);
 $$;
-
 create or replace function public.delete_community_with_layers(
   p_community_id uuid
 )
@@ -61,16 +60,13 @@ begin
   return v_deleted;
 end;
 $$;
-
 drop policy if exists "Community admins can delete communities"
   on public.communities;
 drop policy if exists "Community lead admins can delete communities"
   on public.communities;
-
 create policy "Community lead admins can delete communities"
   on public.communities
   for delete
   using (public.is_community_lead_admin(id));
-
 revoke all on function public.is_community_lead_admin(uuid) from public;
 grant execute on function public.is_community_lead_admin(uuid) to authenticated, anon;
