@@ -18,7 +18,9 @@ import { useAppTheme } from "../context/ThemeContext";
 import {
   supabase,
   getCurrentUser,
+  getActiveSession,
   setLayerPreferenceViaEdgeFunction,
+  supabaseWithAccessToken,
 } from "../services/supabase";
 import { getPinLayerKeyFromLayer } from "../utils/layers";
 import {
@@ -36,6 +38,10 @@ const isRlsPolicyError = (error) =>
   String(error?.message || "")
     .toLowerCase()
     .includes("row-level security policy");
+const isAcceptedMembershipStatus = (status) =>
+  status === "accepted" || status === "active";
+const isAdminCommunityRole = (role) => role === "admin" || role === "owner";
+const isModeratorCommunityRole = (role) => role === "mod";
 
 const slugify = (value) =>
   (value || "")
@@ -66,7 +72,9 @@ const CommunitiesScreen = ({ navigation }) => {
   const [communityOwner, setCommunityOwner] = useState(null);
   const [communityModerators, setCommunityModerators] = useState([]);
   const [communityMembers, setCommunityMembers] = useState([]);
+  const [pendingJoinRequests, setPendingJoinRequests] = useState([]);
   const [roleUpdatingUserId, setRoleUpdatingUserId] = useState(null);
+  const [membershipActionUserId, setMembershipActionUserId] = useState(null);
 
   const [showCreateCommunityModal, setShowCreateCommunityModal] =
     useState(false);
@@ -100,10 +108,12 @@ const CommunitiesScreen = ({ navigation }) => {
   }, [communities, query]);
 
   const canManageSelectedCommunity =
-    detailMembership?.status === "active" &&
-    (detailMembership?.role === "owner" || detailMembership?.role === "mod");
+    isAcceptedMembershipStatus(detailMembership?.status) &&
+    (isAdminCommunityRole(detailMembership?.role) ||
+      isModeratorCommunityRole(detailMembership?.role));
   const canManageCommunityRoles =
-    detailMembership?.status === "active" && detailMembership?.role === "owner";
+    isAcceptedMembershipStatus(detailMembership?.status) &&
+    isAdminCommunityRole(detailMembership?.role);
 
   const formatMemberName = useCallback((member) => {
     if (!member) return "Unknown";
@@ -113,52 +123,90 @@ const CommunitiesScreen = ({ navigation }) => {
     return "Unknown";
   }, []);
 
-  const loadCommunitySummary = useCallback(async (userId) => {
-    setLoading(true);
-
-    try {
-      const [communitiesRes, communityLayersRes, membershipsRes] =
-        await Promise.all([
-          supabase
-            .from("communities")
-            .select("id,slug,name,description,created_at")
-            .order("created_at", { ascending: false }),
-          supabase
-            .from("community_layers")
-            .select("community_id,layer_id,enabled"),
-          userId
-            ? supabase
-                .from("community_members")
-                .select("community_id,role,status")
-                .eq("user_id", userId)
-            : Promise.resolve({ data: [], error: null }),
-        ]);
-
-      if (communitiesRes.error) throw communitiesRes.error;
-      if (communityLayersRes.error) throw communityLayersRes.error;
-      if (membershipsRes.error) throw membershipsRes.error;
-
-      const counts = {};
-      (communityLayersRes.data || []).forEach((row) => {
-        if (!row.enabled) return;
-        counts[row.community_id] = (counts[row.community_id] || 0) + 1;
-      });
-
-      const membershipMap = {};
-      (membershipsRes.data || []).forEach((row) => {
-        membershipMap[row.community_id] = row;
-      });
-
-      setCommunities(communitiesRes.data || []);
-      setLayerCountByCommunity(counts);
-      setMembershipsByCommunity(membershipMap);
-    } catch (error) {
-      console.error("Error loading communities:", error);
-      Alert.alert("Error", "Failed to load communities.");
-    } finally {
-      setLoading(false);
+  const resolveSessionContext = useCallback(async () => {
+    let session = await getActiveSession();
+    if (!session?.user?.id) {
+      try {
+        const {
+          data: { session: fallbackSession },
+        } = await supabase.auth.getSession();
+        session = fallbackSession || null;
+      } catch (_) {
+        session = null;
+      }
     }
+    const sessionUser = session?.user || null;
+    const sessionUserId = sessionUser?.id || null;
+    const accessToken = session?.access_token || null;
+    return {
+      session,
+      sessionUser,
+      sessionUserId,
+      accessToken,
+      refreshToken: session?.refresh_token || null,
+      client: accessToken ? supabaseWithAccessToken(accessToken) : supabase,
+    };
   }, []);
+
+  const loadCommunitySummary = useCallback(
+    async (userId) => {
+      setLoading(true);
+
+      try {
+        const { client, sessionUser, sessionUserId } =
+          await resolveSessionContext();
+        const effectiveUserId = sessionUserId || userId || null;
+
+        if (sessionUser?.id && currentUser?.id !== sessionUser.id) {
+          setCurrentUser(sessionUser);
+        }
+
+        const [communitiesRes, communityLayersRes, membershipsRes] =
+          await Promise.all([
+            client
+              .from("communities")
+              .select(
+                "id,slug,name,description,created_at,owner_user_id,lead_admin_user_id",
+              )
+              .order("created_at", { ascending: false }),
+            client
+              .from("community_layers")
+              .select("community_id,layer_id,enabled"),
+            effectiveUserId
+              ? client
+                  .from("community_members")
+                  .select("community_id,role,status")
+                  .eq("user_id", effectiveUserId)
+              : Promise.resolve({ data: [], error: null }),
+          ]);
+
+        if (communitiesRes.error) throw communitiesRes.error;
+        if (communityLayersRes.error) throw communityLayersRes.error;
+        if (membershipsRes.error) throw membershipsRes.error;
+
+        const counts = {};
+        (communityLayersRes.data || []).forEach((row) => {
+          if (!row.enabled) return;
+          counts[row.community_id] = (counts[row.community_id] || 0) + 1;
+        });
+
+        const membershipMap = {};
+        (membershipsRes.data || []).forEach((row) => {
+          membershipMap[row.community_id] = row;
+        });
+
+        setCommunities(communitiesRes.data || []);
+        setLayerCountByCommunity(counts);
+        setMembershipsByCommunity(membershipMap);
+      } catch (error) {
+        console.error("Error loading communities:", error);
+        Alert.alert("Error", "Failed to load communities.");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [currentUser?.id, resolveSessionContext],
+  );
 
   const loadCommunityDetail = useCallback(
     async (communityId, userId) => {
@@ -166,17 +214,30 @@ const CommunitiesScreen = ({ navigation }) => {
 
       setDetailLoading(true);
       try {
-        const [membershipRes, communityLayersRes, allLayersRes, membersRes] =
+        const { client, sessionUser, sessionUserId } =
+          await resolveSessionContext();
+        const effectiveUserId = sessionUserId || userId || null;
+
+        if (sessionUser?.id && currentUser?.id !== sessionUser.id) {
+          setCurrentUser(sessionUser);
+        }
+
+        const [communityRes, membershipRes, communityLayersRes, allLayersRes, membersRes] =
           await Promise.all([
-            userId
-              ? supabase
+            client
+              .from("communities")
+              .select("id,owner_user_id,lead_admin_user_id")
+              .eq("id", communityId)
+              .maybeSingle(),
+            effectiveUserId
+              ? client
                   .from("community_members")
                   .select("community_id,role,status")
-                  .eq("user_id", userId)
+                  .eq("user_id", effectiveUserId)
                   .eq("community_id", communityId)
                   .maybeSingle()
               : Promise.resolve({ data: null, error: null }),
-            supabase
+            client
               .from("community_layers")
               .select(
                 "community_id,layer_id,enabled,sort_order,layer:layers(id,name,kind,owner_type,owner_id,is_public,enabled,created_at)",
@@ -184,29 +245,39 @@ const CommunitiesScreen = ({ navigation }) => {
               .eq("community_id", communityId)
               .eq("enabled", true)
               .order("sort_order", { ascending: true }),
-            supabase
+            client
               .from("layers")
               .select(
                 "id,name,kind,owner_type,owner_id,is_public,enabled,created_at",
               )
-              .eq("enabled", true),
-            supabase
+              .eq("enabled", true)
+              .eq("owner_type", "community"),
+            client
               .from("community_members")
               .select("user_id,role,status,created_at")
-              .eq("community_id", communityId)
-              .eq("status", "active"),
+              .eq("community_id", communityId),
           ]);
 
+        if (communityRes.error) throw communityRes.error;
         if (membershipRes.error) throw membershipRes.error;
         if (communityLayersRes.error) throw communityLayersRes.error;
         if (allLayersRes.error) throw allLayersRes.error;
         if (membersRes.error) throw membersRes.error;
 
-        const activeMembers = membersRes.data || [];
-        const memberIds = activeMembers.map((member) => member.user_id);
+        const allMembers = membersRes.data || [];
+        const acceptedMembers = allMembers.filter((member) =>
+          isAcceptedMembershipStatus(member.status),
+        );
+        const pendingMembers = allMembers.filter(
+          (member) => member.status === "pending",
+        );
+
+        const memberIds = Array.from(
+          new Set(allMembers.map((member) => member.user_id).filter(Boolean)),
+        );
         let profileMap = new Map();
         if (memberIds.length > 0) {
-          const profilesRes = await supabase
+          const profilesRes = await client
             .from("profiles")
             .select("id,username,display_name")
             .in("id", memberIds);
@@ -216,8 +287,8 @@ const CommunitiesScreen = ({ navigation }) => {
           );
         }
 
-        const roleOrder = { owner: 0, mod: 1, member: 2 };
-        const enrichedMembers = activeMembers
+        const roleOrder = { owner: 0, admin: 0, mod: 1, member: 2 };
+        const enrichedMembers = acceptedMembers
           .map((member) => {
             const profile = profileMap.get(member.user_id);
             return {
@@ -231,8 +302,32 @@ const CommunitiesScreen = ({ navigation }) => {
             if (roleDiff !== 0) return roleDiff;
             return formatMemberName(a).localeCompare(formatMemberName(b));
           });
-        const owner = enrichedMembers.find((member) => member.role === "owner") || null;
-        const moderators = enrichedMembers.filter((member) => member.role === "mod");
+        const enrichedPendingMembers = pendingMembers
+          .map((member) => {
+            const profile = profileMap.get(member.user_id);
+            return {
+              ...member,
+              username: profile?.username || null,
+              display_name: profile?.display_name || null,
+            };
+          })
+          .sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+
+        const explicitOwnerUserId =
+          communityRes.data?.lead_admin_user_id ||
+          communityRes.data?.owner_user_id ||
+          null;
+        const owner =
+          (explicitOwnerUserId
+            ? enrichedMembers.find((member) => member.user_id === explicitOwnerUserId)
+            : null) ||
+          enrichedMembers.find((member) => isAdminCommunityRole(member.role)) ||
+          null;
+        const moderators = enrichedMembers.filter(
+          (member) =>
+            isAdminCommunityRole(member.role) &&
+            member.user_id !== owner?.user_id,
+        );
 
         const linkedRows = communityLayersRes.data || [];
         const linkedLayerIds = linkedRows
@@ -244,7 +339,7 @@ const CommunitiesScreen = ({ navigation }) => {
 
         let ownerCommunityMap = new Map();
         if (layerOwnerCommunityIds.length > 0) {
-          const ownerCommunitiesRes = await supabase
+          const ownerCommunitiesRes = await client
             .from("communities")
             .select("id,name")
             .in("id", layerOwnerCommunityIds);
@@ -258,11 +353,11 @@ const CommunitiesScreen = ({ navigation }) => {
         }
 
         let prefsMap = new Map();
-        if (userId && linkedLayerIds.length > 0) {
-          const prefsRes = await supabase
+        if (effectiveUserId && linkedLayerIds.length > 0) {
+          const prefsRes = await client
             .from("user_layer_prefs")
             .select("layer_id,hidden")
-            .eq("user_id", userId)
+            .eq("user_id", effectiveUserId)
             .in("layer_id", linkedLayerIds);
 
           if (prefsRes.error) throw prefsRes.error;
@@ -316,12 +411,12 @@ const CommunitiesScreen = ({ navigation }) => {
           const communityLayerIdSet = new Set(
             mappedLayers.map((layer) => layer.id),
           );
-          const postsRes = await supabase
+          const postsRes = await client
             .from("pins")
             .select("id,layer,geometry")
             .in("layer", pinLayerKeys)
             .order("created_at", { ascending: false })
-            .limit(1000);
+            .limit(300);
           if (postsRes.error) throw postsRes.error;
 
           totalPosts = (postsRes.data || []).filter((post) =>
@@ -332,7 +427,6 @@ const CommunitiesScreen = ({ navigation }) => {
         const linkedIdSet = new Set(linkedLayerIds);
         const attachCandidates = (allLayersRes.data || [])
           .filter((layer) => !linkedIdSet.has(layer.id))
-          .filter((layer) => layer.owner_type === "community")
           .map((layer) => {
             const { baseKind, layerIcon } = parseLayerKindMetadata(layer.kind);
             return {
@@ -350,6 +444,7 @@ const CommunitiesScreen = ({ navigation }) => {
         setCommunityOwner(owner);
         setCommunityModerators(moderators);
         setCommunityMembers(enrichedMembers);
+        setPendingJoinRequests(enrichedPendingMembers);
         setDetailMembership(
           membershipRes.data || membershipsByCommunity[communityId] || null,
         );
@@ -360,7 +455,7 @@ const CommunitiesScreen = ({ navigation }) => {
         setDetailLoading(false);
       }
     },
-    [formatMemberName, membershipsByCommunity],
+    [currentUser?.id, formatMemberName, membershipsByCommunity, resolveSessionContext],
   );
 
   useEffect(() => {
@@ -387,38 +482,48 @@ const CommunitiesScreen = ({ navigation }) => {
   const getJoinStatus = (communityId) => {
     const membership = membershipsByCommunity[communityId];
     if (!membership) return "Join";
-    if (membership.status === "active") return "Joined";
+    if (isAcceptedMembershipStatus(membership.status)) return "Joined";
     if (membership.status === "pending") return "Pending";
     return "Join";
   };
 
   const handleJoinCommunity = async (communityId) => {
-    if (!currentUser?.id) {
-      Alert.alert("Sign In Required", "Please sign in to join communities.");
-      navigation.navigate("Account");
-      return;
-    }
-
-    const existing = membershipsByCommunity[communityId];
-    if (existing?.status === "active") return;
-
     try {
-      const { error } = await supabase.from("community_members").upsert(
+      const { client, sessionUserId } = await resolveSessionContext();
+      if (!sessionUserId) {
+        Alert.alert("Sign In Required", "Please sign in to join communities.");
+        navigation.navigate("Account");
+        return;
+      }
+
+      const existing = membershipsByCommunity[communityId];
+      if (isAcceptedMembershipStatus(existing?.status)) return;
+
+      // If a stale pending row exists, replace it with an accepted self-join row.
+      const deletePendingRes = await client
+        .from("community_members")
+        .delete()
+        .eq("community_id", communityId)
+        .eq("user_id", sessionUserId)
+        .eq("status", "pending");
+      if (deletePendingRes.error) throw deletePendingRes.error;
+
+      const { error } = await client.from("community_members").upsert(
         {
-          user_id: currentUser.id,
+          user_id: sessionUserId,
           community_id: communityId,
-          role: existing?.role || "member",
-          status: "active",
+          role: "member",
+          status: "accepted",
           updated_at: new Date().toISOString(),
         },
-        { onConflict: "user_id,community_id" },
+        { onConflict: "user_id,community_id", ignoreDuplicates: true },
       );
 
       if (error) throw error;
 
-      await loadCommunitySummary(currentUser.id);
+      await loadCommunitySummary(sessionUserId);
       if (selectedCommunityId === communityId) {
-        await loadCommunityDetail(communityId, currentUser.id);
+        await loadCommunityDetail(communityId, sessionUserId);
       }
     } catch (error) {
       console.error("Error joining community:", error);
@@ -427,19 +532,8 @@ const CommunitiesScreen = ({ navigation }) => {
   };
 
   const handleToggleLayerCollection = async (layerId, nextEnabled) => {
-    let sessionUserId = null;
-    let accessToken = null;
-    let refreshToken = null;
-    try {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      sessionUserId = session?.user?.id || null;
-      accessToken = session?.access_token || null;
-      refreshToken = session?.refresh_token || null;
-    } catch (error) {
-      console.error("Error resolving session:", error);
-    }
+    const { sessionUserId, accessToken, refreshToken } =
+      await resolveSessionContext();
     if (!sessionUserId) {
       Alert.alert(
         "Sign In Required",
@@ -465,6 +559,7 @@ const CommunitiesScreen = ({ navigation }) => {
       if (edgeResult.error) {
         throw edgeResult.error;
       }
+      await loadCommunityDetail(selectedCommunityId, sessionUserId);
     } catch (error) {
       if (isRlsPolicyError(error)) {
         console.warn("Community layer collection blocked by RLS:", error);
@@ -482,11 +577,6 @@ const CommunitiesScreen = ({ navigation }) => {
   };
 
   const handleCreateCommunity = async () => {
-    if (!currentUser?.id) {
-      Alert.alert("Sign In Required", "Please sign in to create communities.");
-      return;
-    }
-
     if (!communityNameInput.trim()) {
       Alert.alert("Name Required", "Please enter a community name.");
       return;
@@ -499,24 +589,34 @@ const CommunitiesScreen = ({ navigation }) => {
     }
 
     try {
-      const createRes = await supabase
+      const { client, sessionUserId } = await resolveSessionContext();
+      if (!sessionUserId) {
+        Alert.alert("Sign In Required", "Please sign in to create communities.");
+        return;
+      }
+
+      const createRes = await client
         .from("communities")
         .insert({
           slug,
           name: communityNameInput.trim(),
           description: communityDescriptionInput.trim() || null,
+          owner_user_id: sessionUserId,
+          lead_admin_user_id: sessionUserId,
         })
-        .select("id,slug,name,description,created_at")
+        .select(
+          "id,slug,name,description,created_at,owner_user_id,lead_admin_user_id",
+        )
         .single();
 
       if (createRes.error) throw createRes.error;
 
-      const membershipRes = await supabase.from("community_members").upsert(
+      const membershipRes = await client.from("community_members").upsert(
         {
-          user_id: currentUser.id,
+          user_id: sessionUserId,
           community_id: createRes.data.id,
-          role: "owner",
-          status: "active",
+          role: "admin",
+          status: "accepted",
           updated_at: new Date().toISOString(),
         },
         { onConflict: "user_id,community_id" },
@@ -529,7 +629,7 @@ const CommunitiesScreen = ({ navigation }) => {
       setCommunityDescriptionInput("");
       setCommunitySlugInput("");
 
-      await loadCommunitySummary(currentUser.id);
+      await loadCommunitySummary(sessionUserId);
       setSelectedCommunityId(createRes.data.id);
     } catch (error) {
       console.error("Error creating community:", error);
@@ -546,7 +646,13 @@ const CommunitiesScreen = ({ navigation }) => {
     }
 
     try {
-      const createLayerRes = await supabase
+      const { client, sessionUserId } = await resolveSessionContext();
+      if (!sessionUserId) {
+        Alert.alert("Sign In Required", "Please sign in to manage communities.");
+        return;
+      }
+
+      const createLayerRes = await client
         .from("layers")
         .insert({
           name: newLayerName.trim(),
@@ -566,7 +672,7 @@ const CommunitiesScreen = ({ navigation }) => {
           0,
         ) + 1;
 
-      const attachRes = await supabase.from("community_layers").upsert(
+      const attachRes = await client.from("community_layers").upsert(
         {
           community_id: selectedCommunityId,
           layer_id: createLayerRes.data.id,
@@ -582,8 +688,8 @@ const CommunitiesScreen = ({ navigation }) => {
       setNewLayerName("");
       setNewLayerKind("user_overlay");
 
-      await loadCommunitySummary(currentUser?.id);
-      await loadCommunityDetail(selectedCommunityId, currentUser?.id);
+      await loadCommunitySummary(sessionUserId);
+      await loadCommunityDetail(selectedCommunityId, sessionUserId);
     } catch (error) {
       console.error("Error creating layer:", error);
       Alert.alert("Error", error.message || "Failed to create layer.");
@@ -604,13 +710,19 @@ const CommunitiesScreen = ({ navigation }) => {
     }
 
     try {
+      const { client, sessionUserId } = await resolveSessionContext();
+      if (!sessionUserId) {
+        Alert.alert("Sign In Required", "Please sign in to manage communities.");
+        return;
+      }
+
       const nextSort =
         communityLayers.reduce(
           (max, layer) => Math.max(max, layer.sortOrder || 0),
           0,
         ) + 1;
 
-      const res = await supabase.from("community_layers").upsert(
+      const res = await client.from("community_layers").upsert(
         {
           community_id: selectedCommunityId,
           layer_id: layerId,
@@ -622,8 +734,8 @@ const CommunitiesScreen = ({ navigation }) => {
 
       if (res.error) throw res.error;
 
-      await loadCommunitySummary(currentUser?.id);
-      await loadCommunityDetail(selectedCommunityId, currentUser?.id);
+      await loadCommunitySummary(sessionUserId);
+      await loadCommunityDetail(selectedCommunityId, sessionUserId);
       setShowAttachLayerModal(false);
     } catch (error) {
       console.error("Error attaching layer:", error);
@@ -633,9 +745,7 @@ const CommunitiesScreen = ({ navigation }) => {
 
   const handleDeleteLayer = async (layer) => {
     if (!currentUser?.id || !selectedCommunityId) return;
-    if (
-      !(detailMembership?.role === "owner" || detailMembership?.role === "mod")
-    ) {
+    if (!canManageSelectedCommunity) {
       Alert.alert(
         "Permission Denied",
         "Only community owners/mods can delete layers.",
@@ -665,38 +775,47 @@ const CommunitiesScreen = ({ navigation }) => {
           style: "destructive",
           onPress: async () => {
             try {
-              const { error: pinsError } = await supabase
+              const { client, sessionUserId } = await resolveSessionContext();
+              if (!sessionUserId) {
+                Alert.alert(
+                  "Sign In Required",
+                  "Please sign in to manage communities.",
+                );
+                return;
+              }
+
+              const { error: pinsError } = await client
                 .from("pins")
                 .delete()
                 .contains("geometry", { layer_id: layer.id });
               if (pinsError) throw pinsError;
 
-              const { error: overlayError } = await supabase
+              const { error: overlayError } = await client
                 .from("overlay_features")
                 .delete()
                 .eq("layer_id", layer.id);
               if (overlayError) throw overlayError;
 
-              const { error: prefsError } = await supabase
+              const { error: prefsError } = await client
                 .from("user_layer_prefs")
                 .delete()
                 .eq("layer_id", layer.id);
               if (prefsError) throw prefsError;
 
-              const { error: linksError } = await supabase
+              const { error: linksError } = await client
                 .from("community_layers")
                 .delete()
                 .eq("layer_id", layer.id);
               if (linksError) throw linksError;
 
-              const { error: layerError } = await supabase
+              const { error: layerError } = await client
                 .from("layers")
                 .delete()
                 .eq("id", layer.id);
               if (layerError) throw layerError;
 
-              await loadCommunitySummary(currentUser?.id);
-              await loadCommunityDetail(selectedCommunityId, currentUser?.id);
+              await loadCommunitySummary(sessionUserId);
+              await loadCommunityDetail(selectedCommunityId, sessionUserId);
             } catch (error) {
               console.error("Error deleting layer:", error);
               Alert.alert("Error", error.message || "Failed to delete layer.");
@@ -711,27 +830,93 @@ const CommunitiesScreen = ({ navigation }) => {
   const handleUpdateMemberRole = async (targetUserId, nextRole) => {
     if (!selectedCommunityId || !currentUser?.id) return;
     if (!canManageCommunityRoles) {
-      Alert.alert("Permission Denied", "Only the community owner can manage moderators.");
+      Alert.alert(
+        "Permission Denied",
+        "Only community admins can manage moderators.",
+      );
       return;
     }
     if (!targetUserId || targetUserId === currentUser.id) return;
 
     try {
+      const { client, sessionUserId } = await resolveSessionContext();
+      if (!sessionUserId) {
+        Alert.alert("Sign In Required", "Please sign in to manage communities.");
+        return;
+      }
       setRoleUpdatingUserId(targetUserId);
-      const { error } = await supabase
+      const { error } = await client
         .from("community_members")
         .update({ role: nextRole, updated_at: new Date().toISOString() })
         .eq("community_id", selectedCommunityId)
         .eq("user_id", targetUserId)
-        .eq("status", "active");
+        .in("status", ["accepted", "active"]);
       if (error) throw error;
 
-      await loadCommunityDetail(selectedCommunityId, currentUser?.id);
+      await loadCommunityDetail(selectedCommunityId, sessionUserId);
     } catch (error) {
       console.error("Error updating member role:", error);
       Alert.alert("Error", error.message || "Failed to update member role.");
     } finally {
       setRoleUpdatingUserId(null);
+    }
+  };
+
+  const handleApproveJoinRequest = async (targetUserId) => {
+    if (!selectedCommunityId || !targetUserId) return;
+    if (!canManageSelectedCommunity) return;
+
+    try {
+      const { client, sessionUserId } = await resolveSessionContext();
+      if (!sessionUserId) {
+        Alert.alert("Sign In Required", "Please sign in to manage communities.");
+        return;
+      }
+      setMembershipActionUserId(targetUserId);
+      const { error } = await client
+        .from("community_members")
+        .update({
+          status: "accepted",
+          role: "member",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("community_id", selectedCommunityId)
+        .eq("user_id", targetUserId)
+        .eq("status", "pending");
+      if (error) throw error;
+      await loadCommunityDetail(selectedCommunityId, sessionUserId);
+    } catch (error) {
+      console.error("Error approving join request:", error);
+      Alert.alert("Error", error.message || "Failed to approve join request.");
+    } finally {
+      setMembershipActionUserId(null);
+    }
+  };
+
+  const handleRejectJoinRequest = async (targetUserId) => {
+    if (!selectedCommunityId || !targetUserId) return;
+    if (!canManageSelectedCommunity) return;
+
+    try {
+      const { client, sessionUserId } = await resolveSessionContext();
+      if (!sessionUserId) {
+        Alert.alert("Sign In Required", "Please sign in to manage communities.");
+        return;
+      }
+      setMembershipActionUserId(targetUserId);
+      const { error } = await client
+        .from("community_members")
+        .delete()
+        .eq("community_id", selectedCommunityId)
+        .eq("user_id", targetUserId)
+        .eq("status", "pending");
+      if (error) throw error;
+      await loadCommunityDetail(selectedCommunityId, sessionUserId);
+    } catch (error) {
+      console.error("Error rejecting join request:", error);
+      Alert.alert("Error", error.message || "Failed to reject join request.");
+    } finally {
+      setMembershipActionUserId(null);
     }
   };
 
@@ -745,11 +930,16 @@ const CommunitiesScreen = ({ navigation }) => {
     if (!editingLayer?.id) return;
 
     try {
+      const { client, sessionUserId } = await resolveSessionContext();
+      if (!sessionUserId) {
+        Alert.alert("Sign In Required", "Please sign in to manage communities.");
+        return;
+      }
       const nextKind = encodeLayerKindWithIcon(
         editingLayer.kind || "user_overlay",
         layerIconInput,
       );
-      const { error } = await supabase
+      const { error } = await client
         .from("layers")
         .update({ kind: nextKind })
         .eq("id", editingLayer.id);
@@ -758,7 +948,7 @@ const CommunitiesScreen = ({ navigation }) => {
       setShowLayerIconModal(false);
       setEditingLayer(null);
       setLayerIconInput("");
-      await loadCommunityDetail(selectedCommunityId, currentUser?.id);
+      await loadCommunityDetail(selectedCommunityId, sessionUserId);
     } catch (error) {
       console.error("Error updating layer icon:", error);
       Alert.alert("Error", error.message || "Failed to update layer icon.");
@@ -1037,10 +1227,11 @@ const CommunitiesScreen = ({ navigation }) => {
               {joinStatus !== "Joined" && (
                 <TouchableOpacity
                   style={styles.primaryInlineBtn}
+                  disabled={joinStatus === "Pending"}
                   onPress={() => handleJoinCommunity(selectedCommunity.id)}
                 >
                   <Text style={styles.primaryInlineBtnText}>
-                    Join Community
+                    {joinStatus === "Pending" ? "Request Pending" : "Join Community"}
                   </Text>
                 </TouchableOpacity>
               )}
@@ -1178,6 +1369,48 @@ const CommunitiesScreen = ({ navigation }) => {
 
               {canManageCommunityRoles && (
                 <>
+                  <Text style={styles.sectionHeading}>Join Requests</Text>
+                  {pendingJoinRequests.length === 0 ? (
+                    <Text style={styles.leadershipEmpty}>
+                      No pending join requests.
+                    </Text>
+                  ) : (
+                    pendingJoinRequests.map((member) => (
+                      <View key={member.user_id} style={styles.memberRow}>
+                        <View style={styles.memberRowLeft}>
+                          <Text style={styles.memberName}>
+                            {formatMemberName(member)}
+                          </Text>
+                          <Text style={styles.memberRole}>Pending</Text>
+                        </View>
+                        <View style={styles.memberRowRight}>
+                          <TouchableOpacity
+                            style={styles.memberActionBtn}
+                            disabled={membershipActionUserId === member.user_id}
+                            onPress={() =>
+                              handleApproveJoinRequest(member.user_id)
+                            }
+                          >
+                            <Text style={styles.memberActionBtnText}>
+                              {membershipActionUserId === member.user_id
+                                ? "Saving..."
+                                : "Approve"}
+                            </Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={styles.memberActionBtn}
+                            disabled={membershipActionUserId === member.user_id}
+                            onPress={() =>
+                              handleRejectJoinRequest(member.user_id)
+                            }
+                          >
+                            <Text style={styles.memberActionBtnText}>Reject</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ))
+                  )}
+
                   <Text style={styles.sectionHeading}>Manage Moderators</Text>
                   {communityMembers
                     .filter((member) => member.user_id !== communityOwner?.user_id)
@@ -1188,7 +1421,9 @@ const CommunitiesScreen = ({ navigation }) => {
                             {formatMemberName(member)}
                           </Text>
                           <Text style={styles.memberRole}>
-                            {member.role === "mod" ? "Moderator" : "Member"}
+                            {member.role === "mod" || member.role === "admin"
+                              ? "Moderator"
+                              : "Member"}
                           </Text>
                         </View>
                         <TouchableOpacity
@@ -1197,14 +1432,17 @@ const CommunitiesScreen = ({ navigation }) => {
                           onPress={() =>
                             handleUpdateMemberRole(
                               member.user_id,
-                              member.role === "mod" ? "member" : "mod",
+                              member.role === "mod" || member.role === "admin"
+                                ? "member"
+                                : "admin",
                             )
                           }
                         >
                           <Text style={styles.memberActionBtnText}>
                             {roleUpdatingUserId === member.user_id
                               ? "Saving..."
-                              : member.role === "mod"
+                              : member.role === "mod" ||
+                                  member.role === "admin"
                                 ? "Remove Mod"
                                 : "Make Mod"}
                           </Text>
@@ -1694,6 +1932,10 @@ const createStyles = (palette, isDark) =>
     },
     memberRowLeft: {
       flex: 1,
+    },
+    memberRowRight: {
+      flexDirection: "row",
+      gap: 8,
     },
     memberName: {
       color: palette.text,

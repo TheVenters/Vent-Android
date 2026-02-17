@@ -191,12 +191,16 @@ const LayersControlPanel = ({
                             <Text style={styles.reorderBtnText}>↓</Text>
                           </TouchableOpacity>
                         </View>
-                        {isSelected && layer.isEnabled ? (
+                        {layer.isForcedEnabled ? (
+                          <Text style={styles.selectedPill}>Pinned</Text>
+                        ) : null}
+                        {isSelected && layer.isEnabled && !layer.isForcedEnabled ? (
                           <Text style={styles.selectedPill}>Selected</Text>
                         ) : null}
 
                         <Switch
                           value={layer.isEnabled}
+                          disabled={Boolean(layer.isForcedEnabled)}
                           trackColor={{
                             false: palette.border,
                             true: palette.primary,

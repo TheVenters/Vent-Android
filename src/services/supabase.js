@@ -152,7 +152,18 @@ export const supabaseWithAccessToken = (accessToken) => {
 // Helper functions
 export const getCurrentUser = async () => {
   const session = await getActiveSession();
-  return session?.user || null;
+  if (session?.user) return session.user;
+
+  // Fallback for read-only UI identity when strict active-session validation
+  // fails transiently.
+  try {
+    const {
+      data: { session: rawSession },
+    } = await supabase.auth.getSession();
+    return rawSession?.user || null;
+  } catch (_) {
+    return null;
+  }
 };
 
 const parseJwtPayload = (token) => {

@@ -5,13 +5,10 @@
 alter table public.pin_comments
   add column if not exists parent_comment_id uuid
   references public.pin_comments(id) on delete cascade;
-
 create index if not exists pin_comments_parent_comment_id_idx
   on public.pin_comments(parent_comment_id);
-
 drop policy if exists "Users can add comments to visible pins they do not own" on public.pin_comments;
 drop policy if exists "Users can add comments to visible pins" on public.pin_comments;
-
 create policy "Users can add comments to visible pins"
   on public.pin_comments
   for insert

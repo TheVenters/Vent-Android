@@ -21,7 +21,6 @@ create policy "Private pins are viewable by owner and friends"
       )
     )
   );
-
 create or replace function public.can_view_pin_for_votes(target_pin_id uuid)
 returns boolean
 language sql

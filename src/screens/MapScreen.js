@@ -85,6 +85,11 @@ const ERROR_ALERT_COOLDOWN_MS = 15000;
 const NETWORK_BACKOFF_MS = 20000;
 const MAP_POSTS_CACHE_KEY = "map_posts_cache_v1";
 const PIN_COMMENT_MAX_LENGTH = 500;
+const LAYER_TRACE_ENABLED =
+  __DEV__ && Boolean(globalThis?.__VENT_LAYER_TRACE__ === true);
+const REGION_LAT_LNG_EPS = 0.00008;
+const REGION_DELTA_EPS = 0.00008;
+const REGION_UPDATE_MIN_INTERVAL_MS = 90;
 
 const toRadians = (degrees) => (degrees * Math.PI) / 180;
 
@@ -747,10 +752,39 @@ const MapScreen = ({ navigation, route }) => {
   const layerFetchInFlightRef = useRef({ key: null, promise: null });
   const errorThrottleRef = useRef(new Map());
   const networkBackoffUntilRef = useRef(0);
+  const layersRef = useRef([]);
+  const allLoadedPostsRef = useRef([]);
+  const pinsLoadRequestRef = useRef(0);
+  const isLayerTogglePendingRef = useRef(false);
+  const layerTraceCounterRef = useRef(0);
+  const refreshLayersInFlightRef = useRef(null);
+  const lastRegionUpdateAtRef = useRef(0);
+
+  const layerTrace = useCallback((event, payload = null) => {
+    if (!LAYER_TRACE_ENABLED) return;
+    const seq = ++layerTraceCounterRef.current;
+    if (payload && typeof payload === "object") {
+      console.log(`[LayerTrace #${seq}] ${event}`, payload);
+      return;
+    }
+    if (payload !== null && payload !== undefined) {
+      console.log(`[LayerTrace #${seq}] ${event}`, payload);
+      return;
+    }
+    console.log(`[LayerTrace #${seq}] ${event}`);
+  }, []);
 
   useEffect(() => {
     selectedPinIdRef.current = selectedPin?.id || null;
   }, [selectedPin?.id]);
+
+  useEffect(() => {
+    layersRef.current = layers;
+  }, [layers]);
+
+  useEffect(() => {
+    allLoadedPostsRef.current = allLoadedPosts;
+  }, [allLoadedPosts]);
 
   const shouldThrottleError = useCallback((key, cooldownMs) => {
     const now = Date.now();
@@ -809,7 +843,7 @@ const MapScreen = ({ navigation, route }) => {
   }, []);
 
   const restoreCachedPosts = useCallback(async () => {
-    if (allLoadedPosts.length > 0) return;
+    if (allLoadedPostsRef.current.length > 0) return;
     try {
       const raw = await AsyncStorage.getItem(MAP_POSTS_CACHE_KEY);
       if (!raw) return;
@@ -820,7 +854,7 @@ const MapScreen = ({ navigation, route }) => {
     } catch (_) {
       // Ignore cache parse/read failures.
     }
-  }, [allLoadedPosts.length]);
+  }, []);
 
   const resolveCurrentUserId = useCallback(async () => {
     // For RLS-gated writes, require an active auth session so auth.uid() is
@@ -850,7 +884,17 @@ const MapScreen = ({ navigation, route }) => {
       .filter((id) => isUuid(id));
     if (orderedLayerIds.length === 0) return;
 
-    const session = await getActiveSession();
+    let session = await getActiveSession();
+    if (!session?.user?.id) {
+      try {
+        const {
+          data: { session: fallbackSession },
+        } = await supabase.auth.getSession();
+        session = fallbackSession || null;
+      } catch (_) {
+        session = null;
+      }
+    }
     const accessToken = session?.access_token || null;
     const refreshToken = session?.refresh_token || null;
     const actorUserId = session?.user?.id || userId;
@@ -876,7 +920,7 @@ const MapScreen = ({ navigation, route }) => {
         new Set([
           "public",
           ...layers
-            .filter((layer) => layer.isEnabled && !isUserPostingLayer(layer))
+            .filter((layer) => layer.isEnabled)
             .map((layer) => getPinLayerKeyFromLayer(layer)),
         ]),
       );
@@ -886,7 +930,7 @@ const MapScreen = ({ navigation, route }) => {
     const keys = Array.from(
       new Set(
         layers
-          .filter((layer) => layer.isEnabled && !isUserPostingLayer(layer))
+          .filter((layer) => layer.isEnabled)
           .map((layer) => getPinLayerKeyFromLayer(layer)),
       ),
     );
@@ -910,23 +954,57 @@ const MapScreen = ({ navigation, route }) => {
         setLayersLoading(true);
 
         try {
+          let effectiveUserId = userId || null;
+          let readClient = supabase;
+          let sessionUser = null;
+          if (effectiveUserId) {
+            let session = await getActiveSession();
+            if (!session?.user?.id) {
+              try {
+                const {
+                  data: { session: fallbackSession },
+                } = await supabase.auth.getSession();
+                session = fallbackSession || null;
+              } catch (_) {
+                session = null;
+              }
+            }
+
+            const accessToken = session?.access_token || null;
+            const sessionUserId = session?.user?.id || null;
+            sessionUser = session?.user || null;
+            if (sessionUserId) {
+              effectiveUserId = sessionUserId;
+              if (currentUser?.id !== sessionUserId) {
+                setCurrentUser(session.user);
+              }
+            }
+            if (accessToken) {
+              readClient = supabaseWithAccessToken(accessToken);
+            }
+          }
+
+          const previousLayerById = new Map(
+            (layersRef.current || []).map((layer) => [layer.id, layer]),
+          );
+
         const [allLayersRes, membershipsRes, prefsRes] = await Promise.all([
-          supabase
+          readClient
             .from("layers")
             .select(
               "id,name,kind,owner_type,owner_id,is_public,enabled,created_at",
             ),
-          userId
-            ? supabase
+          effectiveUserId
+            ? readClient
                 .from("community_members")
                 .select("community_id,role,status")
-                .eq("user_id", userId)
+                .eq("user_id", effectiveUserId)
             : Promise.resolve({ data: [], error: null }),
-          userId
-            ? supabase
+          effectiveUserId
+            ? readClient
                 .from("user_layer_prefs")
                 .select("layer_id,hidden,sort_order")
-                .eq("user_id", userId)
+                .eq("user_id", effectiveUserId)
             : Promise.resolve({ data: [], error: null }),
         ]);
 
@@ -948,7 +1026,9 @@ const MapScreen = ({ navigation, route }) => {
 
         const activeMemberships = (
           (membershipsRes.error ? [] : membershipsRes.data) || []
-        ).filter((row) => row.status === "active");
+        ).filter(
+          (row) => row.status === "active" || row.status === "accepted",
+        );
         const activeCommunityIds = [
           ...new Set([
             ...activeMemberships.map((row) => row.community_id),
@@ -958,7 +1038,7 @@ const MapScreen = ({ navigation, route }) => {
 
         let communityLayerLinks = [];
         if (activeCommunityIds.length > 0) {
-          const communityLayersRes = await supabase
+          const communityLayersRes = await readClient
             .from("community_layers")
             .select("community_id,layer_id,enabled,sort_order")
             .in("community_id", activeCommunityIds)
@@ -1000,7 +1080,7 @@ const MapScreen = ({ navigation, route }) => {
         ]);
 
         if (layerIdSet.size === 0) {
-          applyFallbackLayers(userId);
+          applyFallbackLayers(effectiveUserId);
           return;
         }
 
@@ -1021,7 +1101,7 @@ const MapScreen = ({ navigation, route }) => {
 
         let communitiesMap = new Map();
         if (communityIdsToResolve.length > 0) {
-          const communitiesRes = await supabase
+          const communitiesRes = await readClient
             .from("communities")
             .select("id,name,slug")
             .in("id", communityIdsToResolve);
@@ -1064,11 +1144,17 @@ const MapScreen = ({ navigation, route }) => {
             ? prefSortOrderRaw
             : null;
           const isDbEnabled = layer.enabled !== false;
-          const isEnabled = forcedCommunityLayerIds.has(layer.id)
+          const isForcedEnabled = forcedCommunityLayerIds.has(layer.id);
+          const previousLayer = previousLayerById.get(layer.id);
+          const fallbackEnabled =
+            typeof previousLayer?.isEnabled === "boolean"
+              ? previousLayer.isEnabled
+              : isDbEnabled && (ownerType === "system" || ownerType === "user");
+          const isEnabled = isForcedEnabled
             ? true
             : hasPref
               ? !prefHidden
-              : isDbEnabled && (ownerType === "system" || ownerType === "user");
+              : fallbackEnabled;
 
           const ownerCommunity = layer.owner_id
             ? communitiesMap.get(layer.owner_id)
@@ -1085,6 +1171,7 @@ const MapScreen = ({ navigation, route }) => {
                 ? "My Posts"
                 : layer.name,
             isEnabled,
+            isForcedEnabled,
             pref_sort_order: prefSortOrder,
             ownerCommunityName: ownerCommunity?.name || null,
             sourceCommunityIds: layerCommunitiesMap.get(layer.id) || [],
@@ -1100,17 +1187,21 @@ const MapScreen = ({ navigation, route }) => {
             return true;
           }
 
-          if (!userId) return false;
+          if (!effectiveUserId) return false;
           if (userPostingLayerId && layer.id === userPostingLayerId)
             return true;
 
+          const expectedName = makeUserPostingLayerName(
+            sessionUser || currentUser || { id: effectiveUserId },
+          ).toLowerCase();
+          const expectedLegacyName = `user-${String(effectiveUserId)}-posts`.toLowerCase();
           const lowerName = String(layer.name || "").toLowerCase();
-          return lowerName.includes(String(userId).toLowerCase());
+          return lowerName === expectedName || lowerName === expectedLegacyName;
         });
 
         const withCoreSystemLayers = ensureCoreSystemLayers(
           ownUserLayersOnly,
-          userId,
+          effectiveUserId,
         );
         const sortedLayers = sortLayers(withCoreSystemLayers);
         const nextLayers = [...sortedLayers].sort((a, b) => {
@@ -1176,10 +1267,53 @@ const MapScreen = ({ navigation, route }) => {
       applyFallbackLayers,
       isNetworkBackoffActive,
       logErrorWithThrottle,
+      currentUser?.id,
       warnWithThrottle,
       userPostingLayerId,
     ],
   );
+
+  const refreshAccessibleLayers = useCallback(async () => {
+    if (refreshLayersInFlightRef.current) {
+      layerTrace("refreshAccessibleLayers:join-inflight");
+      return refreshLayersInFlightRef.current;
+    }
+
+    const startedAt = Date.now();
+    layerTrace("refreshAccessibleLayers:start", {
+      communityId: communityMapContext?.id || null,
+      currentUserId: currentUser?.id || null,
+    });
+
+    const run = (async () => {
+      const resolvedUserId = await resolveCurrentUserId();
+      const result = await fetchAccessibleLayers(
+        resolvedUserId,
+        communityMapContext?.id,
+      );
+      layerTrace("refreshAccessibleLayers:end", {
+        tookMs: Date.now() - startedAt,
+        resolvedUserId: resolvedUserId || null,
+        layerCount: layersRef.current?.length || 0,
+      });
+      return result;
+    })();
+
+    refreshLayersInFlightRef.current = run;
+    try {
+      return await run;
+    } finally {
+      if (refreshLayersInFlightRef.current === run) {
+        refreshLayersInFlightRef.current = null;
+      }
+    }
+  }, [
+    communityMapContext?.id,
+    currentUser?.id,
+    fetchAccessibleLayers,
+    layerTrace,
+    resolveCurrentUserId,
+  ]);
 
   useEffect(() => {
     const initialize = async () => {
@@ -1254,8 +1388,8 @@ const MapScreen = ({ navigation, route }) => {
   }, [route?.params?.communityMap]);
 
   useEffect(() => {
-    fetchAccessibleLayers(currentUser?.id, communityMapContext?.id);
-  }, [currentUser?.id, communityMapContext?.id, fetchAccessibleLayers]);
+    refreshAccessibleLayers();
+  }, [refreshAccessibleLayers]);
 
   useEffect(() => {
     const hasFallbackOnly =
@@ -1266,14 +1400,12 @@ const MapScreen = ({ navigation, route }) => {
 
     const timer = setInterval(() => {
       if (isNetworkBackoffActive()) return;
-      fetchAccessibleLayers(currentUser?.id, communityMapContext?.id);
+      refreshAccessibleLayers();
     }, 12000);
 
     return () => clearInterval(timer);
   }, [
-    communityMapContext?.id,
-    currentUser?.id,
-    fetchAccessibleLayers,
+    refreshAccessibleLayers,
     isNetworkBackoffActive,
     layers,
   ]);
@@ -1282,24 +1414,55 @@ const MapScreen = ({ navigation, route }) => {
     const loadFriendIds = async () => {
       if (!currentUser?.id) {
         setFriendUserIds([]);
+        layerTrace("friendIds:skip-no-current-user");
         return;
       }
       try {
-        const { data, error } = await supabase
+        const startedAt = Date.now();
+        let viewerId = currentUser.id;
+        let reader = supabase;
+
+        let session = await getActiveSession();
+        if (!session?.user?.id) {
+          try {
+            const {
+              data: { session: fallbackSession },
+            } = await supabase.auth.getSession();
+            session = fallbackSession || null;
+          } catch (_) {
+            session = null;
+          }
+        }
+        if (session?.user?.id) {
+          viewerId = session.user.id;
+          if (currentUser?.id !== session.user.id) {
+            setCurrentUser(session.user);
+          }
+        }
+        if (session?.access_token) {
+          reader = supabaseWithAccessToken(session.access_token);
+        }
+
+        const { data, error } = await reader
           .from("friends")
           .select("user_id,friend_id,status")
-          .or(`user_id.eq.${currentUser.id},friend_id.eq.${currentUser.id}`)
+          .or(`user_id.eq.${viewerId},friend_id.eq.${viewerId}`)
           .eq("status", "accepted");
         if (error) throw error;
 
         const ids = Array.from(
           new Set(
             (data || []).map((row) =>
-              row.user_id === currentUser.id ? row.friend_id : row.user_id,
+              row.user_id === viewerId ? row.friend_id : row.user_id,
             ),
           ),
         );
         setFriendUserIds(ids);
+        layerTrace("friendIds:loaded", {
+          viewerId,
+          count: ids.length,
+          tookMs: Date.now() - startedAt,
+        });
       } catch (error) {
         if (isTransientNetworkError(error)) {
           activateNetworkBackoff();
@@ -1310,6 +1473,7 @@ const MapScreen = ({ navigation, route }) => {
           return;
         }
         logErrorWithThrottle("friend-ids", "Error loading friend ids:", error);
+        layerTrace("friendIds:error", formatErrorMessage(error));
         setFriendUserIds([]);
       }
     };
@@ -1318,6 +1482,7 @@ const MapScreen = ({ navigation, route }) => {
   }, [
     activateNetworkBackoff,
     currentUser?.id,
+    layerTrace,
     logErrorWithThrottle,
     warnWithThrottle,
   ]);
@@ -1356,7 +1521,12 @@ const MapScreen = ({ navigation, route }) => {
           .from("layers")
           .update({ name: layerName })
           .eq("id", legacyRes.data.id);
-        if (renameError) throw renameError;
+        if (renameError) {
+          // If policy blocks rename, continue using the legacy row id.
+          console.warn("Legacy user layer rename skipped:", renameError);
+          setUserPostingLayerId(legacyRes.data.id);
+          return legacyRes.data.id;
+        }
         setUserPostingLayerId(legacyRes.data.id);
         return legacyRes.data.id;
       }
@@ -1403,19 +1573,18 @@ const MapScreen = ({ navigation, route }) => {
   useEffect(() => {
     if (!currentUser?.id) return;
     ensureUserPostingLayer().then(() => {
-      fetchAccessibleLayers(currentUser.id, communityMapContext?.id);
+      refreshAccessibleLayers();
     });
   }, [
     currentUser?.id,
-    communityMapContext?.id,
     ensureUserPostingLayer,
-    fetchAccessibleLayers,
+    refreshAccessibleLayers,
   ]);
 
   useFocusEffect(
     useCallback(() => {
-      fetchAccessibleLayers(currentUser?.id, communityMapContext?.id);
-    }, [currentUser?.id, communityMapContext?.id, fetchAccessibleLayers]),
+      refreshAccessibleLayers();
+    }, [refreshAccessibleLayers]),
   );
 
   const clearCommunityMapContext = () => {
@@ -1427,17 +1596,30 @@ const MapScreen = ({ navigation, route }) => {
 
   useEffect(() => {
     if (enabledPinLayerKeys.length === 0) {
-      setMapVisuals({ pins: [], clouds: [] });
-      restoreCachedPosts();
+      setMapVisuals((prev) =>
+        prev.pins.length === 0 && prev.clouds.length === 0
+          ? prev
+          : { pins: [], clouds: [] },
+      );
+      setAllLoadedPosts((prev) => (prev.length === 0 ? prev : []));
       return undefined;
     }
 
     loadPins(enabledPinLayerKeys);
     const unsubscribe = subscribeToPins(enabledPinLayerKeys);
     return unsubscribe;
-  }, [enabledPinLayerKeys, restoreCachedPosts]);
+  }, [enabledPinLayerKeys]);
 
   useEffect(() => {
+    if (enabledPinLayerKeys.length === 0) {
+      setMapVisuals((prev) =>
+        prev.pins.length === 0 && prev.clouds.length === 0
+          ? prev
+          : { pins: [], clouds: [] },
+      );
+      return undefined;
+    }
+
     const frame = requestAnimationFrame(() => {
       const { visiblePins, visibleClouds } = computeMapVisuals(
         allLoadedPosts,
@@ -1452,7 +1634,7 @@ const MapScreen = ({ navigation, route }) => {
       });
     });
     return () => cancelAnimationFrame(frame);
-  }, [allLoadedPosts, mapSize, region]);
+  }, [allLoadedPosts, enabledPinLayerKeys.length, mapSize, region]);
 
   const requestLocationPermission = async () => {
     try {
@@ -1479,8 +1661,22 @@ const MapScreen = ({ navigation, route }) => {
     if (!pinLayerKeys || pinLayerKeys.length === 0) {
       setMapVisuals({ pins: [], clouds: [] });
       setAllLoadedPosts([]);
+      layerTrace("loadPins:skip-empty-keys");
       return;
     }
+
+    const requestId = ++pinsLoadRequestRef.current;
+    const startedAt = Date.now();
+    layerTrace("loadPins:start", {
+      requestId,
+      pinLayerKeys,
+      enabledLayerIds: (layers || [])
+        .filter((layer) => layer.isEnabled)
+        .map((layer) => layer.id),
+      enabledLayerNames: (layers || [])
+        .filter((layer) => layer.isEnabled)
+        .map((layer) => layer.display_name || layer.name),
+    });
 
     try {
       const hasFallbackLayers =
@@ -1489,11 +1685,25 @@ const MapScreen = ({ navigation, route }) => {
         (layer) =>
           layer.isEnabled && getPinLayerKeyFromLayer(layer) === "friends",
       );
-      const enabledPinLayerSet = new Set(pinLayerKeys || []);
-      const queryLayerKeys = pinLayerKeys;
+      const enabledLayers = layers.filter((layer) => layer.isEnabled);
+      const enabledLayerIds = new Set(enabledLayers.map((layer) => layer.id));
+      const userPostingLayerEnabled = enabledLayers.some((layer) =>
+        isUserPostingLayer(layer),
+      );
+      const enabledSystemPinLayerSet = new Set(
+        enabledLayers
+          .filter((layer) => (layer.owner_type || "system") === "system")
+          .map((layer) => getPinLayerKeyFromLayer(layer)),
+      );
+      const onlyOwnUserLayerEnabled =
+        enabledLayers.length === 1 && isUserPostingLayer(enabledLayers[0]);
+      const queryLayerKeys = userPostingLayerEnabled
+        ? Array.from(new Set([...(pinLayerKeys || []), "public", "friends"]))
+        : pinLayerKeys;
       let readAccessToken = null;
       let readRefreshToken = null;
       let readActorUserId = currentUser?.id || null;
+      let pinsFromEdge = false;
       const session = await getActiveSession();
       if (session?.access_token) {
         readAccessToken = session.access_token;
@@ -1525,6 +1735,7 @@ const MapScreen = ({ navigation, route }) => {
         );
         if (!edgeResult.error) {
           data = Array.isArray(edgeResult?.data?.pins) ? edgeResult.data.pins : [];
+          pinsFromEdge = true;
         } else {
           const edgeErrorText = String(
             edgeResult?.error?.message || "",
@@ -1555,45 +1766,69 @@ const MapScreen = ({ navigation, route }) => {
       }
 
       if (error) throw error;
-      const enabledLayerIds = new Set(
-        layers.filter((layer) => layer.isEnabled).map((layer) => layer.id),
+      const activeViewerUserId = readActorUserId || currentUser?.id || null;
+      const friendUserIdSet = new Set(
+        (friendUserIds || []).map((id) => String(id || "")).filter(Boolean),
       );
       const filtered = (data || []).filter((pin) => {
-        const friendScopeUserIds = new Set([
-          ...(currentUser?.id ? [currentUser.id] : []),
-          ...friendUserIds,
-        ]);
+        const pinLayer = String(pin?.layer || "").toLowerCase();
+        const postLayerId = String(pin?.geometry?.layer_id || "");
+        const authorUserId = String(
+          pin?.geometry?.author_user_id || pin?.user_id || "",
+        );
+        const pinUserId = String(pin?.user_id || "");
+
+        // "My Posts" should always include your own authored posts, regardless
+        // of the post's target layer_id.
         if (
-          friendsLayerEnabled &&
-          pin?.layer === "friends" &&
-          friendScopeUserIds.has(pin.user_id)
+          userPostingLayerEnabled &&
+          activeViewerUserId &&
+          authorUserId === activeViewerUserId
         ) {
           return true;
         }
-        if (mapMode === "explore" && pin?.layer === "public") {
+
+        // Friends layer shows posts authored by accepted friends, regardless of
+        // whether those posts are in public/friends target layers.
+        if (friendsLayerEnabled && pinUserId && friendUserIdSet.has(pinUserId)) {
           return true;
         }
 
-        if (enabledPinLayerSet.has(pin?.layer)) {
-          return true;
+        // Prefer explicit layer-id mapping whenever present.
+        if (postLayerId && !hasFallbackLayers) {
+          return enabledLayerIds.has(postLayerId);
         }
 
-        const selectedLayerId = pin?.geometry?.layer_id;
-        if (selectedLayerId && !hasFallbackLayers) {
-          if (enabledLayerIds.has(selectedLayerId)) {
+        if (pinLayer === "friends") {
+          if (onlyOwnUserLayerEnabled) {
+            return pinUserId === activeViewerUserId;
+          }
+          if (!friendsLayerEnabled) return false;
+          if (!pinUserId) return false;
+
+          // Friends layer should show accepted friends only (not self).
+          if (friendUserIdSet.has(pinUserId)) return true;
+
+          // If friend list is still hydrating, trust edge-filtered payload as a
+          // temporary fallback while still excluding self rows.
+          if (
+            friendUserIdSet.size === 0 &&
+            pinsFromEdge &&
+            activeViewerUserId &&
+            pinUserId !== activeViewerUserId
+          ) {
             return true;
           }
+
           return false;
         }
 
-        if (
-          mapMode === "user" &&
-          pin?.layer === "public" &&
-          !hasFallbackLayers
-        ) {
-          return false;
+        if (pinLayer === "public") {
+          if (mapMode === "explore") return true;
+          return enabledSystemPinLayerSet.has("public");
         }
-        return true;
+
+        return enabledSystemPinLayerSet.has(pinLayer);
       });
       const deduped = [];
       const byGroup = new Map();
@@ -1665,7 +1900,19 @@ const MapScreen = ({ navigation, route }) => {
           };
         })
         .filter(hasValidCoordinate);
+      if (requestId !== pinsLoadRequestRef.current) {
+        layerTrace("loadPins:stale-discarded", { requestId });
+        return;
+      }
       setAllLoadedPosts(withLayerIcon);
+      layerTrace("loadPins:done", {
+        requestId,
+        fetchedCount: Array.isArray(data) ? data.length : 0,
+        filteredCount: filtered.length,
+        dedupedCount: deduped.length,
+        finalCount: withLayerIcon.length,
+        tookMs: Date.now() - startedAt,
+      });
       try {
         await AsyncStorage.setItem(
           MAP_POSTS_CACHE_KEY,
@@ -1682,9 +1929,19 @@ const MapScreen = ({ navigation, route }) => {
           "Network temporarily unavailable. Showing cached/offline data where possible.",
         );
         restoreCachedPosts();
+        layerTrace("loadPins:network-fallback", {
+          requestId,
+          tookMs: Date.now() - startedAt,
+          error: formatErrorMessage(error),
+        });
         return;
       }
       logErrorWithThrottle("pins-load", "Error loading pins:", error);
+      layerTrace("loadPins:error", {
+        requestId,
+        tookMs: Date.now() - startedAt,
+        error: formatErrorMessage(error),
+      });
       setMapVisuals({ pins: [], clouds: [] });
       setAllLoadedPosts([]);
     }
@@ -1804,9 +2061,29 @@ const MapScreen = ({ navigation, route }) => {
   };
 
   const handleToggleLayer = async (layerId, nextEnabled, options = {}) => {
+    if (isLayerTogglePendingRef.current) {
+      layerTrace("toggleLayer:ignored-while-pending", { layerId, nextEnabled });
+      return;
+    }
+    isLayerTogglePendingRef.current = true;
+    const startedAt = Date.now();
+    layerTrace("toggleLayer:start", { layerId, nextEnabled });
+    const targetLayer = layers.find((layer) => layer.id === layerId) || null;
+    if (targetLayer?.isForcedEnabled && !nextEnabled && communityMapContext?.id) {
+      Alert.alert(
+        "Layer Required",
+        "This layer is pinned while viewing this community map.",
+      );
+      isLayerTogglePendingRef.current = false;
+      layerTrace("toggleLayer:blocked-forced-layer", { layerId });
+      return;
+    }
+
     const userId = await resolveCurrentUserId();
     if (!userId) {
       Alert.alert("Sign In Required", "Please sign in to manage your layers.");
+      isLayerTogglePendingRef.current = false;
+      layerTrace("toggleLayer:blocked-no-user", { layerId });
       return;
     }
 
@@ -1824,7 +2101,17 @@ const MapScreen = ({ navigation, route }) => {
     setSelectedLayerId(nextSelected);
 
     try {
-      const session = await getActiveSession();
+      let session = await getActiveSession();
+      if (!session?.user?.id) {
+        try {
+          const {
+            data: { session: fallbackSession },
+          } = await supabase.auth.getSession();
+          session = fallbackSession || null;
+        } catch (_) {
+          session = null;
+        }
+      }
       const accessToken = session?.access_token || null;
       const refreshToken = session?.refresh_token || null;
       const actorUserId = session?.user?.id || userId;
@@ -1839,11 +2126,24 @@ const MapScreen = ({ navigation, route }) => {
       if (edgeResult.error) {
         throw edgeResult.error;
       }
+      layerTrace("toggleLayer:success", {
+        layerId,
+        nextEnabled,
+        tookMs: Date.now() - startedAt,
+      });
     } catch (error) {
       setLayers(previousLayers);
       setSelectedLayerId(previousSelectedLayerId);
       console.error("Error updating layer preference:", error);
+      layerTrace("toggleLayer:error", {
+        layerId,
+        nextEnabled,
+        tookMs: Date.now() - startedAt,
+        error: formatErrorMessage(error),
+      });
       Alert.alert("Error", "Failed to sync layer preference to Supabase.");
+    } finally {
+      isLayerTogglePendingRef.current = false;
     }
   };
 
@@ -2022,7 +2322,11 @@ const MapScreen = ({ navigation, route }) => {
       }
       const baseLayerIds =
         baseAudience === "public"
-          ? [resolvedPublicBaseLayerId]
+          ? [
+              resolvedPublicBaseLayerId,
+              // Product rule: public posts are also in friends.
+              resolvedFriendsBaseLayerId,
+            ].filter(Boolean)
           : [resolvedFriendsBaseLayerId];
       const extraLayerIds = requestedLayerIds.filter(
         (layerId) =>
@@ -2041,7 +2345,9 @@ const MapScreen = ({ navigation, route }) => {
           (targetLayerId === authorLayerId
             ? { kind: "user_posts", owner_type: "user", name: "My Posts" }
             : null);
-        const postPinLayerKey = getPinLayerKeyFromLayer(targetLayer || null);
+        const rawPinLayerKey = getPinLayerKeyFromLayer(targetLayer || null);
+        const postPinLayerKey =
+          rawPinLayerKey === "friends" ? "friends" : "public";
 
         let geometry;
         if (postVisibilityMode === "cloud_only") {
@@ -2557,6 +2863,7 @@ const MapScreen = ({ navigation, route }) => {
   };
 
   const handleRegionChangeComplete = useCallback((nextRegion) => {
+    const now = Date.now();
     const normalizedRegion = {
       latitude: Number(nextRegion?.latitude),
       longitude: Number(nextRegion?.longitude),
@@ -2575,14 +2882,48 @@ const MapScreen = ({ navigation, route }) => {
     }
 
     setRegion((prev) => {
+      if (!prev) {
+        lastRegionUpdateAtRef.current = now;
+        return normalizedRegion;
+      }
+
+      const latDiff = Math.abs((prev.latitude || 0) - normalizedRegion.latitude);
+      const lngDiff = Math.abs((prev.longitude || 0) - normalizedRegion.longitude);
+      const latDeltaDiff = Math.abs(
+        (prev.latitudeDelta || 0) - normalizedRegion.latitudeDelta,
+      );
+      const lngDeltaDiff = Math.abs(
+        (prev.longitudeDelta || 0) - normalizedRegion.longitudeDelta,
+      );
+
+      const sameEnough =
+        latDiff < REGION_LAT_LNG_EPS &&
+        lngDiff < REGION_LAT_LNG_EPS &&
+        latDeltaDiff < REGION_DELTA_EPS &&
+        lngDeltaDiff < REGION_DELTA_EPS;
+      if (sameEnough) {
+        return prev;
+      }
+
+      const updatedTooRecently =
+        now - lastRegionUpdateAtRef.current < REGION_UPDATE_MIN_INTERVAL_MS;
+      const smallMove =
+        latDiff < REGION_LAT_LNG_EPS * 4 &&
+        lngDiff < REGION_LAT_LNG_EPS * 4 &&
+        latDeltaDiff < REGION_DELTA_EPS * 4 &&
+        lngDeltaDiff < REGION_DELTA_EPS * 4;
+      if (updatedTooRecently && smallMove) {
+        return prev;
+      }
+
+      lastRegionUpdateAtRef.current = now;
+
       if (
         prev &&
-        Math.abs((prev.latitude || 0) - normalizedRegion.latitude) < 1e-8 &&
-        Math.abs((prev.longitude || 0) - normalizedRegion.longitude) < 1e-8 &&
-        Math.abs((prev.latitudeDelta || 0) - normalizedRegion.latitudeDelta) <
-          1e-8 &&
-        Math.abs((prev.longitudeDelta || 0) - normalizedRegion.longitudeDelta) <
-          1e-8
+        latDiff < REGION_LAT_LNG_EPS &&
+        lngDiff < REGION_LAT_LNG_EPS &&
+        latDeltaDiff < REGION_DELTA_EPS &&
+        lngDeltaDiff < REGION_DELTA_EPS
       ) {
         return prev;
       }
@@ -3440,9 +3781,7 @@ const MapScreen = ({ navigation, route }) => {
           onOpenLayerPosts={openLayerPosts}
           onToggleLayer={handleToggleLayer}
           onMoveLayer={handleMoveLayer}
-          onRefreshLayers={() =>
-            fetchAccessibleLayers(currentUser?.id, communityMapContext?.id)
-          }
+          onRefreshLayers={refreshAccessibleLayers}
           onPostSubmit={handlePostSubmit}
           userLocation={userLocation}
           onSearch={handleSearch}

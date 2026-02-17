@@ -4,7 +4,6 @@
 
 drop policy if exists "Users can delete their own comments" on public.pin_comments;
 drop policy if exists "Comment authors or pin owners can delete comments" on public.pin_comments;
-
 create policy "Comment authors or pin owners can delete comments"
   on public.pin_comments
   for delete
