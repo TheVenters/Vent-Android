@@ -11,7 +11,7 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   console.error('Missing Supabase environment variables. Check your .env file.');
 }
 
-const SUPABASE_CLIENT_VERSION = 'v2-no-lock';
+const SUPABASE_CLIENT_VERSION = 'v3-auth-fetch';
 const NETWORK_RETRY_ATTEMPTS = 3;
 const NETWORK_RETRY_BASE_DELAY_MS = 180;
 
@@ -139,10 +139,10 @@ export const supabaseWithAccessToken = (accessToken) => {
   }
 
   const client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    global: { fetch: resilientFetch },
+    // Use the built-in third-party auth hook so PostgREST/realtime always
+    // resolve the JWT from this callback instead of falling back to anon.
     accessToken: async () => accessToken,
-    global: {
-      fetch: resilientFetch,
-    },
   });
 
   globalThis.__VENT_SUPABASE_HELPER__ = { token: accessToken, client };
@@ -207,6 +207,7 @@ export const getActiveSession = async () => {
 
   const resolver = (async () => {
     let currentSession = null;
+    let serverValidated = false;
 
     try {
       const {
@@ -215,14 +216,15 @@ export const getActiveSession = async () => {
       currentSession = session || null;
       if (isSessionJwtUsable(session)) return session;
 
+      // Server-side check (clock-skew safety net) — but do NOT return the
+      // stale JWT early.  Always attempt a refresh first so PostgREST
+      // receives a token that is unambiguously valid.
       if (session?.access_token) {
         const {
           data: { user },
           error,
         } = await supabase.auth.getUser(session.access_token);
-        if (!error && user?.id && user.id === session?.user?.id) {
-          return session;
-        }
+        serverValidated = !error && !!user?.id && user.id === session?.user?.id;
       }
     } catch (error) {
       console.error('Error checking current auth session:', error);
@@ -230,7 +232,7 @@ export const getActiveSession = async () => {
 
     // No current session means user is signed out; do not attempt refresh.
     if (!currentSession?.refresh_token) {
-      return null;
+      return serverValidated ? currentSession : null;
     }
 
     try {
@@ -242,12 +244,14 @@ export const getActiveSession = async () => {
       if (isSessionJwtUsable(session)) return session;
     } catch (error) {
       if (isAuthSessionMissingError(error)) {
-        return null;
+        return serverValidated ? currentSession : null;
       }
       console.error('Error refreshing auth session:', error);
     }
 
-    return null;
+    // Last resort: if the server validated the old token it may still work
+    // for a short window even though isSessionJwtUsable flagged it.
+    return serverValidated ? currentSession : null;
   })();
 
   globalThis.__VENT_ACTIVE_SESSION_PROMISE__ = resolver;
@@ -534,6 +538,123 @@ export const removeFriendViaEdgeFunction = async (
   socialAction(
     'remove_friend',
     { friendshipId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const joinCommunityViaEdgeFunction = async (
+  communityId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'join_community',
+    { communityId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const sendDirectMessageViaEdgeFunction = async (
+  receiverId,
+  content,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'send_direct_message',
+    { receiverId, content, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const sendCommunityMessageViaEdgeFunction = async (
+  communityId,
+  content,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'send_community_message',
+    { communityId, content, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const leaveCommunityViaEdgeFunction = async (
+  communityId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'leave_community',
+    { communityId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const fetchMyCommunityMembershipsViaEdgeFunction = async (
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'my_community_memberships',
+    { actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const fetchMyLayerPrefsViaEdgeFunction = async (
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'my_layer_prefs',
+    { actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const fetchDirectMessagesViaEdgeFunction = async (
+  friendId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'list_direct_messages',
+    { friendId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const markDirectMessagesReadViaEdgeFunction = async (
+  friendId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'mark_direct_messages_read',
+    { friendId, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const fetchCommunityMessagesViaEdgeFunction = async (
+  communityId,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'list_community_messages',
+    { communityId, actorUserId },
     accessToken,
     refreshToken,
   );

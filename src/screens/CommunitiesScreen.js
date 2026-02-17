@@ -17,8 +17,13 @@ import { useFocusEffect } from "@react-navigation/native";
 import { SIZES } from "../constants/theme";
 import { useAppTheme } from "../context/ThemeContext";
 import {
+  fetchMyCommunityMembershipsViaEdgeFunction,
+  getActiveSession,
   supabase,
+  supabaseWithAccessToken,
   getCurrentUser,
+  joinCommunityViaEdgeFunction,
+  leaveCommunityViaEdgeFunction,
   setLayerPreferenceViaEdgeFunction,
 } from "../services/supabase";
 import { getPinLayerKeyFromLayer } from "../utils/layers";
@@ -150,6 +155,22 @@ const CommunitiesScreen = ({ navigation }) => {
     setLoading(true);
 
     try {
+      const membershipsPromise = userId
+        ? (async () => {
+            const session = await getActiveSession();
+            if (!session?.access_token) return { data: [], error: null };
+            const edgeResult = await fetchMyCommunityMembershipsViaEdgeFunction(
+              session.access_token,
+              session.refresh_token || null,
+              session.user?.id || userId,
+            );
+            if (edgeResult.error) {
+              return { data: [], error: edgeResult.error };
+            }
+            return { data: edgeResult.data?.memberships || [], error: null };
+          })()
+        : Promise.resolve({ data: [], error: null });
+
       const [communitiesRes, communityLayersRes, membershipsRes, profileRes] =
         await Promise.all([
           supabase
@@ -159,12 +180,7 @@ const CommunitiesScreen = ({ navigation }) => {
           supabase
             .from("community_layers")
             .select("community_id,layer_id,enabled"),
-          userId
-            ? supabase
-                .from("community_members")
-                .select("community_id,role,status")
-                .eq("user_id", userId)
-            : Promise.resolve({ data: [], error: null }),
+          membershipsPromise,
           userId
             ? supabase
                 .from("profiles")
@@ -176,7 +192,9 @@ const CommunitiesScreen = ({ navigation }) => {
 
       if (communitiesRes.error) throw communitiesRes.error;
       if (communityLayersRes.error) throw communityLayersRes.error;
-      if (membershipsRes.error) throw membershipsRes.error;
+      if (membershipsRes.error) {
+        console.warn("Error loading community memberships:", membershipsRes.error);
+      }
       if (profileRes.error) {
         console.warn("Error loading platform admin status:", profileRes.error);
       }
@@ -490,25 +508,41 @@ const CommunitiesScreen = ({ navigation }) => {
     }
 
     try {
-      if (existing?.status === "pending") {
-        const { error: deleteError } = await supabase
-          .from("community_members")
-          .delete()
-          .eq("user_id", currentUser.id)
-          .eq("community_id", communityId);
-        if (deleteError) throw deleteError;
+      const session = await getActiveSession();
+      if (!session?.access_token) {
+        Alert.alert("Session Expired", "Please sign in again.");
+        navigation.navigate("Account");
+        return;
       }
-
-      const { error } = await supabase.from("community_members").insert(
-        {
-          user_id: currentUser.id,
-          community_id: communityId,
-          role: "member",
-          status: "accepted",
-        },
+      const edgeResult = await joinCommunityViaEdgeFunction(
+        communityId,
+        session.access_token,
+        session.refresh_token || null,
+        session.user?.id || null,
       );
+      if (edgeResult.error) throw edgeResult.error;
 
-      if (error && error.code !== "23505") throw error;
+      setMembershipsByCommunity((prev) => ({
+        ...prev,
+        [communityId]: normalizeMembershipRow(
+          edgeResult.data?.membership || {
+            community_id: communityId,
+            role: "member",
+            status: "accepted",
+          },
+        ),
+      }));
+      if (selectedCommunityId === communityId) {
+        setDetailMembership(
+          normalizeMembershipRow(
+            edgeResult.data?.membership || {
+              community_id: communityId,
+              role: "member",
+              status: "accepted",
+            },
+          ),
+        );
+      }
 
       await loadCommunitySummary(currentUser.id);
       if (selectedCommunityId === communityId) {
@@ -543,12 +577,28 @@ const CommunitiesScreen = ({ navigation }) => {
           style: "destructive",
           onPress: async () => {
             try {
-              const { error } = await supabase
-                .from("community_members")
-                .delete()
-                .eq("user_id", currentUser.id)
-                .eq("community_id", communityId);
-              if (error) throw error;
+              const session = await getActiveSession();
+              if (!session?.access_token) {
+                Alert.alert("Session Expired", "Please sign in again.");
+                navigation.navigate("Account");
+                return;
+              }
+              const edgeResult = await leaveCommunityViaEdgeFunction(
+                communityId,
+                session.access_token,
+                session.refresh_token || null,
+                session.user?.id || null,
+              );
+              if (edgeResult.error) throw edgeResult.error;
+
+              setMembershipsByCommunity((prev) => {
+                const next = { ...prev };
+                delete next[communityId];
+                return next;
+              });
+              if (selectedCommunityId === communityId) {
+                setDetailMembership(null);
+              }
 
               await loadCommunitySummary(currentUser.id);
               if (selectedCommunityId === communityId) {
@@ -638,7 +688,15 @@ const CommunitiesScreen = ({ navigation }) => {
     }
 
     try {
-      const createRes = await supabase
+      const session = await getActiveSession();
+      const token = session?.access_token;
+      if (!token || session?.user?.id !== currentUser.id) {
+        Alert.alert("Session Expired", "Please sign in again to create a community.");
+        return;
+      }
+      const authed = supabaseWithAccessToken(token);
+
+      const createRes = await authed
         .from("communities")
         .insert({
           slug,
@@ -651,7 +709,7 @@ const CommunitiesScreen = ({ navigation }) => {
 
       if (createRes.error) throw createRes.error;
 
-      const membershipRes = await supabase.from("community_members").insert(
+      const membershipRes = await authed.from("community_members").insert(
         {
           user_id: currentUser.id,
           community_id: createRes.data.id,

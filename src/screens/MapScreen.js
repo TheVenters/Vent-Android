@@ -29,6 +29,8 @@ import {
   createPinsViaEdgeFunction,
   deletePinCommentViaEdgeFunction,
   deletePinViaEdgeFunction,
+  fetchMyCommunityMembershipsViaEdgeFunction,
+  fetchMyLayerPrefsViaEdgeFunction,
   fetchPinsViaEdgeFunction,
   getPinVoteSummaryViaEdgeFunction,
   listPinCommentsViaEdgeFunction,
@@ -928,24 +930,47 @@ const MapScreen = ({ navigation, route }) => {
         setLayersLoading(true);
 
         try {
+        const session = userId ? await getActiveSession() : null;
+        const accessToken = session?.access_token || null;
+        const refreshToken = session?.refresh_token || null;
+        const actorUserId = session?.user?.id || userId || null;
+
+        const membershipsPromise = userId && accessToken
+          ? (async () => {
+              const edgeResult = await fetchMyCommunityMembershipsViaEdgeFunction(
+                accessToken,
+                refreshToken,
+                actorUserId,
+              );
+              return {
+                data: edgeResult.data?.memberships || [],
+                error: edgeResult.error || null,
+              };
+            })()
+          : Promise.resolve({ data: [], error: null });
+
+        const prefsPromise = userId && accessToken
+          ? (async () => {
+              const edgeResult = await fetchMyLayerPrefsViaEdgeFunction(
+                accessToken,
+                refreshToken,
+                actorUserId,
+              );
+              return {
+                data: edgeResult.data?.prefs || [],
+                error: edgeResult.error || null,
+              };
+            })()
+          : Promise.resolve({ data: [], error: null });
+
         const [allLayersRes, membershipsRes, prefsRes] = await Promise.all([
           supabase
             .from("layers")
             .select(
               "id,name,kind,owner_type,owner_id,is_public,enabled,created_at",
             ),
-          userId
-            ? supabase
-                .from("community_members")
-                .select("community_id,role,status")
-                .eq("user_id", userId)
-            : Promise.resolve({ data: [], error: null }),
-          userId
-            ? supabase
-                .from("user_layer_prefs")
-                .select("layer_id,hidden,sort_order")
-                .eq("user_id", userId)
-            : Promise.resolve({ data: [], error: null }),
+          membershipsPromise,
+          prefsPromise,
         ]);
 
         if (allLayersRes.error) throw allLayersRes.error;
