@@ -99,6 +99,270 @@ const MAP_POSTS_CACHE_KEY = "map_posts_cache_v1";
 const PIN_COMMENT_MAX_LENGTH = 500;
 const LAYER_TRACE_ENABLED = false;
 const COMMUNITY_MAP_TRACE_ENABLED = false;
+const DRAW_POINT_MIN_DISTANCE_METERS = 6;
+const PLANE_EDGE_INSERT_THRESHOLD_METERS = 24;
+const PLANE_CORNER_MERGE_THRESHOLD_METERS = 14;
+const PLANE_CORNER_MERGE_HOLD_MS = 550;
+const PLANE_RECT_DRAG_END_DEBOUNCE_MS = 140;
+
+const toRadians = (degrees) => (degrees * Math.PI) / 180;
+
+const haversineMeters = (a, b) => {
+  const earthRadiusMeters = 6371000;
+  const deltaLat = toRadians(b.latitude - a.latitude);
+  const deltaLng = toRadians(b.longitude - a.longitude);
+  const lat1 = toRadians(a.latitude);
+  const lat2 = toRadians(b.latitude);
+
+  const x =
+    Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+    Math.sin(deltaLng / 2) *
+      Math.sin(deltaLng / 2) *
+      Math.cos(lat1) *
+      Math.cos(lat2);
+  const y = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+  return earthRadiusMeters * y;
+};
+
+const buildRectangleFromDiagonal = (anchor, target) => {
+  if (
+    !Number.isFinite(anchor?.latitude) ||
+    !Number.isFinite(anchor?.longitude) ||
+    !Number.isFinite(target?.latitude) ||
+    !Number.isFinite(target?.longitude)
+  ) {
+    return [];
+  }
+
+  const minLat = Math.min(anchor.latitude, target.latitude);
+  const maxLat = Math.max(anchor.latitude, target.latitude);
+  const minLng = Math.min(anchor.longitude, target.longitude);
+  const maxLng = Math.max(anchor.longitude, target.longitude);
+
+  return [
+    { latitude: maxLat, longitude: minLng },
+    { latitude: maxLat, longitude: maxLng },
+    { latitude: minLat, longitude: maxLng },
+    { latitude: minLat, longitude: minLng },
+  ];
+};
+
+const distancePointToSegmentMeters = (point, start, end) => {
+  if (
+    !point ||
+    !start ||
+    !end ||
+    !Number.isFinite(point.latitude) ||
+    !Number.isFinite(point.longitude) ||
+    !Number.isFinite(start.latitude) ||
+    !Number.isFinite(start.longitude) ||
+    !Number.isFinite(end.latitude) ||
+    !Number.isFinite(end.longitude)
+  ) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const originLat = (point.latitude + start.latitude + end.latitude) / 3;
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = metersPerDegLat * Math.cos(toRadians(originLat));
+  if (!Number.isFinite(metersPerDegLng) || Math.abs(metersPerDegLng) < 1e-8) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const px = point.longitude * metersPerDegLng;
+  const py = point.latitude * metersPerDegLat;
+  const ax = start.longitude * metersPerDegLng;
+  const ay = start.latitude * metersPerDegLat;
+  const bx = end.longitude * metersPerDegLng;
+  const by = end.latitude * metersPerDegLat;
+
+  const abx = bx - ax;
+  const aby = by - ay;
+  const abLenSq = abx * abx + aby * aby;
+  if (!Number.isFinite(abLenSq) || abLenSq <= 0) {
+    return Math.hypot(px - ax, py - ay);
+  }
+
+  const apx = px - ax;
+  const apy = py - ay;
+  const t = Math.max(0, Math.min(1, (apx * abx + apy * aby) / abLenSq));
+  const closestX = ax + abx * t;
+  const closestY = ay + aby * t;
+  return Math.hypot(px - closestX, py - closestY);
+};
+
+const findNearestPlaneEdgeIndex = (coords, point, thresholdMeters) => {
+  if (!Array.isArray(coords) || coords.length < 2) return -1;
+
+  let bestIndex = -1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (let i = 0; i < coords.length; i += 1) {
+    const start = coords[i];
+    const end = coords[(i + 1) % coords.length];
+    const distance = distancePointToSegmentMeters(point, start, end);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = i;
+    }
+  }
+
+  return bestDistance <= thresholdMeters ? bestIndex : -1;
+};
+
+const hasValidCoordinate = (post) =>
+  typeof post?.lat === "number" &&
+  Number.isFinite(post.lat) &&
+  typeof post?.lng === "number" &&
+  Number.isFinite(post.lng);
+
+const normalizeLongitude = (longitude) => {
+  if (!Number.isFinite(longitude)) return longitude;
+  let next = longitude;
+  while (next > 180) next -= 360;
+  while (next < -180) next += 360;
+  return next;
+};
+
+const isLongitudeWithinBounds = (longitude, minLng, maxLng) => {
+  if (minLng <= maxLng) {
+    return longitude >= minLng && longitude <= maxLng;
+  }
+  return longitude >= minLng || longitude <= maxLng;
+};
+
+const isCoordinateWithinRegionBounds = (
+  coordinate,
+  mapRegion,
+  paddingRatio = 0,
+) => {
+  if (
+    !Number.isFinite(coordinate?.latitude) ||
+    !Number.isFinite(coordinate?.longitude)
+  ) {
+    return false;
+  }
+
+  const centerLat = Number(mapRegion?.latitude);
+  const centerLng = Number(mapRegion?.longitude);
+  const latitudeDelta = Number(mapRegion?.latitudeDelta);
+  const longitudeDelta = Number(mapRegion?.longitudeDelta);
+
+  if (
+    !Number.isFinite(centerLat) ||
+    !Number.isFinite(centerLng) ||
+    !Number.isFinite(latitudeDelta) ||
+    !Number.isFinite(longitudeDelta) ||
+    latitudeDelta <= 0 ||
+    longitudeDelta <= 0
+  ) {
+    return true;
+  }
+
+  const latPadding = latitudeDelta * paddingRatio;
+  const lngPadding = longitudeDelta * paddingRatio;
+
+  const minLat = centerLat - latitudeDelta / 2 - latPadding;
+  const maxLat = centerLat + latitudeDelta / 2 + latPadding;
+  if (coordinate.latitude < minLat || coordinate.latitude > maxLat) {
+    return false;
+  }
+
+  if (longitudeDelta + lngPadding * 2 >= 360) {
+    return true;
+  }
+
+  const longitude = normalizeLongitude(coordinate.longitude);
+  const minLng = normalizeLongitude(centerLng - longitudeDelta / 2 - lngPadding);
+  const maxLng = normalizeLongitude(centerLng + longitudeDelta / 2 + lngPadding);
+  return isLongitudeWithinBounds(longitude, minLng, maxLng);
+};
+
+const toScreenPoint = (coordinate, mapRegion, mapSize) => {
+  const width = Number(mapSize?.width || 0);
+  const height = Number(mapSize?.height || 0);
+  const latitudeDelta = Number(mapRegion?.latitudeDelta || 0);
+  const longitudeDelta = Number(mapRegion?.longitudeDelta || 0);
+  const centerLat = Number(mapRegion?.latitude || 0);
+  const centerLng = Number(mapRegion?.longitude || 0);
+
+  if (
+    width <= 0 ||
+    height <= 0 ||
+    latitudeDelta <= 0 ||
+    longitudeDelta <= 0 ||
+    !Number.isFinite(centerLat) ||
+    !Number.isFinite(centerLng)
+  ) {
+    return null;
+  }
+
+  const minLat = centerLat - latitudeDelta / 2;
+  const maxLat = centerLat + latitudeDelta / 2;
+  const minLng = centerLng - longitudeDelta / 2;
+
+  return {
+    x: ((coordinate.longitude - minLng) / longitudeDelta) * width,
+    y: ((maxLat - coordinate.latitude) / latitudeDelta) * height,
+  };
+};
+
+const isScreenPointWithinClusterViewport = (
+  screenPoint,
+  mapSize,
+  paddingPx = CLUSTER_VIEWPORT_PADDING_PX,
+) => {
+  if (!screenPoint) return false;
+  const width = Number(mapSize?.width || 0);
+  const height = Number(mapSize?.height || 0);
+  if (width <= 0 || height <= 0) return false;
+
+  return (
+    screenPoint.x >= -paddingPx &&
+    screenPoint.x <= width + paddingPx &&
+    screenPoint.y >= -paddingPx &&
+    screenPoint.y <= height + paddingPx
+  );
+};
+
+const isCloudOnlyPost = (pin) => pin?.geometry?.visibility_mode === "cloud_only";
+const isFiniteLngLatPair = (value) =>
+  Array.isArray(value) &&
+  value.length >= 2 &&
+  Number.isFinite(Number(value[0])) &&
+  Number.isFinite(Number(value[1]));
+const toMapCoordinate = (value) => ({
+  longitude: Number(value[0]),
+  latitude: Number(value[1]),
+});
+const getPersistedShapeGeometry = (pin) => {
+  const geometry = pin?.geometry;
+  if (!geometry || typeof geometry !== "object") return null;
+  const type = String(geometry.type || "").toLowerCase();
+  const coordinates = geometry.coordinates;
+
+  if (type === "linestring" && Array.isArray(coordinates)) {
+    const parsed = coordinates
+      .filter(isFiniteLngLatPair)
+      .map(toMapCoordinate);
+    if (parsed.length >= 2) {
+      return { kind: "line", coordinates: parsed };
+    }
+    return null;
+  }
+
+  if (type === "polygon" && Array.isArray(coordinates) && Array.isArray(coordinates[0])) {
+    const outerRing = coordinates[0];
+    const parsed = outerRing
+      .filter(isFiniteLngLatPair)
+      .map(toMapCoordinate);
+    if (parsed.length >= 3) {
+      return { kind: "plane", coordinates: parsed };
+    }
+  }
+
+  return null;
+};
 const isRlsPolicyError = (error) =>
   error?.code === "42501" ||
   String(error?.message || "")
@@ -253,6 +517,32 @@ const MapScreen = ({ navigation, route }) => {
   const [mapSize, setMapSize] = useState(DEFAULT_MAP_SIZE);
   const pins = mapVisuals.pins;
   const clouds = mapVisuals.clouds;
+  const persistedShapes = useMemo(
+    () =>
+      allLoadedPosts
+        .filter((pin) => !isCloudOnlyPost(pin))
+        .map((pin) => {
+          const shape = getPersistedShapeGeometry(pin);
+          if (!shape) return null;
+          if (
+            hasValidCoordinate(pin) &&
+            !isCoordinateWithinRegionBounds(
+              { latitude: pin.lat, longitude: pin.lng },
+              region,
+              PIN_VIEWPORT_PADDING_RATIO,
+            )
+          ) {
+            return null;
+          }
+          return {
+            id: String(pin.id || ""),
+            kind: shape.kind,
+            coordinates: shape.coordinates,
+          };
+        })
+        .filter((shape) => shape && shape.id),
+    [allLoadedPosts, region],
+  );
 
   const mapRef = useRef(null);
   const selectedPinIdRef = useRef(null);
@@ -277,6 +567,10 @@ const MapScreen = ({ navigation, route }) => {
   useEffect(() => {
     allLoadedPostsRef.current = allLoadedPosts;
   }, [allLoadedPosts]);
+  const planeRectAnchorRef = useRef(null);
+  const planeRectStopTimerRef = useRef(null);
+  const planeMergeHoldTimerRef = useRef(null);
+  const planeMergeTargetRef = useRef(null);
 
   useEffect(() => {
     selectedPinIdRef.current = selectedPin?.id || null;
@@ -290,6 +584,19 @@ const MapScreen = ({ navigation, route }) => {
       }
     };
   }, []);
+  useEffect(
+    () => () => {
+      if (planeRectStopTimerRef.current) {
+        clearTimeout(planeRectStopTimerRef.current);
+        planeRectStopTimerRef.current = null;
+      }
+      if (planeMergeHoldTimerRef.current) {
+        clearTimeout(planeMergeHoldTimerRef.current);
+        planeMergeHoldTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   const shouldThrottleError = useCallback((key, cooldownMs) => {
     const now = Date.now();
@@ -1660,6 +1967,17 @@ useEffect(() => {
     },
     [handleRefreshLayersAndPins, resolveCurrentUserId],
   );
+  const clearPlaneInteractionTimers = () => {
+    if (planeRectStopTimerRef.current) {
+      clearTimeout(planeRectStopTimerRef.current);
+      planeRectStopTimerRef.current = null;
+    }
+    if (planeMergeHoldTimerRef.current) {
+      clearTimeout(planeMergeHoldTimerRef.current);
+      planeMergeHoldTimerRef.current = null;
+    }
+    planeMergeTargetRef.current = null;
+  };
 
   const handleMapPress = (event) => {
     if (isPickingPostLocation && pendingPostData) {
@@ -1671,22 +1989,176 @@ useEffect(() => {
       setPendingPostData(nextPostData);
       setIsPickingPostLocation(false);
       handlePostSubmit(nextPostData);
-      return;
-    }
-
-    if (isDrawingMode) {
-      const { latitude, longitude } = event.nativeEvent.coordinate;
-      setDrawingCoords((prev) => [...prev, { latitude, longitude }]);
     }
   };
 
+  const handleMapLongPress = (event) => {
+    if (!isDrawingMode || drawingType !== GEOMETRY_TYPES.PLANE) return;
+    const { latitude, longitude } = event.nativeEvent.coordinate || {};
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+    const nextCoord = { latitude, longitude };
+
+    if (Array.isArray(drawingCoords) && drawingCoords.length >= 3) {
+      const edgeIndex = findNearestPlaneEdgeIndex(
+        drawingCoords,
+        nextCoord,
+        PLANE_EDGE_INSERT_THRESHOLD_METERS,
+      );
+      if (edgeIndex >= 0) {
+        setDrawingCoords((prev) => {
+          if (!Array.isArray(prev) || prev.length < 3) return prev;
+          const updated = [...prev];
+          updated.splice(edgeIndex + 1, 0, nextCoord);
+          return updated;
+        });
+      }
+      return;
+    }
+
+    planeRectAnchorRef.current = nextCoord;
+    clearPlaneInteractionTimers();
+    setDrawingCoords(buildRectangleFromDiagonal(nextCoord, nextCoord));
+  };
+
+  const handleMapPanDrag = (event) => {
+    if (!isDrawingMode) return;
+    const { latitude, longitude } = event.nativeEvent.coordinate || {};
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+    const nextCoord = { latitude, longitude };
+
+    if (drawingType === GEOMETRY_TYPES.LINE) {
+      setDrawingCoords((prev) => {
+        if (!Array.isArray(prev) || prev.length === 0) return [nextCoord];
+        const lastCoord = prev[prev.length - 1];
+        const distanceMeters = haversineMeters(lastCoord, nextCoord);
+        if (!Number.isFinite(distanceMeters)) return prev;
+        if (distanceMeters < DRAW_POINT_MIN_DISTANCE_METERS) return prev;
+        return [...prev, nextCoord];
+      });
+      return;
+    }
+
+    if (drawingType === GEOMETRY_TYPES.PLANE && planeRectAnchorRef.current) {
+      const rectangle = buildRectangleFromDiagonal(
+        planeRectAnchorRef.current,
+        nextCoord,
+      );
+      if (rectangle.length >= 4) {
+        setDrawingCoords(rectangle);
+      }
+      if (planeRectStopTimerRef.current) {
+        clearTimeout(planeRectStopTimerRef.current);
+      }
+      planeRectStopTimerRef.current = setTimeout(() => {
+        planeRectAnchorRef.current = null;
+        planeRectStopTimerRef.current = null;
+      }, PLANE_RECT_DRAG_END_DEBOUNCE_MS);
+    }
+  };
+
+  const handlePlaneCornerDragStart = () => {
+    if (planeMergeHoldTimerRef.current) {
+      clearTimeout(planeMergeHoldTimerRef.current);
+      planeMergeHoldTimerRef.current = null;
+    }
+    planeMergeTargetRef.current = null;
+  };
+
+  const handlePlaneCornerDrag = (index, event) => {
+    const { latitude, longitude } = event?.nativeEvent?.coordinate || {};
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+    const draggedCoord = { latitude, longitude };
+
+    setDrawingCoords((prev) => {
+      if (!Array.isArray(prev) || prev.length < 3) return prev;
+      if (index < 0 || index >= prev.length) return prev;
+      const updated = [...prev];
+      updated[index] = draggedCoord;
+
+      if (updated.length <= 3) {
+        if (planeMergeHoldTimerRef.current) {
+          clearTimeout(planeMergeHoldTimerRef.current);
+          planeMergeHoldTimerRef.current = null;
+        }
+        planeMergeTargetRef.current = null;
+        return updated;
+      }
+
+      let nearestIndex = -1;
+      let nearestDistance = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < updated.length; i += 1) {
+        if (i === index) continue;
+        const distance = haversineMeters(draggedCoord, updated[i]);
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearestIndex = i;
+        }
+      }
+
+      const canMerge =
+        nearestIndex >= 0 &&
+        nearestDistance <= PLANE_CORNER_MERGE_THRESHOLD_METERS &&
+        updated.length > 3;
+
+      if (!canMerge) {
+        if (planeMergeHoldTimerRef.current) {
+          clearTimeout(planeMergeHoldTimerRef.current);
+          planeMergeHoldTimerRef.current = null;
+        }
+        planeMergeTargetRef.current = null;
+        return updated;
+      }
+
+      if (planeMergeTargetRef.current !== nearestIndex) {
+        if (planeMergeHoldTimerRef.current) {
+          clearTimeout(planeMergeHoldTimerRef.current);
+        }
+        planeMergeTargetRef.current = nearestIndex;
+        planeMergeHoldTimerRef.current = setTimeout(() => {
+          setDrawingCoords((current) => {
+            if (!Array.isArray(current) || current.length <= 3) return current;
+            if (index < 0 || index >= current.length) return current;
+            const withoutDragged = current.filter((_, i) => i !== index);
+            return withoutDragged.length >= 3 ? withoutDragged : current;
+          });
+          planeMergeHoldTimerRef.current = null;
+          planeMergeTargetRef.current = null;
+        }, PLANE_CORNER_MERGE_HOLD_MS);
+      }
+
+      return updated;
+    });
+  };
+
+  const handlePlaneCornerDragEnd = (index, event) => {
+    const { latitude, longitude } = event?.nativeEvent?.coordinate || {};
+    if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+      setDrawingCoords((prev) => {
+        if (!Array.isArray(prev) || index < 0 || index >= prev.length) return prev;
+        const updated = [...prev];
+        updated[index] = { latitude, longitude };
+        return updated;
+      });
+    }
+
+    if (planeMergeHoldTimerRef.current) {
+      clearTimeout(planeMergeHoldTimerRef.current);
+      planeMergeHoldTimerRef.current = null;
+    }
+    planeMergeTargetRef.current = null;
+  };
+
   const handleStartDrawing = (geometryType) => {
+    clearPlaneInteractionTimers();
+    planeRectAnchorRef.current = null;
     setIsDrawingMode(true);
     setDrawingType(geometryType);
     setDrawingCoords([]);
   };
 
   const handleFinishDrawing = () => {
+    clearPlaneInteractionTimers();
+    planeRectAnchorRef.current = null;
     setIsDrawingMode(false);
   };
 
@@ -1722,6 +2194,25 @@ useEffect(() => {
     ) {
       setPendingPostData(postData);
       handleStartDrawing(postData.geometryType);
+      return;
+    }
+    if (
+      postData.postVisibilityMode !== "cloud_only" &&
+      postData.geometryType === GEOMETRY_TYPES.LINE &&
+      drawingCoords.length < 2
+    ) {
+      Alert.alert("Add More Path Points", "Drag to draw at least a short path.");
+      return;
+    }
+    if (
+      postData.postVisibilityMode !== "cloud_only" &&
+      postData.geometryType === GEOMETRY_TYPES.PLANE &&
+      drawingCoords.length < 3
+    ) {
+      Alert.alert(
+        "Add More Plane Points",
+        "Create a rectangle first, then ensure at least 3 corner pins remain.",
+      );
       return;
     }
 
@@ -1950,7 +2441,32 @@ useEffect(() => {
       }
 
       loadPins(enabledPinLayerKeys);
-      if (postData.geometryType === GEOMETRY_TYPES.POINT) {
+      const layerIconById = new Map(
+        layers.map((layer) => [layer.id, layer.layer_icon || null]),
+      );
+      const optimisticCreatedAt = new Date().toISOString();
+      const optimisticRows = insertRows.map((row, index) => ({
+        ...row,
+        id: `temp-${crossPostGroupId}-${index}`,
+        created_at: optimisticCreatedAt,
+        updated_at: optimisticCreatedAt,
+        author_avatar_url: activeUser?.user_metadata?.avatar_url || null,
+        layer_emoji: row?.geometry?.layer_id
+          ? layerIconById.get(row.geometry.layer_id) || null
+          : null,
+      }));
+      setAllLoadedPosts((prev) => {
+        const previous = Array.isArray(prev) ? prev : [];
+        return [...optimisticRows, ...previous];
+      });
+
+      if (Array.isArray(enabledPinLayerKeys) && enabledPinLayerKeys.length > 0) {
+        loadPins(enabledPinLayerKeys);
+      }
+      if (
+        postVisibilityMode !== "cloud_only" &&
+        postData.geometryType === GEOMETRY_TYPES.POINT
+      ) {
         const createdCoordinate = {
           latitude: storedLat,
           longitude: storedLng,
@@ -2035,6 +2551,13 @@ useEffect(() => {
     { preferCache = true, suppressState = false, backgroundRefresh = true } = {},
   ) => {
     if (!pinId) return [];
+    if (!isUuid(pinId)) {
+      if (!suppressState && selectedPinIdRef.current === pinId) {
+        setPinComments([]);
+        setPinCommentsLoading(false);
+      }
+      return [];
+    }
 
     const cached = pinCommentsCacheRef.current.get(pinId);
     if (cached && preferCache && !suppressState) {
@@ -2167,6 +2690,13 @@ useEffect(() => {
     { preferCache = true, suppressState = false, backgroundRefresh = true } = {},
   ) => {
     if (!pinId) return null;
+    if (!isUuid(pinId)) {
+      const emptySummary = { upvotes: 0, downvotes: 0, userVote: 0 };
+      if (!suppressState && selectedPinIdRef.current === pinId) {
+        setPinVoteSummary(emptySummary);
+      }
+      return emptySummary;
+    }
 
     const cached = pinVoteSummaryCacheRef.current.get(pinId);
     if (cached && preferCache && !suppressState) {
@@ -2296,6 +2826,7 @@ useEffect(() => {
         .filter(
           (pinId) =>
             pinId &&
+            isUuid(pinId) &&
             !pinVoteSummaryCacheRef.current.has(pinId) &&
             !pinVoteRequestRef.current.has(pinId),
         );
@@ -2426,6 +2957,13 @@ useEffect(() => {
 
   const handleVotePin = async (vote) => {
     if (!selectedPin) return;
+    if (!isUuid(selectedPin.id)) {
+      Alert.alert(
+        "Please wait",
+        "This post is still syncing. Voting will be available in a moment.",
+      );
+      return;
+    }
 
     const session = await getActiveSession();
     const userId = session?.user?.id || null;
@@ -2517,6 +3055,13 @@ useEffect(() => {
     if (!selectedPin?.id) return false;
 
     const pinId = selectedPin.id;
+    if (!isUuid(pinId)) {
+      Alert.alert(
+        "Please wait",
+        "This post is still syncing. Commenting will be available in a moment.",
+      );
+      return false;
+    }
     const trimmedContent = String(content || "").trim();
     const parentCommentIdRaw = String(options?.parentCommentId || "").trim();
     const parentCommentId = parentCommentIdRaw
@@ -3109,11 +3654,21 @@ useEffect(() => {
         onRegionChangeComplete={handleRegionChangeComplete}
         mapType={mapType}
         customMapStyle={isDark ? MAP_DARK_STYLE : []}
-        onPress={
-          isDrawingMode || isPickingPostLocation ? handleMapPress : undefined
+        onPress={isPickingPostLocation ? handleMapPress : undefined}
+        onLongPress={
+          isDrawingMode && drawingType === GEOMETRY_TYPES.PLANE
+            ? handleMapLongPress
+            : undefined
+        }
+        onPanDrag={
+          isDrawingMode &&
+          (drawingType === GEOMETRY_TYPES.LINE ||
+            drawingType === GEOMETRY_TYPES.PLANE)
+            ? handleMapPanDrag
+            : undefined
         }
         zoomEnabled
-        scrollEnabled
+        scrollEnabled={!isDrawingMode}
         scrollDuringRotateOrZoomEnabled={true}
         rotateEnabled={false}
         pitchEnabled={false}
@@ -3121,6 +3676,24 @@ useEffect(() => {
         showsUserLocation
         showsMyLocationButton={false}
       >
+        {persistedShapes.map((shape) =>
+          shape.kind === "line" ? (
+            <Polyline
+              key={`line-${shape.id}`}
+              coordinates={shape.coordinates}
+              strokeColor={COLORS.primary}
+              strokeWidth={3}
+            />
+          ) : (
+            <Polygon
+              key={`plane-${shape.id}`}
+              coordinates={shape.coordinates}
+              strokeColor={COLORS.primary}
+              fillColor="rgba(102, 126, 234, 0.2)"
+              strokeWidth={2}
+            />
+          ),
+        )}
         {pins.map((pin) => (
           <CustomMarker
             key={pin.id}
@@ -3177,6 +3750,22 @@ useEffect(() => {
               strokeWidth={2}
             />
           )}
+        {isDrawingMode &&
+          drawingType === GEOMETRY_TYPES.PLANE &&
+          drawingCoords.length >= 3 &&
+          drawingCoords.map((coord, index) => (
+            <Marker
+              key={`plane-corner-${index}`}
+              coordinate={coord}
+              draggable
+              onDragStart={handlePlaneCornerDragStart}
+              onDrag={(event) => handlePlaneCornerDrag(index, event)}
+              onDragEnd={(event) => handlePlaneCornerDragEnd(index, event)}
+              tracksViewChanges={false}
+            >
+              <View style={styles.planeCornerPin} />
+            </Marker>
+          ))}
       </MapView>
 
       {communityMapContext?.id && (
@@ -3199,7 +3788,9 @@ useEffect(() => {
       {isDrawingMode && (
         <View style={styles.drawingBar}>
           <Text style={styles.drawingBarText}>
-            Tap map to add points ({drawingCoords.length} placed)
+            {drawingType === GEOMETRY_TYPES.LINE
+              ? `Drag with one finger to draw (${drawingCoords.length} points). Use two fingers to move map.`
+              : `Long-press then drag to draw rectangle. Drag corner pins to adjust, long-press an edge to add a pin, hold one pin over another to remove. (${drawingCoords.length} pins)`}
           </Text>
           <TouchableOpacity
             style={styles.drawingDoneBtn}
@@ -3523,6 +4114,14 @@ const createStyles = (palette) =>
       color: palette.onPrimary,
       fontSize: 14,
       fontWeight: "700",
+    },
+    planeCornerPin: {
+      width: 16,
+      height: 16,
+      borderRadius: 8,
+      backgroundColor: palette.primary,
+      borderWidth: 2,
+      borderColor: palette.surface,
     },
     cloudCountBadge: {
       minWidth: 36,
