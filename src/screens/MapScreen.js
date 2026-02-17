@@ -755,6 +755,7 @@ const MapScreen = ({ navigation, route }) => {
   const markerRefsByIdRef = useRef(new Map());
   const arrowCalloutTimerRef = useRef(null);
   const lastArrowCalloutPinIdRef = useRef(null);
+  const initialBackgroundLayerRefreshDoneRef = useRef(false);
 
   useEffect(() => {
     selectedPinIdRef.current = selectedPin?.id || null;
@@ -888,6 +889,10 @@ const MapScreen = ({ navigation, route }) => {
     null;
 
   const enabledPinLayerKeys = useMemo(() => {
+    const myPostsEnabled = layers.some(
+      (layer) => layer.isEnabled && isUserPostingLayer(layer),
+    );
+
     if (mapMode === "explore") {
       const keys = Array.from(
         new Set([
@@ -895,6 +900,9 @@ const MapScreen = ({ navigation, route }) => {
           ...layers
             .filter((layer) => layer.isEnabled && !isUserPostingLayer(layer))
             .map((layer) => getPinLayerKeyFromLayer(layer)),
+          ...(currentUser?.id && myPostsEnabled
+            ? ["friends", "private"]
+            : []),
         ]),
       );
       return keys.length > 0 ? keys : ["public"];
@@ -908,9 +916,13 @@ const MapScreen = ({ navigation, route }) => {
       ),
     );
     if (currentUser?.id) {
-      keys.push("private");
+      if (myPostsEnabled) {
+        keys.push("public", "friends", "private");
+      } else {
+        keys.push("private");
+      }
     }
-    return keys;
+    return Array.from(new Set(keys));
   }, [currentUser?.id, layers, mapMode]);
 
   const fetchAccessibleLayers = useCallback(
@@ -930,12 +942,29 @@ const MapScreen = ({ navigation, route }) => {
         setLayersLoading(true);
 
         try {
-        const session = userId ? await getActiveSession() : null;
+        const session = await getActiveSession();
+        const resolvedUserId = userId || session?.user?.id || null;
+        const resolvedUsername =
+          String(
+            session?.user?.user_metadata?.username ||
+              session?.user?.user_metadata?.display_name ||
+              currentUser?.user_metadata?.username ||
+              currentUser?.user_metadata?.display_name ||
+              "",
+          )
+            .trim()
+            .toLowerCase() || null;
+        const expectedUserLayerName = session?.user
+          ? makeUserPostingLayerName(session.user).toLowerCase()
+          : null;
+        const expectedLegacyUserLayerName = resolvedUserId
+          ? `user-${resolvedUserId}-posts`
+          : null;
         const accessToken = session?.access_token || null;
         const refreshToken = session?.refresh_token || null;
-        const actorUserId = session?.user?.id || userId || null;
+        const actorUserId = session?.user?.id || resolvedUserId || null;
 
-        const membershipsPromise = userId && accessToken
+        const membershipsPromise = resolvedUserId && accessToken
           ? (async () => {
               const edgeResult = await fetchMyCommunityMembershipsViaEdgeFunction(
                 accessToken,
@@ -949,7 +978,7 @@ const MapScreen = ({ navigation, route }) => {
             })()
           : Promise.resolve({ data: [], error: null });
 
-        const prefsPromise = userId
+        const prefsPromise = resolvedUserId
           ? (async () => {
               let edgeError = null;
               if (accessToken) {
@@ -973,7 +1002,7 @@ const MapScreen = ({ navigation, route }) => {
               const directRes = await authed
                 .from("user_layer_prefs")
                 .select("layer_id,hidden,sort_order")
-                .eq("user_id", actorUserId || userId);
+                .eq("user_id", actorUserId || resolvedUserId);
 
               if (directRes.error) {
                 return { data: [], error: edgeError || directRes.error };
@@ -1074,7 +1103,7 @@ const MapScreen = ({ navigation, route }) => {
         ]);
 
         if (layerIdSet.size === 0) {
-          applyFallbackLayers(userId);
+          applyFallbackLayers(resolvedUserId);
           return;
         }
 
@@ -1173,6 +1202,7 @@ const MapScreen = ({ navigation, route }) => {
             pref_sort_order: prefSortOrder,
             ownerCommunityName: ownerCommunity?.name || null,
             sourceCommunityIds,
+            isCommunityAccessible: isLinkedToActiveCommunity,
             viewerCanManage,
           };
         });
@@ -1180,8 +1210,7 @@ const MapScreen = ({ navigation, route }) => {
         const collectionScopedLayers = mappedLayers.filter((layer) => {
           if (layer.owner_type !== "community") return true;
           if (forcedCommunityLayerIds.has(layer.id)) return true;
-          const prefRow = prefByLayerId.get(layer.id) || null;
-          return Boolean(prefRow) && !Boolean(prefRow.hidden);
+          return Boolean(layer.isCommunityAccessible);
         });
 
         const nonPrivateLayers = collectionScopedLayers.filter(
@@ -1193,17 +1222,62 @@ const MapScreen = ({ navigation, route }) => {
             return true;
           }
 
-          if (!userId) return false;
+          if (!resolvedUserId) return false;
+          if (layer.owner_id && layer.owner_id === resolvedUserId) return true;
           if (userPostingLayerId && layer.id === userPostingLayerId)
             return true;
 
           const lowerName = String(layer.name || "").toLowerCase();
-          return lowerName.includes(String(userId).toLowerCase());
+          if (expectedUserLayerName && lowerName === expectedUserLayerName) {
+            return true;
+          }
+          if (
+            expectedLegacyUserLayerName &&
+            lowerName === expectedLegacyUserLayerName
+          ) {
+            return true;
+          }
+          if (resolvedUsername && lowerName.includes(`user-${resolvedUsername}-`)) {
+            return true;
+          }
+          return lowerName.includes(String(resolvedUserId).toLowerCase());
+        });
+
+        const ownUserPostingCandidates = ownUserLayersOnly.filter(
+          (layer) =>
+            layer.owner_type === "user" && layer.kind === "user_posts",
+        );
+        const ownUserPostingById = new Map(
+          ownUserPostingCandidates.map((layer) => [layer.id, layer]),
+        );
+        const ownUserPostingPrimaryId =
+          (userPostingLayerId && ownUserPostingById.has(userPostingLayerId)
+            ? userPostingLayerId
+            : null) ||
+          ownUserPostingCandidates.find(
+            (layer) => layer.owner_id && layer.owner_id === resolvedUserId,
+          )?.id ||
+          ownUserPostingCandidates.find((layer) => {
+            const lowerName = String(layer.name || "").toLowerCase();
+            return (
+              (expectedUserLayerName && lowerName === expectedUserLayerName) ||
+              (expectedLegacyUserLayerName &&
+                lowerName === expectedLegacyUserLayerName)
+            );
+          })?.id ||
+          ownUserPostingCandidates[0]?.id ||
+          null;
+
+        const ownUserLayersCanonical = ownUserLayersOnly.filter((layer) => {
+          if (!(layer.owner_type === "user" && layer.kind === "user_posts")) {
+            return true;
+          }
+          return ownUserPostingPrimaryId && layer.id === ownUserPostingPrimaryId;
         });
 
         const withCoreSystemLayers = ensureCoreSystemLayers(
-          ownUserLayersOnly,
-          userId,
+          ownUserLayersCanonical,
+          resolvedUserId,
         );
         const sortedLayers = sortLayers(withCoreSystemLayers);
         const nextLayers = [...sortedLayers].sort((a, b) => {
@@ -1235,7 +1309,7 @@ const MapScreen = ({ navigation, route }) => {
         const transient = isTransientNetworkError(error);
         if (transient) {
           activateNetworkBackoff();
-          applyFallbackLayers(userId);
+          applyFallbackLayers(userId || currentUser?.id || null);
           warnWithThrottle(
             "network-unavailable",
             "Network temporarily unavailable. Showing cached/offline data where possible.",
@@ -1351,6 +1425,18 @@ const MapScreen = ({ navigation, route }) => {
   }, [currentUser?.id, communityMapContext?.id, fetchAccessibleLayers]);
 
   useEffect(() => {
+    if (initialBackgroundLayerRefreshDoneRef.current) return;
+    if (!currentUser?.id) return;
+
+    initialBackgroundLayerRefreshDoneRef.current = true;
+    const timer = setTimeout(() => {
+      fetchAccessibleLayers(currentUser.id, communityMapContext?.id);
+    }, 700);
+
+    return () => clearTimeout(timer);
+  }, [currentUser?.id, communityMapContext?.id, fetchAccessibleLayers]);
+
+  useEffect(() => {
     const hasFallbackOnly =
       !Array.isArray(layers) ||
       layers.length === 0 ||
@@ -1424,7 +1510,7 @@ const MapScreen = ({ navigation, route }) => {
     try {
       const existingRes = await supabase
         .from("layers")
-        .select("id,name")
+        .select("id,name,owner_id")
         .eq("owner_type", "user")
         .eq("kind", "user_posts")
         .eq("name", layerName)
@@ -1432,24 +1518,31 @@ const MapScreen = ({ navigation, route }) => {
 
       if (existingRes.error) throw existingRes.error;
       if (existingRes.data?.id) {
+        if (!existingRes.data.owner_id) {
+          const { error: backfillOwnerError } = await supabase
+            .from("layers")
+            .update({ owner_id: currentUser.id })
+            .eq("id", existingRes.data.id);
+          if (backfillOwnerError) throw backfillOwnerError;
+        }
         setUserPostingLayerId(existingRes.data.id);
         return existingRes.data.id;
       }
 
       const legacyRes = await supabase
         .from("layers")
-        .select("id,name")
+        .select("id,name,owner_id")
         .eq("owner_type", "user")
         .eq("kind", "user_posts")
         .eq("name", legacyLayerName)
         .maybeSingle();
       if (legacyRes.error) throw legacyRes.error;
       if (legacyRes.data?.id) {
-        const { error: renameError } = await supabase
+        const { error: normalizeError } = await supabase
           .from("layers")
-          .update({ name: layerName })
+          .update({ name: layerName, owner_id: currentUser.id })
           .eq("id", legacyRes.data.id);
-        if (renameError) throw renameError;
+        if (normalizeError) throw normalizeError;
         setUserPostingLayerId(legacyRes.data.id);
         return legacyRes.data.id;
       }
@@ -1461,6 +1554,7 @@ const MapScreen = ({ navigation, route }) => {
           name: layerName,
           enabled: true,
           owner_type: "user",
+          owner_id: currentUser.id,
           is_public: false,
         })
         .select("id")
@@ -1645,6 +1739,11 @@ const MapScreen = ({ navigation, route }) => {
       const enabledLayerIds = new Set(
         layers.filter((layer) => layer.isEnabled).map((layer) => layer.id),
       );
+      const enabledUserPostingLayerId =
+        layers.find((layer) => layer.isEnabled && isUserPostingLayer(layer))
+          ?.id || null;
+      const ownUserIdForMyPosts = readActorUserId || currentUser?.id || null;
+      const layerById = new Map(layers.map((layer) => [layer.id, layer]));
       const systemLayerIdByKey = new Map();
       layers
         .filter((layer) => layer.owner_type === "system")
@@ -1660,10 +1759,32 @@ const MapScreen = ({ navigation, route }) => {
         const legacyKey = String(pin?.layer || "").toLowerCase();
         return String(systemLayerIdByKey.get(legacyKey) || "");
       };
+      const resolveRenderableLayerId = (pin) => {
+        const effectiveLayerId = resolveEffectiveLayerId(pin);
+        if (enabledLayerIds.has(effectiveLayerId)) {
+          return effectiveLayerId;
+        }
+        if (
+          enabledUserPostingLayerId &&
+          ownUserIdForMyPosts &&
+          String(pin?.user_id || "") === String(ownUserIdForMyPosts)
+        ) {
+          return enabledUserPostingLayerId;
+        }
+        return effectiveLayerId;
+      };
       const filtered = (data || []).filter((pin) => {
-        const layerId = resolveEffectiveLayerId(pin);
+        const layerId = resolveRenderableLayerId(pin);
         if (!layerId) return false;
-        return enabledLayerIds.has(layerId);
+        if (!enabledLayerIds.has(layerId)) return false;
+        const layerMeta = layerById.get(layerId) || null;
+        if (isUserPostingLayer(layerMeta)) {
+          return (
+            Boolean(ownUserIdForMyPosts) &&
+            String(pin?.user_id || "") === String(ownUserIdForMyPosts)
+          );
+        }
+        return true;
       });
       const deduped = [];
       const byGroup = new Map();
@@ -1680,8 +1801,8 @@ const MapScreen = ({ navigation, route }) => {
           return;
         }
 
-        const existingLayerId = resolveEffectiveLayerId(existing);
-        const currentLayerId = resolveEffectiveLayerId(pin);
+        const existingLayerId = resolveRenderableLayerId(existing);
+        const currentLayerId = resolveRenderableLayerId(pin);
         const existingRank = layerOrderIndex.has(existingLayerId)
           ? layerOrderIndex.get(existingLayerId)
           : Number.MAX_SAFE_INTEGER;
@@ -1716,7 +1837,7 @@ const MapScreen = ({ navigation, route }) => {
         .map((pin) => {
           const numericLat = Number(pin?.lat);
           const numericLng = Number(pin?.lng);
-          const effectiveLayerId = resolveEffectiveLayerId(pin);
+          const effectiveLayerId = resolveRenderableLayerId(pin);
           const baseGeometry =
             pin?.geometry && typeof pin.geometry === "object"
               ? pin.geometry

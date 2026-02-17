@@ -280,7 +280,15 @@ const CommunitiesScreen = ({ navigation }) => {
         const activeMembers = (membersRes.data || []).map((member) =>
           normalizeMembershipRow(member),
         );
-        const memberIds = activeMembers.map((member) => member.user_id);
+        const explicitLeadAdminUserId =
+          communityRes.data?.lead_admin_user_id || null;
+        const memberIdSet = new Set(
+          activeMembers.map((member) => member.user_id).filter(Boolean),
+        );
+        if (explicitLeadAdminUserId) {
+          memberIdSet.add(explicitLeadAdminUserId);
+        }
+        const memberIds = Array.from(memberIdSet);
         let profileMap = new Map();
         if (memberIds.length > 0) {
           const profilesRes = await supabase
@@ -323,14 +331,27 @@ const CommunitiesScreen = ({ navigation }) => {
           if (safeATime !== safeBTime) return safeATime - safeBTime;
           return String(a.user_id || "").localeCompare(String(b.user_id || ""));
         });
-        const explicitLeadAdminUserId =
-          communityRes.data?.lead_admin_user_id || null;
         const explicitLeadAdmin = explicitLeadAdminUserId
           ? adminMembersByCreatedAt.find(
               (member) => member.user_id === explicitLeadAdminUserId,
             ) || null
           : null;
-        const owner = explicitLeadAdmin || adminMembersByCreatedAt[0] || null;
+        const explicitLeadAdminProfile = explicitLeadAdminUserId
+          ? profileMap.get(explicitLeadAdminUserId) || null
+          : null;
+        const owner =
+          explicitLeadAdmin ||
+          (explicitLeadAdminUserId
+            ? {
+                user_id: explicitLeadAdminUserId,
+                role: "admin",
+                status: "accepted",
+                username: explicitLeadAdminProfile?.username || null,
+                display_name: explicitLeadAdminProfile?.display_name || null,
+              }
+            : null) ||
+          adminMembersByCreatedAt[0] ||
+          null;
         const moderators = adminMembersByCreatedAt.filter(
           (member) => member.user_id !== owner?.user_id,
         );
