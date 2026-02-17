@@ -18,6 +18,7 @@ import { SIZES } from "../constants/theme";
 import { useAppTheme } from "../context/ThemeContext";
 import {
   fetchMyCommunityMembershipsViaEdgeFunction,
+  fetchMyLayerPrefsViaEdgeFunction,
   getActiveSession,
   supabase,
   supabaseWithAccessToken,
@@ -359,15 +360,51 @@ const CommunitiesScreen = ({ navigation }) => {
 
         let prefsMap = new Map();
         if (userId && linkedLayerIds.length > 0) {
-          const prefsRes = await supabase
-            .from("user_layer_prefs")
-            .select("layer_id,hidden")
-            .eq("user_id", userId)
-            .in("layer_id", linkedLayerIds);
+          const linkedLayerIdSet = new Set(linkedLayerIds);
+          const session = await getActiveSession();
+          const accessToken = session?.access_token || null;
+          const refreshToken = session?.refresh_token || null;
+          const actorUserId = session?.user?.id || userId;
 
-          if (prefsRes.error) throw prefsRes.error;
+          let prefsRows = null;
+          let edgeError = null;
+
+          if (accessToken) {
+            const edgeResult = await fetchMyLayerPrefsViaEdgeFunction(
+              accessToken,
+              refreshToken,
+              actorUserId,
+            );
+            if (!edgeResult.error) {
+              prefsRows = (edgeResult.data?.prefs || []).filter((row) =>
+                linkedLayerIdSet.has(row.layer_id),
+              );
+            } else {
+              edgeError = edgeResult.error;
+            }
+          }
+
+          if (!prefsRows) {
+            const authed = accessToken
+              ? supabaseWithAccessToken(accessToken)
+              : supabase;
+            const prefsRes = await authed
+              .from("user_layer_prefs")
+              .select("layer_id,hidden")
+              .eq("user_id", actorUserId)
+              .in("layer_id", linkedLayerIds);
+
+            if (prefsRes.error) {
+              if (edgeError) {
+                throw edgeError;
+              }
+              throw prefsRes.error;
+            }
+            prefsRows = prefsRes.data || [];
+          }
+
           prefsMap = new Map(
-            (prefsRes.data || []).map((row) => [row.layer_id, row.hidden]),
+            (prefsRows || []).map((row) => [row.layer_id, row.hidden]),
           );
         }
 
@@ -377,9 +414,7 @@ const CommunitiesScreen = ({ navigation }) => {
             const layer = row.layer;
             const { baseKind, layerIcon } = parseLayerKindMetadata(layer.kind);
             const hasPref = prefsMap.has(layer.id);
-            const inCollection = hasPref
-              ? !prefsMap.get(layer.id)
-              : layer.owner_type === "system" || layer.owner_type === "user";
+            const inCollection = hasPref ? !prefsMap.get(layer.id) : false;
             const ownerLabel =
               layer.owner_type === "community"
                 ? ownerCommunityMap.get(layer.owner_id) || "Community"
@@ -620,12 +655,18 @@ const CommunitiesScreen = ({ navigation }) => {
     let accessToken = null;
     let refreshToken = null;
     try {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      sessionUserId = session?.user?.id || null;
-      accessToken = session?.access_token || null;
-      refreshToken = session?.refresh_token || null;
+      const activeSession = await getActiveSession();
+      sessionUserId = activeSession?.user?.id || null;
+      accessToken = activeSession?.access_token || null;
+      refreshToken = activeSession?.refresh_token || null;
+      if (!sessionUserId) {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        sessionUserId = session?.user?.id || null;
+        accessToken = session?.access_token || null;
+        refreshToken = session?.refresh_token || null;
+      }
     } catch (error) {
       console.error("Error resolving session:", error);
     }
@@ -644,15 +685,20 @@ const CommunitiesScreen = ({ navigation }) => {
     setCommunityLayers(optimistic);
 
     try {
+      const hidden = !nextEnabled;
       const edgeResult = await setLayerPreferenceViaEdgeFunction(
         layerId,
-        !nextEnabled,
+        hidden,
         accessToken,
         refreshToken,
         sessionUserId,
       );
       if (edgeResult.error) {
         throw edgeResult.error;
+      }
+
+      if (selectedCommunityId) {
+        await loadCommunityDetail(selectedCommunityId, sessionUserId);
       }
     } catch (error) {
       if (isRlsPolicyError(error)) {

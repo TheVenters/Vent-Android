@@ -949,16 +949,39 @@ const MapScreen = ({ navigation, route }) => {
             })()
           : Promise.resolve({ data: [], error: null });
 
-        const prefsPromise = userId && accessToken
+        const prefsPromise = userId
           ? (async () => {
-              const edgeResult = await fetchMyLayerPrefsViaEdgeFunction(
-                accessToken,
-                refreshToken,
-                actorUserId,
-              );
+              let edgeError = null;
+              if (accessToken) {
+                const edgeResult = await fetchMyLayerPrefsViaEdgeFunction(
+                  accessToken,
+                  refreshToken,
+                  actorUserId,
+                );
+                if (!edgeResult.error) {
+                  return {
+                    data: edgeResult.data?.prefs || [],
+                    error: null,
+                  };
+                }
+                edgeError = edgeResult.error;
+              }
+
+              const authed = accessToken
+                ? supabaseWithAccessToken(accessToken)
+                : supabase;
+              const directRes = await authed
+                .from("user_layer_prefs")
+                .select("layer_id,hidden,sort_order")
+                .eq("user_id", actorUserId || userId);
+
+              if (directRes.error) {
+                return { data: [], error: edgeError || directRes.error };
+              }
+
               return {
-                data: edgeResult.data?.prefs || [],
-                error: edgeResult.error || null,
+                data: directRes.data || [],
+                error: null,
               };
             })()
           : Promise.resolve({ data: [], error: null });
@@ -1115,6 +1138,14 @@ const MapScreen = ({ navigation, route }) => {
             ? prefSortOrderRaw
             : null;
           const isDbEnabled = layer.enabled !== false;
+          const sourceCommunityIds = layerCommunitiesMap.get(layer.id) || [];
+          const isLinkedToActiveCommunity =
+            sourceCommunityIds.some((id) =>
+              activeMembershipCommunityIdSet.has(id),
+            ) ||
+            (layer.owner_id
+              ? activeMembershipCommunityIdSet.has(layer.owner_id)
+              : false);
           const isEnabled = forcedCommunityLayerIds.has(layer.id)
             ? true
             : hasPref
@@ -1124,15 +1155,9 @@ const MapScreen = ({ navigation, route }) => {
           const ownerCommunity = layer.owner_id
             ? communitiesMap.get(layer.owner_id)
             : null;
-          const sourceCommunityIds = layerCommunitiesMap.get(layer.id) || [];
           const viewerCanManage =
             ownerType !== "community" ||
-            sourceCommunityIds.some((id) =>
-              activeMembershipCommunityIdSet.has(id),
-            ) ||
-            (layer.owner_id
-              ? activeMembershipCommunityIdSet.has(layer.owner_id)
-              : false);
+            isLinkedToActiveCommunity;
 
           return {
             ...layer,
@@ -1152,7 +1177,14 @@ const MapScreen = ({ navigation, route }) => {
           };
         });
 
-        const nonPrivateLayers = mappedLayers.filter(
+        const collectionScopedLayers = mappedLayers.filter((layer) => {
+          if (layer.owner_type !== "community") return true;
+          if (forcedCommunityLayerIds.has(layer.id)) return true;
+          const prefRow = prefByLayerId.get(layer.id) || null;
+          return Boolean(prefRow) && !Boolean(prefRow.hidden);
+        });
+
+        const nonPrivateLayers = collectionScopedLayers.filter(
           (layer) => getPinLayerKeyFromLayer(layer) !== "private",
         );
 
