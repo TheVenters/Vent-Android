@@ -13,7 +13,14 @@ import {
 } from "react-native";
 import { SIZES } from "../constants/theme";
 import { useAppTheme } from "../context/ThemeContext";
-import { getCurrentUser, supabase } from "../services/supabase";
+import {
+  fetchCommunityMessagesViaEdgeFunction,
+  fetchMyCommunityMembershipsViaEdgeFunction,
+  getCurrentUser,
+  getActiveSession,
+  sendCommunityMessageViaEdgeFunction,
+  supabase,
+} from "../services/supabase";
 
 const isRlsPolicyError = (error) =>
   error?.code === "42501" ||
@@ -81,25 +88,30 @@ const CommunityChatScreen = ({ route, navigation }) => {
 
       setMembershipLoading(true);
       try {
-        const [profileRes, memberRes] = await Promise.all([
+        const session = await getActiveSession();
+        const [profileRes, membershipsResult] = await Promise.all([
           supabase
             .from("profiles")
             .select("is_admin")
             .eq("id", userId)
             .maybeSingle(),
-          supabase
-            .from("community_members")
-            .select("status")
-            .eq("community_id", communityId)
-            .eq("user_id", userId)
-            .maybeSingle(),
+          session?.access_token
+            ? fetchMyCommunityMembershipsViaEdgeFunction(
+                session.access_token,
+                session.refresh_token || null,
+                session.user?.id || userId,
+              )
+            : Promise.resolve({ data: { memberships: [] }, error: null }),
         ]);
 
         if (profileRes.error) throw profileRes.error;
-        if (memberRes.error) throw memberRes.error;
+        if (membershipsResult.error) throw membershipsResult.error;
 
+        const membershipRow = (membershipsResult.data?.memberships || []).find(
+          (row) => row.community_id === communityId,
+        );
         setIsPlatformAdmin(Boolean(profileRes.data?.is_admin));
-        setMembershipStatus(normalizeMembershipStatus(memberRes.data?.status));
+        setMembershipStatus(normalizeMembershipStatus(membershipRow?.status));
       } catch (error) {
         console.error("Error loading community chat permissions:", error);
         setIsPlatformAdmin(false);
@@ -116,42 +128,19 @@ const CommunityChatScreen = ({ route, navigation }) => {
 
     setMessagesLoading(true);
     try {
-      const { data, error } = await supabase
-        .from("community_messages")
-        .select("id,community_id,sender_id,content,created_at")
-        .eq("community_id", communityId)
-        .order("created_at", { ascending: true })
-        .limit(500);
-      if (error) throw error;
-
-      const rows = Array.isArray(data) ? data : [];
-      const senderIds = Array.from(
-        new Set(rows.map((row) => row.sender_id).filter(Boolean)),
-      );
-
-      let profileMap = new Map();
-      if (senderIds.length > 0) {
-        const profilesRes = await supabase
-          .from("profiles")
-          .select("id,username,display_name")
-          .in("id", senderIds);
-        if (profilesRes.error) throw profilesRes.error;
-        profileMap = new Map(
-          (profilesRes.data || []).map((profile) => [profile.id, profile]),
-        );
+      const session = await getActiveSession();
+      if (!session?.access_token) {
+        setMessages([]);
+        return;
       }
-
-      setMessages(
-        rows.map((row) => {
-          const profile = profileMap.get(row.sender_id);
-          return {
-            ...row,
-            sender_display_name:
-              profile?.display_name ||
-              (profile?.username ? `@${profile.username}` : "User"),
-          };
-        }),
+      const edgeResult = await fetchCommunityMessagesViaEdgeFunction(
+        communityId,
+        session.access_token,
+        session.refresh_token || null,
+        session.user?.id || null,
       );
+      if (edgeResult.error) throw edgeResult.error;
+      setMessages(Array.isArray(edgeResult.data?.messages) ? edgeResult.data.messages : []);
     } catch (error) {
       if (!isRlsPolicyError(error)) {
         console.error("Error loading community chat messages:", error);
@@ -207,12 +196,19 @@ const CommunityChatScreen = ({ route, navigation }) => {
 
     setSending(true);
     try {
-      const { error } = await supabase.from("community_messages").insert({
-        community_id: communityId,
-        sender_id: currentUser.id,
+      const session = await getActiveSession();
+      if (!session?.access_token) {
+        Alert.alert("Session Expired", "Please sign in again to send messages.");
+        return;
+      }
+      const edgeResult = await sendCommunityMessageViaEdgeFunction(
+        communityId,
         content,
-      });
-      if (error) throw error;
+        session.access_token,
+        session.refresh_token || null,
+        session.user?.id || null,
+      );
+      if (edgeResult.error) throw edgeResult.error;
       setComposerValue("");
     } catch (error) {
       console.error("Error sending community chat message:", error);

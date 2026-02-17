@@ -10,7 +10,14 @@ import {
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { supabase, getCurrentUser } from '../services/supabase';
+import {
+  fetchDirectMessagesViaEdgeFunction,
+  supabase,
+  getCurrentUser,
+  getActiveSession,
+  markDirectMessagesReadViaEdgeFunction,
+  sendDirectMessageViaEdgeFunction,
+} from '../services/supabase';
 import { COLORS, SIZES } from '../constants/theme';
 
 const ChatScreen = ({ route, navigation }) => {
@@ -41,14 +48,16 @@ const ChatScreen = ({ route, navigation }) => {
 
   const loadMessages = async () => {
     try {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .or(`and(sender_id.eq.${currentUser.id},receiver_id.eq.${friend.id}),and(sender_id.eq.${friend.id},receiver_id.eq.${currentUser.id})`)
-        .order('created_at', { ascending: true });
-
-      if (error) throw error;
-      setMessages(data || []);
+      const session = await getActiveSession();
+      if (!session?.access_token) return;
+      const edgeResult = await fetchDirectMessagesViaEdgeFunction(
+        friend.id,
+        session.access_token,
+        session.refresh_token || null,
+        session.user?.id || null,
+      );
+      if (edgeResult.error) throw edgeResult.error;
+      setMessages(Array.isArray(edgeResult.data?.messages) ? edgeResult.data.messages : []);
     } catch (error) {
       console.error('Error loading messages:', error);
     }
@@ -56,12 +65,14 @@ const ChatScreen = ({ route, navigation }) => {
 
   const markMessagesAsRead = async () => {
     try {
-      await supabase
-        .from('messages')
-        .update({ read: true })
-        .eq('sender_id', friend.id)
-        .eq('receiver_id', currentUser.id)
-        .eq('read', false);
+      const session = await getActiveSession();
+      if (!session?.access_token) return;
+      await markDirectMessagesReadViaEdgeFunction(
+        friend.id,
+        session.access_token,
+        session.refresh_token || null,
+        session.user?.id || null,
+      );
     } catch (error) {
       console.error('Error marking messages as read:', error);
     }
@@ -111,15 +122,19 @@ const ChatScreen = ({ route, navigation }) => {
     setLoading(true);
 
     try {
-      const { error } = await supabase.from('messages').insert([
-        {
-          sender_id: currentUser.id,
-          receiver_id: friend.id,
-          content: messageText,
-        },
-      ]);
-
-      if (error) throw error;
+      const session = await getActiveSession();
+      if (!session?.access_token) {
+        throw new Error('Session expired — please sign in again.');
+      }
+      const edgeResult = await sendDirectMessageViaEdgeFunction(
+        friend.id,
+        messageText,
+        session.access_token,
+        session.refresh_token || null,
+        session.user?.id || null,
+      );
+      if (edgeResult.error) throw edgeResult.error;
+      await loadMessages();
     } catch (error) {
       console.error('Error sending message:', error);
       setNewMessage(messageText); // Restore message on error

@@ -32,7 +32,16 @@ type SocialAction =
   | "set_layer_order"
   | "create_pins"
   | "list_pins"
-  | "delete_pin";
+  | "delete_pin"
+  | "join_community"
+  | "send_direct_message"
+  | "send_community_message"
+  | "leave_community"
+  | "my_community_memberships"
+  | "my_layer_prefs"
+  | "list_direct_messages"
+  | "mark_direct_messages_read"
+  | "list_community_messages";
 
 const asString = (value: unknown) => String(value ?? "").trim();
 const MAX_COMMENT_LENGTH = 500;
@@ -1253,6 +1262,379 @@ const handleSetLayerOrder = async (
   });
 };
 
+const handleJoinCommunity = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const communityId = asString(payload.communityId);
+  if (!isUuid(communityId)) {
+    return jsonResponse(400, { error: "communityId is required." });
+  }
+
+  const communityRes = await adminClient
+    .from("communities")
+    .select("id")
+    .eq("id", communityId)
+    .maybeSingle();
+  if (communityRes.error) {
+    return jsonResponse(400, { error: communityRes.error.message });
+  }
+  if (!communityRes.data) {
+    return jsonResponse(404, { error: "Community not found." });
+  }
+
+  const membershipRes = await adminClient
+    .from("community_members")
+    .upsert(
+      [
+        {
+          community_id: communityId,
+          user_id: actorId,
+          role: "member",
+          status: "accepted",
+        },
+      ],
+      { onConflict: "community_id,user_id" },
+    )
+    .select("community_id,user_id,status,role")
+    .single();
+  if (membershipRes.error) {
+    return jsonResponse(400, { error: membershipRes.error.message });
+  }
+
+  return jsonResponse(200, {
+    success: true,
+    membership: membershipRes.data,
+  });
+};
+
+const handleSendDirectMessage = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const receiverId = asString(payload.receiverId);
+  const content = asString(payload.content);
+  if (!isUuid(receiverId) || !content) {
+    return jsonResponse(400, { error: "receiverId and content are required." });
+  }
+  if (receiverId === actorId) {
+    return jsonResponse(400, { error: "Cannot message yourself." });
+  }
+
+  const friendshipAccepted = await areUsersAcceptedFriends(
+    adminClient,
+    actorId,
+    receiverId,
+  );
+  if (!friendshipAccepted) {
+    return jsonResponse(403, {
+      error: "You can only message accepted friends.",
+    });
+  }
+
+  const insertRes = await adminClient
+    .from("messages")
+    .insert([
+      {
+        sender_id: actorId,
+        receiver_id: receiverId,
+        content,
+      },
+    ])
+    .select("id,sender_id,receiver_id,content,read,created_at")
+    .single();
+  if (insertRes.error) {
+    return jsonResponse(400, { error: insertRes.error.message });
+  }
+
+  return jsonResponse(200, {
+    success: true,
+    message: insertRes.data,
+  });
+};
+
+const handleSendCommunityMessage = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const communityId = asString(payload.communityId);
+  const content = asString(payload.content);
+  if (!isUuid(communityId) || !content) {
+    return jsonResponse(400, { error: "communityId and content are required." });
+  }
+
+  const membershipRes = await adminClient
+    .from("community_members")
+    .select("community_id,user_id,status")
+    .eq("community_id", communityId)
+    .eq("user_id", actorId)
+    .in("status", ["accepted", "active"])
+    .maybeSingle();
+  if (membershipRes.error) {
+    return jsonResponse(400, { error: membershipRes.error.message });
+  }
+
+  let canSend = !!membershipRes.data;
+  if (!canSend) {
+    const adminRes = await adminClient
+      .from("profiles")
+      .select("is_admin")
+      .eq("id", actorId)
+      .maybeSingle();
+    if (adminRes.error) {
+      return jsonResponse(400, { error: adminRes.error.message });
+    }
+    canSend = Boolean(adminRes.data?.is_admin);
+  }
+
+  if (!canSend) {
+    return jsonResponse(403, {
+      error: "You must be an accepted community member to send messages.",
+    });
+  }
+
+  const insertRes = await adminClient
+    .from("community_messages")
+    .insert([
+      {
+        community_id: communityId,
+        sender_id: actorId,
+        content,
+      },
+    ])
+    .select("id,community_id,sender_id,content,created_at")
+    .single();
+  if (insertRes.error) {
+    return jsonResponse(400, { error: insertRes.error.message });
+  }
+
+  return jsonResponse(200, {
+    success: true,
+    message: insertRes.data,
+  });
+};
+
+const handleLeaveCommunity = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const communityId = asString(payload.communityId);
+  if (!isUuid(communityId)) {
+    return jsonResponse(400, { error: "communityId is required." });
+  }
+
+  const deleteRes = await adminClient
+    .from("community_members")
+    .delete()
+    .eq("community_id", communityId)
+    .eq("user_id", actorId)
+    .select("community_id");
+  if (deleteRes.error) {
+    return jsonResponse(400, { error: deleteRes.error.message });
+  }
+
+  return jsonResponse(200, {
+    success: true,
+    removedCount: Array.isArray(deleteRes.data) ? deleteRes.data.length : 0,
+    communityId,
+  });
+};
+
+const handleMyCommunityMemberships = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+) => {
+  const res = await adminClient
+    .from("community_members")
+    .select("community_id,role,status")
+    .eq("user_id", actorId);
+  if (res.error) {
+    return jsonResponse(400, { error: res.error.message });
+  }
+  return jsonResponse(200, {
+    success: true,
+    memberships: res.data || [],
+  });
+};
+
+const handleMyLayerPrefs = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+) => {
+  const res = await adminClient
+    .from("user_layer_prefs")
+    .select("layer_id,hidden,sort_order")
+    .eq("user_id", actorId);
+  if (res.error) {
+    return jsonResponse(400, { error: res.error.message });
+  }
+
+  return jsonResponse(200, {
+    success: true,
+    prefs: res.data || [],
+  });
+};
+
+const handleListDirectMessages = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const friendId = asString(payload.friendId);
+  if (!isUuid(friendId)) {
+    return jsonResponse(400, { error: "friendId is required." });
+  }
+  if (friendId === actorId) {
+    return jsonResponse(400, { error: "Cannot message yourself." });
+  }
+
+  const friendshipAccepted = await areUsersAcceptedFriends(
+    adminClient,
+    actorId,
+    friendId,
+  );
+  if (!friendshipAccepted) {
+    return jsonResponse(403, {
+      error: "You can only view messages with accepted friends.",
+    });
+  }
+
+  const res = await adminClient
+    .from("messages")
+    .select("*")
+    .or(
+      `and(sender_id.eq.${actorId},receiver_id.eq.${friendId}),and(sender_id.eq.${friendId},receiver_id.eq.${actorId})`,
+    )
+    .order("created_at", { ascending: true });
+  if (res.error) {
+    return jsonResponse(400, { error: res.error.message });
+  }
+
+  return jsonResponse(200, {
+    success: true,
+    messages: res.data || [],
+  });
+};
+
+const handleMarkDirectMessagesRead = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const friendId = asString(payload.friendId);
+  if (!isUuid(friendId)) {
+    return jsonResponse(400, { error: "friendId is required." });
+  }
+
+  const res = await adminClient
+    .from("messages")
+    .update({ read: true })
+    .eq("sender_id", friendId)
+    .eq("receiver_id", actorId)
+    .eq("read", false)
+    .select("id");
+  if (res.error) {
+    return jsonResponse(400, { error: res.error.message });
+  }
+
+  return jsonResponse(200, {
+    success: true,
+    updatedCount: Array.isArray(res.data) ? res.data.length : 0,
+  });
+};
+
+const handleListCommunityMessages = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const communityId = asString(payload.communityId);
+  if (!isUuid(communityId)) {
+    return jsonResponse(400, { error: "communityId is required." });
+  }
+
+  const membershipRes = await adminClient
+    .from("community_members")
+    .select("community_id,user_id,status")
+    .eq("community_id", communityId)
+    .eq("user_id", actorId)
+    .in("status", ["accepted", "active"])
+    .maybeSingle();
+  if (membershipRes.error) {
+    return jsonResponse(400, { error: membershipRes.error.message });
+  }
+
+  let canRead = !!membershipRes.data;
+  if (!canRead) {
+    const adminRes = await adminClient
+      .from("profiles")
+      .select("is_admin")
+      .eq("id", actorId)
+      .maybeSingle();
+    if (adminRes.error) {
+      return jsonResponse(400, { error: adminRes.error.message });
+    }
+    canRead = Boolean(adminRes.data?.is_admin);
+  }
+
+  if (!canRead) {
+    return jsonResponse(403, {
+      error: "You can only view chat for communities you have joined.",
+    });
+  }
+
+  const msgRes = await adminClient
+    .from("community_messages")
+    .select("id,community_id,sender_id,content,created_at")
+    .eq("community_id", communityId)
+    .order("created_at", { ascending: true })
+    .limit(500);
+  if (msgRes.error) {
+    return jsonResponse(400, { error: msgRes.error.message });
+  }
+
+  const rows = msgRes.data || [];
+  const senderIds = Array.from(
+    new Set(rows.map((row) => row.sender_id).filter(Boolean)),
+  );
+
+  let profileMap = new Map<string, { username: string | null; display_name: string | null }>();
+  if (senderIds.length > 0) {
+    const profileRes = await adminClient
+      .from("profiles")
+      .select("id,username,display_name")
+      .in("id", senderIds);
+    if (profileRes.error) {
+      return jsonResponse(400, { error: profileRes.error.message });
+    }
+    profileMap = new Map(
+      (profileRes.data || []).map((row) => [
+        row.id,
+        { username: row.username ?? null, display_name: row.display_name ?? null },
+      ]),
+    );
+  }
+
+  const messages = rows.map((row) => {
+    const profile = profileMap.get(row.sender_id);
+    return {
+      ...row,
+      sender_display_name:
+        profile?.display_name ||
+        (profile?.username ? `@${profile.username}` : "User"),
+    };
+  });
+
+  return jsonResponse(200, {
+    success: true,
+    messages,
+  });
+};
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -1299,7 +1681,16 @@ Deno.serve(async (req) => {
           action !== "list_pins" &&
           action !== "admin_issue_reports" &&
           action !== "set_layer_pref" &&
-          action !== "set_layer_order",
+          action !== "set_layer_order" &&
+          action !== "my_community_memberships" &&
+          action !== "my_layer_prefs" &&
+          action !== "list_direct_messages" &&
+          action !== "mark_direct_messages_read" &&
+          action !== "list_community_messages" &&
+          action !== "join_community" &&
+          action !== "leave_community" &&
+          action !== "send_direct_message" &&
+          action !== "send_community_message",
       },
     );
     const actorId = actor.actorId || null;
@@ -1403,6 +1794,51 @@ Deno.serve(async (req) => {
     if (action === "delete_pin") {
       return await withRefreshedTokens(
         await handleDeletePin(adminClient, actorId, payload),
+      );
+    }
+    if (action === "join_community") {
+      return await withRefreshedTokens(
+        await handleJoinCommunity(adminClient, actorId, payload),
+      );
+    }
+    if (action === "leave_community") {
+      return await withRefreshedTokens(
+        await handleLeaveCommunity(adminClient, actorId, payload),
+      );
+    }
+    if (action === "send_direct_message") {
+      return await withRefreshedTokens(
+        await handleSendDirectMessage(adminClient, actorId, payload),
+      );
+    }
+    if (action === "send_community_message") {
+      return await withRefreshedTokens(
+        await handleSendCommunityMessage(adminClient, actorId, payload),
+      );
+    }
+    if (action === "my_community_memberships") {
+      return await withRefreshedTokens(
+        await handleMyCommunityMemberships(adminClient, actorId),
+      );
+    }
+    if (action === "my_layer_prefs") {
+      return await withRefreshedTokens(
+        await handleMyLayerPrefs(adminClient, actorId),
+      );
+    }
+    if (action === "list_direct_messages") {
+      return await withRefreshedTokens(
+        await handleListDirectMessages(adminClient, actorId, payload),
+      );
+    }
+    if (action === "mark_direct_messages_read") {
+      return await withRefreshedTokens(
+        await handleMarkDirectMessagesRead(adminClient, actorId, payload),
+      );
+    }
+    if (action === "list_community_messages") {
+      return await withRefreshedTokens(
+        await handleListCommunityMessages(adminClient, actorId, payload),
       );
     }
 
