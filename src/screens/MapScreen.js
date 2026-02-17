@@ -29,6 +29,8 @@ import {
   createPinsViaEdgeFunction,
   deletePinCommentViaEdgeFunction,
   deletePinViaEdgeFunction,
+  fetchMyCommunityMembershipsViaEdgeFunction,
+  fetchMyLayerPrefsViaEdgeFunction,
   fetchPinsViaEdgeFunction,
   getPinVoteSummaryViaEdgeFunction,
   listPinCommentsViaEdgeFunction,
@@ -75,8 +77,7 @@ const CLOUD_MIN_RADIUS_METERS = 120;
 const CLOUD_MAX_RADIUS_METERS = 1000;
 const CLUSTER_DISTANCE_PX = 52;
 const CLUSTER_MERGE_DISTANCE_PX = 58;
-const CLUSTER_VIEWPORT_PADDING_PX = 64;
-const PIN_VIEWPORT_PADDING_RATIO = 1.2;
+const CLUSTER_VIEWPORT_PADDING_PX = 160;
 const DEFAULT_MAP_SIZE = { width: 390, height: 780 };
 const PIN_VOTE_PREFETCH_LIMIT = 6;
 const PIN_VOTE_PREFETCH_DELAY_MS = 180;
@@ -476,19 +477,16 @@ const mergeNearbyClouds = (clouds, mapRegion, mapSize) => {
   return merged;
 };
 
-const computeMapVisuals = (posts, mapRegion, mapSize) => {
-  const normalizedPosts = Array.isArray(posts) ? posts : [];
-  const viewportPosts = normalizedPosts.filter(
-    (post) =>
-      hasValidCoordinate(post) &&
-      isCoordinateWithinRegionBounds(
-        { latitude: post.lat, longitude: post.lng },
-        mapRegion,
-        PIN_VIEWPORT_PADDING_RATIO,
-      ),
+const computeMapVisuals = (posts, mapRegion, mapSize, focusedPinId = null) => {
+  const normalizedPosts = (Array.isArray(posts) ? posts : []).filter(
+    hasValidCoordinate,
   );
 
-  const baseClusters = buildCloudsFromPosts(viewportPosts, mapRegion, mapSize);
+  const baseClusters = buildCloudsFromPosts(
+    normalizedPosts,
+    mapRegion,
+    mapSize,
+  );
   const clusters = mergeNearbyClouds(baseClusters, mapRegion, mapSize);
 
   const visibleClouds = [];
@@ -498,45 +496,44 @@ const computeMapVisuals = (posts, mapRegion, mapSize) => {
   clusters.forEach((cloud) => {
     const pinnedCount = cloud.count - cloud.privacyCount;
     const hasPrivacyPosts = cloud.privacyCount > 0;
+    const shouldShowCloud = hasPrivacyPosts || pinnedCount >= CLOUD_MIN_POST_COUNT;
+    if (!shouldShowCloud) return;
+
     const cloudScreenPoint = toScreenPoint(cloud.center, mapRegion, mapSize);
-    const isCloudCenterVisible = isScreenPointWithinClusterViewport(
+    const isCloudVisible = isScreenPointWithinClusterViewport(
       cloudScreenPoint,
       mapSize,
-      0,
+      CLUSTER_VIEWPORT_PADDING_PX,
     );
-    const shouldShowCloud =
-      isCloudCenterVisible &&
-      (hasPrivacyPosts || pinnedCount >= CLOUD_MIN_POST_COUNT);
-    const shouldHidePinnedPosts =
-      isCloudCenterVisible && pinnedCount >= CLOUD_MIN_POST_COUNT;
+    if (!isCloudVisible) return;
 
-    if (!shouldShowCloud && !shouldHidePinnedPosts) return;
     (cloud.posts || []).forEach((post) => {
-      if (post?.id) {
-        clusteredPostIds.add(post.id);
-      }
+      if (post?.id) clusteredPostIds.add(post.id);
     });
-    const badgeCount = pinnedCount > 0 ? pinnedCount : cloud.count;
-    if (shouldShowCloud) {
-      visibleClouds.push({ ...cloud, badgeCount });
-    }
-
-    if (shouldHidePinnedPosts) {
-      cloud.posts.forEach((post) => {
-        if (!isCloudOnlyPost(post)) {
+    if (pinnedCount >= CLOUD_MIN_POST_COUNT) {
+      (cloud.posts || []).forEach((post) => {
+        if (post?.id && !isCloudOnlyPost(post)) {
           clusteredPinnedIds.add(post.id);
         }
       });
     }
+    const badgeCount = pinnedCount > 0 ? pinnedCount : cloud.count;
+    visibleClouds.push({ ...cloud, badgeCount });
   });
 
   // Cloud-only posts must always surface as a cloud, even when isolated.
-  viewportPosts
+  normalizedPosts
     .filter((post) => isCloudOnlyPost(post) && !clusteredPostIds.has(post.id))
     .forEach((post) => {
       const cloudCenter = { latitude: post.lat, longitude: post.lng };
       const cloudScreenPoint = toScreenPoint(cloudCenter, mapRegion, mapSize);
-      if (!isScreenPointWithinClusterViewport(cloudScreenPoint, mapSize, 0)) {
+      if (
+        !isScreenPointWithinClusterViewport(
+          cloudScreenPoint,
+          mapSize,
+          CLUSTER_VIEWPORT_PADDING_PX,
+        )
+      ) {
         return;
       }
       visibleClouds.push({
@@ -550,11 +547,16 @@ const computeMapVisuals = (posts, mapRegion, mapSize) => {
       });
     });
 
-  const visiblePins = viewportPosts.filter(
-    (post) =>
-      hasValidCoordinate(post) &&
-      !isCloudOnlyPost(post) &&
-      !clusteredPinnedIds.has(post.id),
+  // Hide only pins represented by visible clusters; this keeps transitions
+  // stable while preserving cluster readability.
+  const focusedPinIdText = String(focusedPinId || "");
+  const visiblePins = normalizedPosts.filter(
+    (post) => {
+      if (isCloudOnlyPost(post)) return false;
+      const postIdText = String(post?.id || "");
+      const isFocusedPin = focusedPinIdText && postIdText === focusedPinIdText;
+      return isFocusedPin || !clusteredPinnedIds.has(post.id);
+    },
   );
 
   return { visiblePins, visibleClouds };
@@ -653,6 +655,7 @@ const buildFallbackLayers = (userId) => {
       layer_icon: null,
       ownerCommunityName: null,
       sourceCommunityIds: [],
+      viewerCanManage: true,
     },
     {
       id: "fallback-friends",
@@ -668,6 +671,7 @@ const buildFallbackLayers = (userId) => {
       layer_icon: null,
       ownerCommunityName: null,
       sourceCommunityIds: [],
+      viewerCanManage: true,
     },
   ];
 };
@@ -735,6 +739,7 @@ const MapScreen = ({ navigation, route }) => {
   const [friendUserIds, setFriendUserIds] = useState([]);
   const [selectedPinLayers, setSelectedPinLayers] = useState([]);
   const [allLoadedPosts, setAllLoadedPosts] = useState([]);
+  const [arrowFocusedPinId, setArrowFocusedPinId] = useState(null);
   const [cloudPostsModalVisible, setCloudPostsModalVisible] = useState(false);
   const [selectedCloud, setSelectedCloud] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -934,8 +939,11 @@ const MapScreen = ({ navigation, route }) => {
           .map((layer) => getPinLayerKeyFromLayer(layer)),
       ),
     );
+    if (currentUser?.id) {
+      keys.push("private");
+    }
     return keys;
-  }, [layers, mapMode]);
+  }, [currentUser?.id, layers, mapMode]);
 
   const fetchAccessibleLayers = useCallback(
     async (userId, communityId) => {
@@ -1159,6 +1167,9 @@ const MapScreen = ({ navigation, route }) => {
           const ownerCommunity = layer.owner_id
             ? communitiesMap.get(layer.owner_id)
             : null;
+          const viewerCanManage =
+            ownerType !== "community" ||
+            isLinkedToActiveCommunity;
 
           return {
             ...layer,
@@ -1174,11 +1185,19 @@ const MapScreen = ({ navigation, route }) => {
             isForcedEnabled,
             pref_sort_order: prefSortOrder,
             ownerCommunityName: ownerCommunity?.name || null,
-            sourceCommunityIds: layerCommunitiesMap.get(layer.id) || [],
+            sourceCommunityIds,
+            viewerCanManage,
           };
         });
 
-        const nonPrivateLayers = mappedLayers.filter(
+        const collectionScopedLayers = mappedLayers.filter((layer) => {
+          if (layer.owner_type !== "community") return true;
+          if (forcedCommunityLayerIds.has(layer.id)) return true;
+          const prefRow = prefByLayerId.get(layer.id) || null;
+          return Boolean(prefRow) && !Boolean(prefRow.hidden);
+        });
+
+        const nonPrivateLayers = collectionScopedLayers.filter(
           (layer) => getPinLayerKeyFromLayer(layer) !== "private",
         );
 
@@ -1625,6 +1644,7 @@ const MapScreen = ({ navigation, route }) => {
         allLoadedPosts,
         region,
         mapSize,
+        arrowFocusedPinId,
       );
       setMapVisuals((prev) => {
         const samePins = haveSameEntityIds(prev.pins, visiblePins);
@@ -1845,8 +1865,8 @@ const MapScreen = ({ navigation, route }) => {
           return;
         }
 
-        const existingLayerId = existing?.geometry?.layer_id;
-        const currentLayerId = pin?.geometry?.layer_id;
+        const existingLayerId = resolveEffectiveLayerId(existing);
+        const currentLayerId = resolveEffectiveLayerId(pin);
         const existingRank = layerOrderIndex.has(existingLayerId)
           ? layerOrderIndex.get(existingLayerId)
           : Number.MAX_SAFE_INTEGER;
@@ -1881,10 +1901,20 @@ const MapScreen = ({ navigation, route }) => {
         .map((pin) => {
           const numericLat = Number(pin?.lat);
           const numericLng = Number(pin?.lng);
+          const effectiveLayerId = resolveEffectiveLayerId(pin);
+          const baseGeometry =
+            pin?.geometry && typeof pin.geometry === "object"
+              ? pin.geometry
+              : {};
           return {
             ...pin,
             lat: Number.isFinite(numericLat) ? numericLat : pin?.lat,
             lng: Number.isFinite(numericLng) ? numericLng : pin?.lng,
+            geometry: {
+              ...baseGeometry,
+              layer_id:
+                effectiveLayerId || String(baseGeometry?.layer_id || "") || null,
+            },
             author_avatar_url:
               profileByUserId.get(pin.user_id)?.avatar_url ||
               (pin.user_id === currentUser?.id
@@ -1894,8 +1924,8 @@ const MapScreen = ({ navigation, route }) => {
               pin.author_username ||
               profileByUserId.get(pin.user_id)?.username ||
               "",
-            layer_emoji: pin?.geometry?.layer_id
-              ? layerIconById.get(pin.geometry.layer_id) || null
+            layer_emoji: effectiveLayerId
+              ? layerIconById.get(effectiveLayerId) || null
               : null,
           };
         })
@@ -2215,8 +2245,19 @@ const MapScreen = ({ navigation, route }) => {
       return;
     }
 
+    const mediaSource = String(postData?.mediaSource || "").toLowerCase();
     if (
-      postData.postVisibilityMode !== "cloud_only" &&
+      mediaSource === "library" &&
+      postData.locationMode === "current"
+    ) {
+      Alert.alert(
+        "Choose On Map Required",
+        "Library media must be posted by choosing a location on the map.",
+      );
+      return;
+    }
+
+    if (
       postData.geometryType !== GEOMETRY_TYPES.POINT &&
       drawingCoords.length === 0
     ) {
@@ -2253,23 +2294,14 @@ const MapScreen = ({ navigation, route }) => {
         postData.location?.latitude ||
         userLocation?.latitude ||
         region.latitude;
-      const postVisibilityMode =
-        postData.postVisibilityMode === "cloud_only" ? "cloud_only" : "pinned";
-      const privacyRadiusMeters = Math.max(
-        100,
-        Math.min(1000, Number(postData.privacyRadiusMeters || 250)),
-      );
-      const randomizedCoordinate =
-        postVisibilityMode === "cloud_only"
-          ? getRandomCoordinateWithinRadius(baseLat, baseLng, privacyRadiusMeters)
-          : { latitude: baseLat, longitude: baseLng };
-      const storedLat = randomizedCoordinate.latitude;
-      const storedLng = randomizedCoordinate.longitude;
-      const requestedLayerIds = Array.isArray(postData.layerIds)
-        ? postData.layerIds
-        : [];
-      const baseAudience =
-        postData?.baseAudience === "public" ? "public" : "friends";
+      const storedLat = baseLat;
+      const storedLng = baseLng;
+      const baseAudienceRaw = String(postData?.baseAudience || "").toLowerCase();
+      const baseAudience = ["friends", "public", "private", "community"].includes(
+        baseAudienceRaw,
+      )
+        ? baseAudienceRaw
+        : "friends";
       const basePublicLayerId =
         typeof postData?.basePublicLayerId === "string"
           ? postData.basePublicLayerId
@@ -2277,6 +2309,10 @@ const MapScreen = ({ navigation, route }) => {
       const baseFriendsLayerId =
         typeof postData?.baseFriendsLayerId === "string"
           ? postData.baseFriendsLayerId
+          : null;
+      const baseCommunityLayerId =
+        typeof postData?.baseCommunityLayerId === "string"
+          ? postData.baseCommunityLayerId
           : null;
       const postableLayerRows = layers.filter((layer) => {
         const pinLayerKey = getPinLayerKeyFromLayer(layer);
@@ -2286,6 +2322,12 @@ const MapScreen = ({ navigation, route }) => {
         );
       });
       const postableLayerIdSet = new Set(postableLayerRows.map((layer) => layer.id));
+      const communityLayerRows = layers.filter(
+        (layer) => layer.owner_type === "community" && layer.isEnabled,
+      );
+      const communityLayerIdSet = new Set(
+        communityLayerRows.map((layer) => layer.id),
+      );
       const resolvedPublicBaseLayerId =
         baseAudience === "public"
           ? basePublicLayerId && postableLayerIdSet.has(basePublicLayerId)
@@ -2293,7 +2335,13 @@ const MapScreen = ({ navigation, route }) => {
             : postableLayerRows.find(
                   (layer) =>
                     postableLayerIdSet.has(layer.id) &&
+                    layer.owner_type === "system" &&
                     getPinLayerKeyFromLayer(layer) === "public",
+                )?.id ||
+              postableLayerRows.find(
+                (layer) =>
+                  postableLayerIdSet.has(layer.id) &&
+                  getPinLayerKeyFromLayer(layer) === "public",
                 )?.id || null
           : null;
       const resolvedFriendsBaseLayerId =
@@ -2303,8 +2351,20 @@ const MapScreen = ({ navigation, route }) => {
             : postableLayerRows.find(
                   (layer) =>
                     postableLayerIdSet.has(layer.id) &&
+                    layer.owner_type === "system" &&
                     getPinLayerKeyFromLayer(layer) === "friends",
+                )?.id ||
+              postableLayerRows.find(
+                (layer) =>
+                  postableLayerIdSet.has(layer.id) &&
+                  getPinLayerKeyFromLayer(layer) === "friends",
                 )?.id || null
+          : null;
+      const resolvedCommunityLayerId =
+        baseAudience === "community"
+          ? baseCommunityLayerId && communityLayerIdSet.has(baseCommunityLayerId)
+            ? baseCommunityLayerId
+            : null
           : null;
       if (baseAudience === "public" && !resolvedPublicBaseLayerId) {
         Alert.alert(
@@ -2335,6 +2395,29 @@ const MapScreen = ({ navigation, route }) => {
       const targetLayerIds = [...new Set([...baseLayerIds, ...extraLayerIds])];
 
       const layerMap = new Map(layers.map((layer) => [layer.id, layer]));
+      let resolvedTargetLayerId = null;
+      let resolvedLayerKey = "friends";
+      if (baseAudience === "public") {
+        resolvedTargetLayerId = resolvedPublicBaseLayerId;
+        resolvedLayerKey = "public";
+      } else if (baseAudience === "friends") {
+        resolvedTargetLayerId = resolvedFriendsBaseLayerId;
+        resolvedLayerKey = "friends";
+      } else if (baseAudience === "private") {
+        resolvedTargetLayerId = authorLayerId;
+        resolvedLayerKey = "private";
+      } else if (baseAudience === "community") {
+        resolvedTargetLayerId = resolvedCommunityLayerId;
+        const communityLayer =
+          layerMap.get(resolvedCommunityLayerId) || null;
+        resolvedLayerKey = getPinLayerKeyFromLayer(communityLayer);
+      }
+      if (!resolvedTargetLayerId) {
+        Alert.alert("Error", "Unable to resolve a target layer for this post.");
+        return;
+      }
+
+      const targetLayerIds = [resolvedTargetLayerId];
       const crossPostGroupId =
         globalThis.crypto?.randomUUID?.() ||
         `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
@@ -2350,18 +2433,7 @@ const MapScreen = ({ navigation, route }) => {
           rawPinLayerKey === "friends" ? "friends" : "public";
 
         let geometry;
-        if (postVisibilityMode === "cloud_only") {
-          geometry = {
-            type: "Point",
-            coordinates: [storedLng, storedLat],
-            layer_id: targetLayerId,
-            author_layer_id: authorLayerId,
-            author_user_id: activeUserId,
-            cross_post_group_id: crossPostGroupId,
-            visibility_mode: "cloud_only",
-            privacy_radius_m: privacyRadiusMeters,
-          };
-        } else if (postData.geometryType === GEOMETRY_TYPES.POINT) {
+        if (postData.geometryType === GEOMETRY_TYPES.POINT) {
           geometry = {
             type: "Point",
             coordinates: [storedLng, storedLat],
@@ -2463,10 +2535,7 @@ const MapScreen = ({ navigation, route }) => {
       }
 
       loadPins(enabledPinLayerKeys);
-      if (
-        postVisibilityMode !== "cloud_only" &&
-        postData.geometryType === GEOMETRY_TYPES.POINT
-      ) {
+      if (postData.geometryType === GEOMETRY_TYPES.POINT) {
         const createdCoordinate = {
           latitude: storedLat,
           longitude: storedLng,
@@ -2506,29 +2575,37 @@ const MapScreen = ({ navigation, route }) => {
     setLayerPostsModalVisible(true);
     setLayerPostsLoading(true);
     try {
-      const { data, error } = await supabase
+      let rows = null;
+      let lastError = null;
+
+      const byExpression = await supabase
         .from("pins")
         .select("id,user_id,caption,content,author_name,created_at,layer,geometry")
-        .eq("layer", pinLayerKey)
+        .eq("geometry->>layer_id", layer.id)
         .order("created_at", { ascending: false })
         .limit(50);
+      if (!byExpression.error) {
+        rows = byExpression.data || [];
+      } else {
+        lastError = byExpression.error;
+        const byContains = await supabase
+          .from("pins")
+          .select("id,user_id,caption,content,author_name,created_at,layer,geometry")
+          .contains("geometry", { layer_id: layer.id })
+          .order("created_at", { ascending: false })
+          .limit(50);
+        if (!byContains.error) {
+          rows = byContains.data || [];
+          lastError = null;
+        } else {
+          lastError = byContains.error;
+        }
+      }
 
-      if (error) throw error;
-      const exactLayerPosts = (data || []).filter((post) => {
+      if (!rows && lastError) throw lastError;
+      const exactLayerPosts = (rows || []).filter((post) => {
         if (isCloudOnlyPost(post)) return false;
-
-        const ownerType = layer?.owner_type || "system";
-        const isSystemCoreLayer =
-          ownerType === "system" &&
-          ["public", "friends"].includes(pinLayerKey);
-        if (isSystemCoreLayer) {
-          return post?.layer === pinLayerKey;
-        }
-
-        if (post?.geometry?.layer_id) {
-          return post.geometry.layer_id === layer.id;
-        }
-        return false;
+        return String(post?.geometry?.layer_id || "") === String(layer.id || "");
       });
       setLayerPosts(exactLayerPosts);
     } catch (error) {
@@ -2930,6 +3007,44 @@ const MapScreen = ({ navigation, route }) => {
       return normalizedRegion;
     });
   }, []);
+
+  const showArrowPinCallout = useCallback((pinId, attempt = 0) => {
+    const marker = markerRefsByIdRef.current.get(pinId);
+    if (marker?.showCallout) {
+      marker.showCallout();
+      lastArrowCalloutPinIdRef.current = pinId;
+      return;
+    }
+    if (attempt >= 6) return;
+    arrowCalloutTimerRef.current = setTimeout(() => {
+      showArrowPinCallout(pinId, attempt + 1);
+    }, 120);
+  }, []);
+
+  const handleArrowPinFocus = useCallback(
+    (pin) => {
+      const pinId = String(pin?.id || "");
+      if (!pinId) return;
+
+      setArrowFocusedPinId(pinId);
+
+      const previousId = String(lastArrowCalloutPinIdRef.current || "");
+      if (previousId && previousId !== pinId) {
+        const previousMarker = markerRefsByIdRef.current.get(previousId);
+        previousMarker?.hideCallout?.();
+      }
+
+      if (arrowCalloutTimerRef.current) {
+        clearTimeout(arrowCalloutTimerRef.current);
+        arrowCalloutTimerRef.current = null;
+      }
+
+      arrowCalloutTimerRef.current = setTimeout(() => {
+        showArrowPinCallout(pinId, 0);
+      }, 420);
+    },
+    [showArrowPinCallout],
+  );
 
   const handleVotePin = async (vote) => {
     if (!selectedPin) return;
@@ -3398,9 +3513,7 @@ const MapScreen = ({ navigation, route }) => {
       const normalizedUpdates = { ...(updates || {}) };
       if (Object.prototype.hasOwnProperty.call(normalizedUpdates, "layer")) {
         const nextLayer = String(normalizedUpdates.layer || "").toLowerCase();
-        if (nextLayer === "private") {
-          normalizedUpdates.layer = "friends";
-        } else if (!["public", "friends"].includes(nextLayer)) {
+        if (!["public", "friends", "private"].includes(nextLayer)) {
           Alert.alert("Error", "Invalid visibility option.");
           return;
         } else {
@@ -3670,7 +3783,18 @@ const MapScreen = ({ navigation, route }) => {
         showsMyLocationButton={false}
       >
         {pins.map((pin) => (
-          <CustomMarker key={pin.id} pin={pin} onPress={handlePinPress} />
+          <CustomMarker
+            key={pin.id}
+            ref={(markerRef) => {
+              if (markerRef) {
+                markerRefsByIdRef.current.set(String(pin.id), markerRef);
+              } else {
+                markerRefsByIdRef.current.delete(String(pin.id));
+              }
+            }}
+            pin={pin}
+            onPress={handlePinPress}
+          />
         ))}
         {clouds.map((cloud) => (
           <React.Fragment key={cloud.id}>
@@ -3774,6 +3898,7 @@ const MapScreen = ({ navigation, route }) => {
           navigation={navigation}
           mapRef={mapRef}
           pins={pins}
+          allPins={allLoadedPosts}
           layers={layers}
           selectedLayerId={selectedLayerId}
           layersLoading={layersLoading}
@@ -3789,6 +3914,7 @@ const MapScreen = ({ navigation, route }) => {
           onToggleMapMode={() =>
             setMapMode((prev) => (prev === "explore" ? "user" : "explore"))
           }
+          onArrowPinFocus={handleArrowPinFocus}
         />
       )}
 

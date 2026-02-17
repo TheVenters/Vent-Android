@@ -1,9 +1,9 @@
-import React, { memo, useEffect, useMemo, useState } from "react";
+import React, { forwardRef, memo, useEffect, useMemo, useState } from "react";
 import { View, Text, StyleSheet, Image } from "react-native";
 import { Marker, Callout } from "react-native-maps";
 import { COLORS } from "../constants/theme";
 
-const CustomMarker = ({ pin, onPress }) => {
+const CustomMarkerComponent = ({ pin, onPress }, ref) => {
   const [tracksViewChanges, setTracksViewChanges] = useState(
     Boolean(pin?.author_avatar_url),
   );
@@ -27,6 +27,7 @@ const CustomMarker = ({ pin, onPress }) => {
 
   return (
     <Marker
+      ref={ref}
       coordinate={{
         latitude: pin.lat,
         longitude: pin.lng,
@@ -178,4 +179,7 @@ const styles = StyleSheet.create({
   },
 });
 
-export default memo(CustomMarker, areMarkerPropsEqual);
+const ForwardedCustomMarker = forwardRef(CustomMarkerComponent);
+ForwardedCustomMarker.displayName = "CustomMarker";
+
+export default memo(ForwardedCustomMarker, areMarkerPropsEqual);

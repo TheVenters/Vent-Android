@@ -11,12 +11,17 @@ import {
   Alert,
   ActivityIndicator,
   Modal,
+  KeyboardAvoidingView,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { SIZES } from "../constants/theme";
 import { useAppTheme } from "../context/ThemeContext";
 import {
+  fetchMyCommunityMembershipsViaEdgeFunction,
+  fetchMyLayerPrefsViaEdgeFunction,
+  getActiveSession,
   supabase,
+  supabaseWithAccessToken,
   getCurrentUser,
   getActiveSession,
   setLayerPreferenceViaEdgeFunction,
@@ -51,6 +56,31 @@ const slugify = (value) =>
     .replace(/^-+|-+$/g, "")
     .slice(0, 60);
 
+const normalizeMembershipStatus = (value) => {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (normalized === "active") return "accepted";
+  return normalized;
+};
+
+const normalizeMembershipRole = (value) => {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (normalized === "owner" || normalized === "mod") return "admin";
+  return normalized || "member";
+};
+
+const normalizeMembershipRow = (row) => {
+  if (!row) return row;
+  return {
+    ...row,
+    status: normalizeMembershipStatus(row.status),
+    role: normalizeMembershipRole(row.role),
+  };
+};
+
 const CommunitiesScreen = ({ navigation }) => {
   const { palette, isDark } = useAppTheme();
   const styles = createStyles(palette, isDark);
@@ -59,6 +89,7 @@ const CommunitiesScreen = ({ navigation }) => {
   const [communities, setCommunities] = useState([]);
   const [membershipsByCommunity, setMembershipsByCommunity] = useState({});
   const [layerCountByCommunity, setLayerCountByCommunity] = useState({});
+  const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const [query, setQuery] = useState("");
@@ -360,9 +391,8 @@ const CommunitiesScreen = ({ navigation }) => {
             .eq("user_id", effectiveUserId)
             .in("layer_id", linkedLayerIds);
 
-          if (prefsRes.error) throw prefsRes.error;
           prefsMap = new Map(
-            (prefsRes.data || []).map((row) => [row.layer_id, row.hidden]),
+            (prefsRows || []).map((row) => [row.layer_id, row.hidden]),
           );
         }
 
@@ -372,9 +402,7 @@ const CommunitiesScreen = ({ navigation }) => {
             const layer = row.layer;
             const { baseKind, layerIcon } = parseLayerKindMetadata(layer.kind);
             const hasPref = prefsMap.has(layer.id);
-            const inCollection = hasPref
-              ? !prefsMap.get(layer.id)
-              : layer.owner_type === "system" || layer.owner_type === "user";
+            const inCollection = hasPref ? !prefsMap.get(layer.id) : false;
             const ownerLabel =
               layer.owner_type === "community"
                 ? ownerCommunityMap.get(layer.owner_id) || "Community"
@@ -446,7 +474,9 @@ const CommunitiesScreen = ({ navigation }) => {
         setCommunityMembers(enrichedMembers);
         setPendingJoinRequests(enrichedPendingMembers);
         setDetailMembership(
-          membershipRes.data || membershipsByCommunity[communityId] || null,
+          normalizeMembershipRow(membershipRes.data) ||
+            membershipsByCommunity[communityId] ||
+            null,
         );
       } catch (error) {
         console.error("Error loading community detail:", error);
@@ -476,6 +506,7 @@ const CommunitiesScreen = ({ navigation }) => {
 
   useEffect(() => {
     if (!selectedCommunityId) return;
+    setDetailMembership(null);
     loadCommunityDetail(selectedCommunityId, currentUser?.id);
   }, [selectedCommunityId, currentUser?.id, loadCommunityDetail]);
 
@@ -518,8 +549,29 @@ const CommunitiesScreen = ({ navigation }) => {
         },
         { onConflict: "user_id,community_id", ignoreDuplicates: true },
       );
+      if (edgeResult.error) throw edgeResult.error;
 
-      if (error) throw error;
+      setMembershipsByCommunity((prev) => ({
+        ...prev,
+        [communityId]: normalizeMembershipRow(
+          edgeResult.data?.membership || {
+            community_id: communityId,
+            role: "member",
+            status: "accepted",
+          },
+        ),
+      }));
+      if (selectedCommunityId === communityId) {
+        setDetailMembership(
+          normalizeMembershipRow(
+            edgeResult.data?.membership || {
+              community_id: communityId,
+              role: "member",
+              status: "accepted",
+            },
+          ),
+        );
+      }
 
       await loadCommunitySummary(sessionUserId);
       if (selectedCommunityId === communityId) {
@@ -529,6 +581,67 @@ const CommunitiesScreen = ({ navigation }) => {
       console.error("Error joining community:", error);
       Alert.alert("Error", "Failed to join community.");
     }
+  };
+
+  const handleLeaveCommunity = async (communityId) => {
+    if (!currentUser?.id) {
+      Alert.alert("Sign In Required", "Please sign in to manage communities.");
+      navigation.navigate("Account");
+      return;
+    }
+
+    const existing = membershipsByCommunity[communityId];
+    if (!existing) return;
+
+    const isPending = existing.status === "pending";
+    Alert.alert(
+      isPending ? "Cancel Request" : "Leave Community",
+      isPending
+        ? "Cancel your join request for this community?"
+        : "Are you sure you want to leave this community?",
+      [
+        { text: "Keep", style: "cancel" },
+        {
+          text: isPending ? "Cancel Request" : "Leave",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              const session = await getActiveSession();
+              if (!session?.access_token) {
+                Alert.alert("Session Expired", "Please sign in again.");
+                navigation.navigate("Account");
+                return;
+              }
+              const edgeResult = await leaveCommunityViaEdgeFunction(
+                communityId,
+                session.access_token,
+                session.refresh_token || null,
+                session.user?.id || null,
+              );
+              if (edgeResult.error) throw edgeResult.error;
+
+              setMembershipsByCommunity((prev) => {
+                const next = { ...prev };
+                delete next[communityId];
+                return next;
+              });
+              if (selectedCommunityId === communityId) {
+                setDetailMembership(null);
+              }
+
+              await loadCommunitySummary(currentUser.id);
+              if (selectedCommunityId === communityId) {
+                await loadCommunityDetail(communityId, currentUser.id);
+              }
+            } catch (error) {
+              console.error("Error leaving community:", error);
+              Alert.alert("Error", "Failed to leave community.");
+            }
+          },
+        },
+      ],
+      { cancelable: true },
+    );
   };
 
   const handleToggleLayerCollection = async (layerId, nextEnabled) => {
@@ -549,9 +662,10 @@ const CommunitiesScreen = ({ navigation }) => {
     setCommunityLayers(optimistic);
 
     try {
+      const hidden = !nextEnabled;
       const edgeResult = await setLayerPreferenceViaEdgeFunction(
         layerId,
-        !nextEnabled,
+        hidden,
         accessToken,
         refreshToken,
         sessionUserId,
@@ -619,7 +733,6 @@ const CommunitiesScreen = ({ navigation }) => {
           status: "accepted",
           updated_at: new Date().toISOString(),
         },
-        { onConflict: "user_id,community_id" },
       );
 
       if (membershipRes.error) throw membershipRes.error;
@@ -682,7 +795,7 @@ const CommunitiesScreen = ({ navigation }) => {
         { onConflict: "community_id,layer_id" },
       );
 
-      if (attachRes.error) throw attachRes.error;
+      if (error) throw error;
 
       setShowCreateLayerModal(false);
       setNewLayerName("");
@@ -748,7 +861,7 @@ const CommunitiesScreen = ({ navigation }) => {
     if (!canManageSelectedCommunity) {
       Alert.alert(
         "Permission Denied",
-        "Only community owners/mods can delete layers.",
+        "Only community admins can delete layers.",
       );
       return;
     }
@@ -819,6 +932,59 @@ const CommunitiesScreen = ({ navigation }) => {
             } catch (error) {
               console.error("Error deleting layer:", error);
               Alert.alert("Error", error.message || "Failed to delete layer.");
+            }
+          },
+        },
+      ],
+      { cancelable: true },
+    );
+  };
+
+  const handleDeleteCommunity = async () => {
+    if (!selectedCommunityId || !canDeleteSelectedCommunity) {
+      Alert.alert(
+        "Permission Denied",
+        "Only the lead admin or a platform admin can delete this community.",
+      );
+      return;
+    }
+
+    Alert.alert(
+      "Delete Community",
+      `Delete '${selectedCommunity?.name || "this community"}' and all of its layers? This cannot be undone.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete Community",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              const { data, error } = await supabase.rpc(
+                "delete_community_with_layers",
+                {
+                  p_community_id: selectedCommunityId,
+                },
+              );
+              if (error) throw error;
+              if (!data) {
+                throw new Error("Community delete returned no affected rows.");
+              }
+
+              await loadCommunitySummary(currentUser?.id);
+              setSelectedCommunityId(null);
+              setCommunityLayers([]);
+              setCommunityPostCount(0);
+              setAvailableLayersToAttach([]);
+              setCommunityOwner(null);
+              setCommunityModerators([]);
+              setCommunityMembers([]);
+              setDetailMembership(null);
+            } catch (error) {
+              console.error("Error deleting community:", error);
+              Alert.alert(
+                "Error",
+                error.message || "Failed to delete community.",
+              );
             }
           },
         },
@@ -962,62 +1128,72 @@ const CommunitiesScreen = ({ navigation }) => {
       animationType="slide"
       onRequestClose={() => setShowCreateCommunityModal(false)}
     >
-      <View style={styles.modalOverlay}>
+      <KeyboardAvoidingView
+        style={styles.modalOverlay}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 18 : 0}
+      >
         <TouchableOpacity
           style={styles.modalBackdrop}
           activeOpacity={1}
           onPress={() => setShowCreateCommunityModal(false)}
         />
-        <View style={styles.modalCard}>
-          <Text style={styles.modalTitle}>Create Community</Text>
+        <ScrollView
+          style={styles.modalKeyboardScroll}
+          contentContainerStyle={styles.modalKeyboardScrollContent}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Create Community</Text>
 
-          <TextInput
-            style={styles.modalInput}
-            placeholder="Name"
-            placeholderTextColor={palette.subtext}
-            value={communityNameInput}
-            onChangeText={(value) => {
-              setCommunityNameInput(value);
-              if (!communitySlugInput) {
-                setCommunitySlugInput(slugify(value));
-              }
-            }}
-          />
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Name"
+              placeholderTextColor={palette.subtext}
+              value={communityNameInput}
+              onChangeText={(value) => {
+                setCommunityNameInput(value);
+                if (!communitySlugInput) {
+                  setCommunitySlugInput(slugify(value));
+                }
+              }}
+            />
 
-          <TextInput
-            style={styles.modalInput}
-            placeholder="Slug"
-            placeholderTextColor={palette.subtext}
-            value={communitySlugInput}
-            onChangeText={setCommunitySlugInput}
-            autoCapitalize="none"
-          />
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Slug"
+              placeholderTextColor={palette.subtext}
+              value={communitySlugInput}
+              onChangeText={setCommunitySlugInput}
+              autoCapitalize="none"
+            />
 
-          <TextInput
-            style={[styles.modalInput, styles.modalTextArea]}
-            placeholder="Description"
-            placeholderTextColor={palette.subtext}
-            value={communityDescriptionInput}
-            onChangeText={setCommunityDescriptionInput}
-            multiline
-          />
+            <TextInput
+              style={[styles.modalInput, styles.modalTextArea]}
+              placeholder="Description"
+              placeholderTextColor={palette.subtext}
+              value={communityDescriptionInput}
+              onChangeText={setCommunityDescriptionInput}
+              multiline
+            />
 
-          <View style={styles.modalActions}>
-            <TouchableOpacity
-              style={styles.modalSecondaryBtn}
-              onPress={() => setCommunitySlugInput(slugify(communityNameInput))}
-            >
-              <Text style={styles.modalSecondaryBtnText}>Auto Slug</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.modalPrimaryBtn}
-              onPress={handleCreateCommunity}
-            >
-              <Text style={styles.modalPrimaryBtnText}>Create</Text>
-            </TouchableOpacity>
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={styles.modalSecondaryBtn}
+                onPress={() => setCommunitySlugInput(slugify(communityNameInput))}
+              >
+                <Text style={styles.modalSecondaryBtnText}>Auto Slug</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.modalPrimaryBtn}
+                onPress={handleCreateCommunity}
+              >
+                <Text style={styles.modalPrimaryBtnText}>Create</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
-      </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </Modal>
   );
 
@@ -1028,48 +1204,58 @@ const CommunitiesScreen = ({ navigation }) => {
       animationType="slide"
       onRequestClose={() => setShowCreateLayerModal(false)}
     >
-      <View style={styles.modalOverlay}>
+      <KeyboardAvoidingView
+        style={styles.modalOverlay}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 18 : 0}
+      >
         <TouchableOpacity
           style={styles.modalBackdrop}
           activeOpacity={1}
           onPress={() => setShowCreateLayerModal(false)}
         />
-        <View style={styles.modalCard}>
-          <Text style={styles.modalTitle}>Create Layer</Text>
+        <ScrollView
+          style={styles.modalKeyboardScroll}
+          contentContainerStyle={styles.modalKeyboardScrollContent}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Create Layer</Text>
 
-          <TextInput
-            style={styles.modalInput}
-            placeholder="Layer name"
-            placeholderTextColor={palette.subtext}
-            value={newLayerName}
-            onChangeText={setNewLayerName}
-          />
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Layer name"
+              placeholderTextColor={palette.subtext}
+              value={newLayerName}
+              onChangeText={setNewLayerName}
+            />
 
-          <TextInput
-            style={styles.modalInput}
-            placeholder="Kind (e.g. user_overlay)"
-            placeholderTextColor={palette.subtext}
-            value={newLayerKind}
-            onChangeText={setNewLayerKind}
-            autoCapitalize="none"
-          />
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Kind (e.g. user_overlay)"
+              placeholderTextColor={palette.subtext}
+              value={newLayerKind}
+              onChangeText={setNewLayerKind}
+              autoCapitalize="none"
+            />
 
-          <View style={styles.modalActions}>
-            <TouchableOpacity
-              style={styles.modalSecondaryBtn}
-              onPress={() => setShowCreateLayerModal(false)}
-            >
-              <Text style={styles.modalSecondaryBtnText}>Cancel</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.modalPrimaryBtn}
-              onPress={handleCreateLayerForCommunity}
-            >
-              <Text style={styles.modalPrimaryBtnText}>Create</Text>
-            </TouchableOpacity>
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={styles.modalSecondaryBtn}
+                onPress={() => setShowCreateLayerModal(false)}
+              >
+                <Text style={styles.modalSecondaryBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.modalPrimaryBtn}
+                onPress={handleCreateLayerForCommunity}
+              >
+                <Text style={styles.modalPrimaryBtnText}>Create</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
-      </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </Modal>
   );
 
@@ -1130,48 +1316,59 @@ const CommunitiesScreen = ({ navigation }) => {
       animationType="slide"
       onRequestClose={() => setShowLayerIconModal(false)}
     >
-      <View style={styles.modalOverlay}>
+      <KeyboardAvoidingView
+        style={styles.modalOverlay}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 18 : 0}
+      >
         <TouchableOpacity
           style={styles.modalBackdrop}
           activeOpacity={1}
           onPress={() => setShowLayerIconModal(false)}
         />
+        <ScrollView
+          style={styles.modalKeyboardScroll}
+          contentContainerStyle={styles.modalKeyboardScrollContent}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Edit Layer Icon</Text>
+            <Text style={styles.modalSubtext}>
+              Choose any emoji for this layer pin marker.
+            </Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="😀"
+              placeholderTextColor={palette.subtext}
+              value={layerIconInput}
+              onChangeText={setLayerIconInput}
+              autoCapitalize="none"
+            />
 
-        <View style={styles.modalCard}>
-          <Text style={styles.modalTitle}>Edit Layer Icon</Text>
-          <Text style={styles.modalSubtext}>
-            Choose any emoji for this layer pin marker.
-          </Text>
-          <TextInput
-            style={styles.modalInput}
-            placeholder="😀"
-            placeholderTextColor={palette.subtext}
-            value={layerIconInput}
-            onChangeText={setLayerIconInput}
-            autoCapitalize="none"
-          />
-
-          <View style={styles.modalActions}>
-            <TouchableOpacity
-              style={styles.modalSecondaryBtn}
-              onPress={() => setLayerIconInput("")}
-            >
-              <Text style={styles.modalSecondaryBtnText}>Clear</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.modalPrimaryBtn}
-              onPress={handleSaveLayerIcon}
-            >
-              <Text style={styles.modalPrimaryBtnText}>Save Icon</Text>
-            </TouchableOpacity>
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={styles.modalSecondaryBtn}
+                onPress={() => setLayerIconInput("")}
+              >
+                <Text style={styles.modalSecondaryBtnText}>Clear</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.modalPrimaryBtn}
+                onPress={handleSaveLayerIcon}
+              >
+                <Text style={styles.modalPrimaryBtnText}>Save Icon</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
-      </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </Modal>
   );
 
   if (selectedCommunity) {
     const joinStatus = getJoinStatus(selectedCommunity.id);
+    const canUseCommunityChat =
+      isPlatformAdmin || detailMembership?.status === "accepted";
 
     return (
       <View style={styles.container}>
@@ -1211,20 +1408,35 @@ const CommunitiesScreen = ({ navigation }) => {
               <Text style={styles.detailMetaValue}>{communityPostCount}</Text>
             </View>
             <View style={styles.detailMetaRow}>
-              <Text style={styles.detailMetaLabel}>Owner</Text>
+              <Text style={styles.detailMetaLabel}>Lead Admin</Text>
               <Text style={styles.detailMetaValue}>
                 {communityOwner ? formatMemberName(communityOwner) : "None"}
               </Text>
             </View>
             <View style={styles.detailMetaRow}>
-              <Text style={styles.detailMetaLabel}>Moderators</Text>
+              <Text style={styles.detailMetaLabel}>Additional Admins</Text>
               <Text style={styles.detailMetaValue}>
                 {communityModerators.length}
               </Text>
             </View>
 
             <View style={styles.detailActionsRow}>
-              {joinStatus !== "Joined" && (
+              {(joinStatus === "Joined" || joinStatus === "Pending") && (
+                <TouchableOpacity
+                  style={[styles.primaryInlineBtn, styles.primaryInlineBtnDanger]}
+                  onPress={() => handleLeaveCommunity(selectedCommunity.id)}
+                >
+                  <Text
+                    style={[
+                      styles.primaryInlineBtnText,
+                      styles.primaryInlineBtnDangerText,
+                    ]}
+                  >
+                    {joinStatus === "Pending" ? "Cancel Request" : "Leave Community"}
+                  </Text>
+                </TouchableOpacity>
+              )}
+              {joinStatus !== "Joined" && joinStatus !== "Pending" && (
                 <TouchableOpacity
                   style={styles.primaryInlineBtn}
                   disabled={joinStatus === "Pending"}
@@ -1255,15 +1467,15 @@ const CommunitiesScreen = ({ navigation }) => {
 
           <Text style={styles.sectionHeading}>Leadership</Text>
           <View style={styles.leadershipCard}>
-            <Text style={styles.leadershipLabel}>Owner</Text>
+            <Text style={styles.leadershipLabel}>Lead Admin</Text>
             <Text style={styles.leadershipValue}>
-              {communityOwner ? formatMemberName(communityOwner) : "No owner assigned"}
+              {communityOwner ? formatMemberName(communityOwner) : "No admin assigned"}
             </Text>
             <Text style={[styles.leadershipLabel, styles.leadershipLabelSpaced]}>
-              Moderators
+              Additional Admins
             </Text>
             {communityModerators.length === 0 ? (
-              <Text style={styles.leadershipEmpty}>No moderators yet.</Text>
+              <Text style={styles.leadershipEmpty}>No additional admins yet.</Text>
             ) : (
               communityModerators.map((moderator) => (
                 <Text key={moderator.user_id} style={styles.leadershipValue}>
@@ -1272,6 +1484,27 @@ const CommunitiesScreen = ({ navigation }) => {
               ))
             )}
           </View>
+
+          <Text style={styles.sectionHeading}>Community Chat</Text>
+          {!canUseCommunityChat ? (
+            <Text style={styles.emptyText}>
+              Join this community to chat with members.
+            </Text>
+          ) : (
+            <View style={styles.chatLaunchCard}>
+              <TouchableOpacity
+                style={styles.chatLaunchBtn}
+                onPress={() =>
+                  navigation.navigate("CommunityChat", {
+                    communityId: selectedCommunity.id,
+                    communityName: selectedCommunity.name,
+                  })
+                }
+              >
+                <Text style={styles.chatLaunchBtnText}>Open Chat</Text>
+              </TouchableOpacity>
+            </View>
+          )}
 
           <Text style={styles.sectionHeading}>Community Layers</Text>
 
@@ -1366,6 +1599,16 @@ const CommunitiesScreen = ({ navigation }) => {
                   </Text>
                 </TouchableOpacity>
               </View>
+              {canDeleteSelectedCommunity && (
+                <TouchableOpacity
+                  style={styles.deleteCommunityBtn}
+                  onPress={handleDeleteCommunity}
+                >
+                  <Text style={styles.deleteCommunityBtnText}>
+                    Delete Community
+                  </Text>
+                </TouchableOpacity>
+              )}
 
               {canManageCommunityRoles && (
                 <>
@@ -1413,7 +1656,11 @@ const CommunitiesScreen = ({ navigation }) => {
 
                   <Text style={styles.sectionHeading}>Manage Moderators</Text>
                   {communityMembers
-                    .filter((member) => member.user_id !== communityOwner?.user_id)
+                    .filter((member) =>
+                      isPlatformAdmin
+                        ? member.user_id !== currentUser?.id
+                        : member.user_id !== communityOwner?.user_id,
+                    )
                     .map((member) => (
                       <View key={member.user_id} style={styles.memberRow}>
                         <View style={styles.memberRowLeft}>
@@ -1506,6 +1753,12 @@ const CommunitiesScreen = ({ navigation }) => {
             const joinStatus = getJoinStatus(community.id);
             const isJoined = joinStatus === "Joined";
             const isPending = joinStatus === "Pending";
+            const canLeave = isJoined || isPending;
+            const actionLabel = isJoined
+              ? "Leave"
+              : isPending
+                ? "Cancel"
+                : "Join";
 
             return (
               <Pressable
@@ -1524,22 +1777,26 @@ const CommunitiesScreen = ({ navigation }) => {
                   <Pressable
                     style={[
                       styles.joinBtn,
-                      isJoined && styles.joinBtnJoined,
+                      isJoined && styles.joinBtnLeave,
                       isPending && styles.joinBtnPending,
                     ]}
                     onPress={(event) => {
                       if (event?.stopPropagation) event.stopPropagation();
+                      if (canLeave) {
+                        handleLeaveCommunity(community.id);
+                        return;
+                      }
                       handleJoinCommunity(community.id);
                     }}
                   >
                     <Text
                       style={[
                         styles.joinBtnText,
-                        isJoined && styles.joinBtnTextJoined,
+                        isJoined && styles.joinBtnTextLeave,
                         isPending && styles.joinBtnTextPending,
                       ]}
                     >
-                      {joinStatus}
+                      {actionLabel}
                     </Text>
                   </Pressable>
                 </View>
@@ -1672,6 +1929,11 @@ const createStyles = (palette, isDark) =>
     joinBtnJoined: {
       backgroundColor: "rgba(16, 185, 129, 0.18)",
     },
+    joinBtnLeave: {
+      backgroundColor: "rgba(220, 38, 38, 0.12)",
+      borderWidth: 1,
+      borderColor: "rgba(220, 38, 38, 0.35)",
+    },
     joinBtnPending: {
       backgroundColor: "rgba(245, 158, 11, 0.2)",
     },
@@ -1682,6 +1944,9 @@ const createStyles = (palette, isDark) =>
     },
     joinBtnTextJoined: {
       color: "#047857",
+    },
+    joinBtnTextLeave: {
+      color: "#ef4444",
     },
     joinBtnTextPending: {
       color: "#92400e",
@@ -1752,10 +2017,18 @@ const createStyles = (palette, isDark) =>
       alignItems: "center",
       flex: 1,
     },
+    primaryInlineBtnDanger: {
+      backgroundColor: "rgba(220, 38, 38, 0.12)",
+      borderWidth: 1,
+      borderColor: "rgba(220, 38, 38, 0.35)",
+    },
     primaryInlineBtnText: {
       color: palette.onPrimary,
       fontWeight: "700",
       fontSize: 13,
+    },
+    primaryInlineBtnDangerText: {
+      color: "#ef4444",
     },
     detailActionsRow: {
       flexDirection: "row",
@@ -1890,6 +2163,20 @@ const createStyles = (palette, isDark) =>
       fontSize: 12,
       fontWeight: "700",
     },
+    deleteCommunityBtn: {
+      borderRadius: SIZES.radius,
+      backgroundColor: "rgba(220, 38, 38, 0.12)",
+      borderWidth: 1,
+      borderColor: "rgba(220, 38, 38, 0.35)",
+      paddingVertical: 10,
+      alignItems: "center",
+      marginBottom: 10,
+    },
+    deleteCommunityBtnText: {
+      color: "#ef4444",
+      fontSize: 12,
+      fontWeight: "800",
+    },
     leadershipCard: {
       borderWidth: 1,
       borderColor: palette.border,
@@ -1917,6 +2204,25 @@ const createStyles = (palette, isDark) =>
       fontSize: 13,
       color: palette.subtext,
       fontWeight: "600",
+    },
+    chatLaunchCard: {
+      borderWidth: 1,
+      borderColor: palette.border,
+      borderRadius: SIZES.radius,
+      padding: 10,
+      marginBottom: 10,
+      backgroundColor: isDark ? "#202632" : "#f9fbff",
+    },
+    chatLaunchBtn: {
+      borderRadius: SIZES.radius,
+      backgroundColor: palette.primary,
+      paddingVertical: 10,
+      alignItems: "center",
+    },
+    chatLaunchBtnText: {
+      color: palette.onPrimary,
+      fontSize: 13,
+      fontWeight: "800",
     },
     memberRow: {
       flexDirection: "row",
@@ -1961,6 +2267,21 @@ const createStyles = (palette, isDark) =>
       fontSize: 12,
       fontWeight: "700",
     },
+    memberLeadBtn: {
+      borderWidth: 1,
+      borderColor: palette.border,
+      borderRadius: SIZES.radius,
+      paddingHorizontal: 10,
+      paddingVertical: 7,
+      backgroundColor: palette.mutedSurface,
+      minWidth: 92,
+      alignItems: "center",
+    },
+    memberLeadBtnText: {
+      color: palette.text,
+      fontSize: 12,
+      fontWeight: "700",
+    },
     modalOverlay: {
       flex: 1,
       justifyContent: "flex-end",
@@ -1968,6 +2289,13 @@ const createStyles = (palette, isDark) =>
     modalBackdrop: {
       ...StyleSheet.absoluteFillObject,
       backgroundColor: "rgba(0, 0, 0, 0.45)",
+    },
+    modalKeyboardScroll: {
+      flex: 1,
+    },
+    modalKeyboardScrollContent: {
+      flexGrow: 1,
+      justifyContent: "flex-end",
     },
     modalCard: {
       backgroundColor: palette.surface,

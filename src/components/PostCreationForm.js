@@ -20,18 +20,17 @@ const LOCATION_MODES = {
   CURRENT: "current",
   PICK_ON_MAP: "pick_on_map",
 };
-
-const POST_VISIBILITY_MODES = {
-  PINNED: "pinned",
-  CLOUD_ONLY: "cloud_only",
+const MEDIA_SOURCE = {
+  LIBRARY: "library",
+  CAMERA: "camera",
 };
 
 const POST_AUDIENCE = {
   FRIENDS: "friends",
   PUBLIC: "public",
+  PRIVATE: "private",
+  COMMUNITY: "community",
 };
-
-const CLOUD_RADIUS_OPTIONS_METERS = [100, 250, 500, 1000];
 
 const OWNER_LABELS = {
   system: "System",
@@ -53,14 +52,12 @@ const PostCreationForm = ({
   const [content, setContent] = useState("");
   const [geometryType, setGeometryType] = useState(GEOMETRY_TYPES.POINT);
   const [showGeometryOptions, setShowGeometryOptions] = useState(false);
-  const [selectedLayerIds, setSelectedLayerIds] = useState([]);
-  const [postVisibilityMode, setPostVisibilityMode] = useState(
-    POST_VISIBILITY_MODES.PINNED,
-  );
-  const [privacyRadiusMeters, setPrivacyRadiusMeters] = useState(250);
+  const [selectedCommunityLayerId, setSelectedCommunityLayerId] =
+    useState(null);
   const [locationMode, setLocationMode] = useState(LOCATION_MODES.CURRENT);
   const [mediaUrl, setMediaUrl] = useState(null);
   const [mediaType, setMediaType] = useState(null);
+  const [mediaSource, setMediaSource] = useState(null);
   const [baseAudience, setBaseAudience] = useState(POST_AUDIENCE.FRIENDS);
 
   const availableLayers = useMemo(
@@ -68,31 +65,20 @@ const PostCreationForm = ({
     [layers],
   );
 
-  const userPostingLayer = useMemo(
+  const communityAudienceLayers = useMemo(
     () =>
-      availableLayers.find(
-        (layer) =>
-          layer.owner_type === "user" &&
-          String(layer.kind || "").startsWith("user_posts"),
-      ) || null,
+      availableLayers
+        .filter((layer) => layer.owner_type === "community" && layer.isEnabled)
+        .sort((a, b) => (a.name || "").localeCompare(b.name || "")),
     [availableLayers],
-  );
-  const selectableLayers = useMemo(
-    () =>
-      availableLayers.filter(
-        (layer) => {
-          const pinLayerKey = getPinLayerKeyFromLayer(layer);
-          return (
-            layer.id !== userPostingLayer?.id &&
-            layer.owner_type !== "user" &&
-            pinLayerKey === "public"
-          );
-        },
-      ),
-    [availableLayers, userPostingLayer?.id],
   );
   const friendsBaseLayer = useMemo(
     () =>
+      availableLayers.find(
+        (layer) =>
+          getPinLayerKeyFromLayer(layer) === "friends" &&
+          layer.owner_type === "system",
+      ) ||
       availableLayers.find(
         (layer) => getPinLayerKeyFromLayer(layer) === "friends",
       ) || null,
@@ -100,30 +86,46 @@ const PostCreationForm = ({
   );
   const publicBaseLayer = useMemo(
     () =>
-      selectableLayers.find(
-        (layer) => getPinLayerKeyFromLayer(layer) === "public",
+      availableLayers.find(
+        (layer) =>
+          getPinLayerKeyFromLayer(layer) === "public" &&
+          layer.owner_type === "system",
+      ) ||
+      availableLayers.find(
+        (layer) =>
+          layer.owner_type !== "user" &&
+          getPinLayerKeyFromLayer(layer) === "public",
       ) || null,
-    [selectableLayers],
+    [availableLayers],
   );
 
   useEffect(() => {
     if (!visible) return;
-    setSelectedLayerIds([]);
     setBaseAudience(POST_AUDIENCE.FRIENDS);
-  }, [visible]);
+    setSelectedCommunityLayerId(communityAudienceLayers[0]?.id || null);
+  }, [communityAudienceLayers, visible]);
 
   const resetForm = () => {
     setTitle("");
     setContent("");
     setGeometryType(GEOMETRY_TYPES.POINT);
     setShowGeometryOptions(false);
-    setPostVisibilityMode(POST_VISIBILITY_MODES.PINNED);
-    setPrivacyRadiusMeters(250);
+    setSelectedCommunityLayerId(null);
     setLocationMode(LOCATION_MODES.CURRENT);
     setMediaUrl(null);
     setMediaType(null);
+    setMediaSource(null);
     setBaseAudience(POST_AUDIENCE.FRIENDS);
   };
+
+  useEffect(() => {
+    if (
+      mediaSource === MEDIA_SOURCE.LIBRARY &&
+      locationMode === LOCATION_MODES.CURRENT
+    ) {
+      setLocationMode(LOCATION_MODES.PICK_ON_MAP);
+    }
+  }, [locationMode, mediaSource]);
 
   const handleClose = () => {
     resetForm();
@@ -133,6 +135,17 @@ const PostCreationForm = ({
   const handleSubmit = () => {
     if (!title.trim()) {
       Alert.alert("Error", "Please enter a title.");
+      return;
+    }
+
+    if (
+      mediaSource === MEDIA_SOURCE.LIBRARY &&
+      locationMode !== LOCATION_MODES.PICK_ON_MAP
+    ) {
+      Alert.alert(
+        "Location Required",
+        "Library media must be posted by choosing a location on the map.",
+      );
       return;
     }
 
@@ -157,17 +170,21 @@ const PostCreationForm = ({
       );
       return;
     }
+    if (
+      baseAudience === POST_AUDIENCE.COMMUNITY &&
+      !selectedCommunityLayerId
+    ) {
+      Alert.alert(
+        "Community Layer Required",
+        "Choose one of your added community layers before posting.",
+      );
+      return;
+    }
 
     onSubmit({
       title,
       content,
       geometryType,
-      layerIds: selectedLayerIds,
-      postVisibilityMode,
-      privacyRadiusMeters:
-        postVisibilityMode === POST_VISIBILITY_MODES.CLOUD_ONLY
-          ? privacyRadiusMeters
-          : null,
       locationMode,
       location:
         locationMode === LOCATION_MODES.CURRENT && userLocation
@@ -178,6 +195,7 @@ const PostCreationForm = ({
           : null,
       mediaUrl,
       mediaType,
+      mediaSource,
       baseAudience,
       basePublicLayerId:
         baseAudience === POST_AUDIENCE.PUBLIC ? publicBaseLayer?.id || null : null,
@@ -185,24 +203,24 @@ const PostCreationForm = ({
         baseAudience === POST_AUDIENCE.FRIENDS
           ? friendsBaseLayer?.id || null
           : null,
+      baseCommunityLayerId:
+        baseAudience === POST_AUDIENCE.COMMUNITY
+          ? selectedCommunityLayerId
+          : null,
     });
 
     resetForm();
   };
 
-  const toggleLayer = (layerId) => {
-    setSelectedLayerIds((prev) =>
-      prev.includes(layerId)
-        ? prev.filter((id) => id !== layerId)
-        : [...prev, layerId],
-    );
-  };
-
-  const applyPickedMedia = (result) => {
+  const applyPickedMedia = (result, source) => {
     if (result.canceled || !result.assets?.[0]) return;
     const asset = result.assets[0];
     setMediaUrl(asset.uri);
     setMediaType(asset.type === "video" ? "video" : "photo");
+    setMediaSource(source || null);
+    if (source === MEDIA_SOURCE.LIBRARY) {
+      setLocationMode(LOCATION_MODES.PICK_ON_MAP);
+    }
   };
 
   const pickMediaFromLibrary = async () => {
@@ -222,7 +240,7 @@ const PostCreationForm = ({
         allowsEditing: false,
         quality: 0.8,
       });
-      applyPickedMedia(result);
+      applyPickedMedia(result, MEDIA_SOURCE.LIBRARY);
     } catch (error) {
       console.error("Error picking media:", error);
       Alert.alert("Error", "Failed to pick media.");
@@ -242,7 +260,7 @@ const PostCreationForm = ({
         allowsEditing: false,
         quality: 0.8,
       });
-      applyPickedMedia(result);
+      applyPickedMedia(result, MEDIA_SOURCE.CAMERA);
     } catch (error) {
       console.error("Error taking photo:", error);
       Alert.alert("Error", "Failed to open camera.");
@@ -323,6 +341,7 @@ const PostCreationForm = ({
                   onPress={() => {
                     setMediaUrl(null);
                     setMediaType(null);
+                    setMediaSource(null);
                   }}
                 >
                   <Text style={styles.mediaClearBtnText}>Remove</Text>
@@ -336,20 +355,20 @@ const PostCreationForm = ({
             ) : null}
 
             <Text style={styles.sectionLabel}>Post To</Text>
-            <View style={styles.locationModeRow}>
+            <View style={styles.audienceRow}>
               <TouchableOpacity
                 style={[
-                  styles.locationModeBtn,
+                  styles.audienceBtn,
                   baseAudience === POST_AUDIENCE.FRIENDS &&
-                    styles.locationModeBtnActive,
+                    styles.audienceBtnActive,
                 ]}
                 onPress={() => setBaseAudience(POST_AUDIENCE.FRIENDS)}
               >
                 <Text
                   style={[
-                    styles.locationModeBtnText,
+                    styles.audienceBtnText,
                     baseAudience === POST_AUDIENCE.FRIENDS &&
-                      styles.locationModeBtnTextActive,
+                      styles.audienceBtnTextActive,
                   ]}
                 >
                   Friends
@@ -357,28 +376,108 @@ const PostCreationForm = ({
               </TouchableOpacity>
               <TouchableOpacity
                 style={[
-                  styles.locationModeBtn,
+                  styles.audienceBtn,
                   baseAudience === POST_AUDIENCE.PUBLIC &&
-                    styles.locationModeBtnActive,
+                    styles.audienceBtnActive,
                 ]}
                 onPress={() => setBaseAudience(POST_AUDIENCE.PUBLIC)}
               >
                 <Text
                   style={[
-                    styles.locationModeBtnText,
+                    styles.audienceBtnText,
                     baseAudience === POST_AUDIENCE.PUBLIC &&
-                      styles.locationModeBtnTextActive,
+                      styles.audienceBtnTextActive,
                   ]}
                 >
                   Public
                 </Text>
               </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.audienceBtn,
+                  baseAudience === POST_AUDIENCE.PRIVATE &&
+                    styles.audienceBtnActive,
+                ]}
+                onPress={() => setBaseAudience(POST_AUDIENCE.PRIVATE)}
+              >
+                <Text
+                  style={[
+                    styles.audienceBtnText,
+                    baseAudience === POST_AUDIENCE.PRIVATE &&
+                      styles.audienceBtnTextActive,
+                  ]}
+                >
+                  Private
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.audienceBtn,
+                  baseAudience === POST_AUDIENCE.COMMUNITY &&
+                    styles.audienceBtnActive,
+                ]}
+                onPress={() => setBaseAudience(POST_AUDIENCE.COMMUNITY)}
+              >
+                <Text
+                  style={[
+                    styles.audienceBtnText,
+                    baseAudience === POST_AUDIENCE.COMMUNITY &&
+                      styles.audienceBtnTextActive,
+                  ]}
+                >
+                  Community
+                </Text>
+              </TouchableOpacity>
             </View>
             <Text style={styles.inlineHint}>
               {baseAudience === POST_AUDIENCE.FRIENDS
-                ? "Posts to your friends layer by default."
-                : "Posts to a public layer by default."}
+                ? "Posts to your friends layer."
+                : baseAudience === POST_AUDIENCE.PUBLIC
+                  ? "Posts to the public layer."
+                  : baseAudience === POST_AUDIENCE.PRIVATE
+                    ? "Visible only to you."
+                    : "Choose one of your added community layers."}
             </Text>
+
+            {baseAudience === POST_AUDIENCE.COMMUNITY && (
+              <>
+                <Text style={styles.sectionLabel}>Community Layer</Text>
+                {communityAudienceLayers.length === 0 ? (
+                  <Text style={styles.emptyStateText}>
+                    You have no added community layers yet.
+                  </Text>
+                ) : (
+                  <View style={styles.layerList}>
+                    {communityAudienceLayers.map((layer) => {
+                      const isSelected =
+                        selectedCommunityLayerId === layer.id;
+                      return (
+                        <TouchableOpacity
+                          key={layer.id}
+                          style={[
+                            styles.layerRow,
+                            isSelected && styles.layerRowSelected,
+                          ]}
+                          onPress={() => setSelectedCommunityLayerId(layer.id)}
+                        >
+                          <View style={styles.layerRowLeft}>
+                            <Text style={styles.layerName}>{layer.name}</Text>
+                            <Text style={styles.layerMeta}>
+                              {OWNER_LABELS[layer.owner_type] || "Community"}{" "}
+                              • {layer.ownerCommunityName || "Community"}
+                            </Text>
+                          </View>
+
+                          <Text style={styles.chooseText}>
+                            {isSelected ? "Selected" : "Select"}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                )}
+              </>
+            )}
 
             <Text style={styles.sectionLabel}>Geometry Type</Text>
             <TouchableOpacity
@@ -422,149 +521,32 @@ const PostCreationForm = ({
               </View>
             )}
 
-            <Text style={styles.sectionLabel}>Post Visibility</Text>
-            <View style={styles.locationModeRow}>
-              <TouchableOpacity
-                style={[
-                  styles.locationModeBtn,
-                  postVisibilityMode === POST_VISIBILITY_MODES.PINNED &&
-                    styles.locationModeBtnActive,
-                ]}
-                onPress={() =>
-                  setPostVisibilityMode(POST_VISIBILITY_MODES.PINNED)
-                }
-              >
-                <Text
-                  style={[
-                    styles.locationModeBtnText,
-                    postVisibilityMode === POST_VISIBILITY_MODES.PINNED &&
-                      styles.locationModeBtnTextActive,
-                  ]}
-                >
-                  Post at location
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[
-                  styles.locationModeBtn,
-                  postVisibilityMode === POST_VISIBILITY_MODES.CLOUD_ONLY &&
-                    styles.locationModeBtnActive,
-                ]}
-                onPress={() =>
-                  setPostVisibilityMode(POST_VISIBILITY_MODES.CLOUD_ONLY)
-                }
-              >
-                <Text
-                  style={[
-                    styles.locationModeBtnText,
-                    postVisibilityMode === POST_VISIBILITY_MODES.CLOUD_ONLY &&
-                      styles.locationModeBtnTextActive,
-                  ]}
-                >
-                  Post within an area
-                </Text>
-              </TouchableOpacity>
-            </View>
-
-            {postVisibilityMode === POST_VISIBILITY_MODES.CLOUD_ONLY && (
-              <>
-                <Text style={styles.sectionLabel}>Privacy Radius</Text>
-                <Text style={styles.inlineHint}>
-                  Exact location is hidden. A random internal point is used
-                  within this radius.
-                </Text>
-                <View style={styles.radiusRow}>
-                  {CLOUD_RADIUS_OPTIONS_METERS.map((radius) => {
-                    const isActive = privacyRadiusMeters === radius;
-                    return (
-                      <TouchableOpacity
-                        key={radius}
-                        style={[
-                          styles.radiusChip,
-                          isActive && styles.radiusChipActive,
-                        ]}
-                        onPress={() => setPrivacyRadiusMeters(radius)}
-                      >
-                        <Text
-                          style={[
-                            styles.radiusChipText,
-                            isActive && styles.radiusChipTextActive,
-                          ]}
-                        >
-                          {radius >= 1000
-                            ? `${radius / 1000}km`
-                            : `${radius}m`}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              </>
-            )}
-
-            <Text style={styles.sectionLabel}>Also Post To (Optional)</Text>
-            <Text style={styles.inlineHint}>
-              Add any extra non-friends layers in addition to the target above.
-            </Text>
-            {availableLayers.length === 0 ? (
-              <Text style={styles.emptyStateText}>
-                No layers are currently available.
-              </Text>
-            ) : !userPostingLayer ? (
-              <Text style={styles.emptyStateText}>
-                Your posting layer is unavailable right now.
-              </Text>
-            ) : selectableLayers.length === 0 ? (
-              <Text style={styles.emptyStateText}>
-                No additional postable layers found. This post will go to your
-                selected audience layer only.
-              </Text>
-            ) : (
-              <View style={styles.layerList}>
-                {selectableLayers.map((layer) => {
-                  const isSelected = selectedLayerIds.includes(layer.id);
-                  const pinLayer = getPinLayerKeyFromLayer(layer);
-
-                  return (
-                    <TouchableOpacity
-                      key={layer.id}
-                      style={[
-                        styles.layerRow,
-                        isSelected && styles.layerRowSelected,
-                      ]}
-                      onPress={() => toggleLayer(layer.id)}
-                    >
-                      <View style={styles.layerRowLeft}>
-                        <Text style={styles.layerName}>{layer.name}</Text>
-                        <Text style={styles.layerMeta}>
-                          {OWNER_LABELS[layer.owner_type] || "System"} • posts
-                          as {pinLayer}
-                        </Text>
-                      </View>
-
-                      <Text style={styles.chooseText}>
-                        {isSelected ? "Added" : "Add"}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            )}
-
             <Text style={styles.sectionLabel}>Location</Text>
             <View style={styles.locationModeRow}>
               <TouchableOpacity
                 style={[
                   styles.locationModeBtn,
+                  mediaSource === MEDIA_SOURCE.LIBRARY &&
+                    styles.locationModeBtnDisabled,
                   locationMode === LOCATION_MODES.CURRENT &&
                     styles.locationModeBtnActive,
                 ]}
-                onPress={() => setLocationMode(LOCATION_MODES.CURRENT)}
+                onPress={() => {
+                  if (mediaSource === MEDIA_SOURCE.LIBRARY) {
+                    Alert.alert(
+                      "Current Location Disabled",
+                      "Library media must be posted by choosing a location on the map.",
+                    );
+                    return;
+                  }
+                  setLocationMode(LOCATION_MODES.CURRENT);
+                }}
               >
                 <Text
                   style={[
                     styles.locationModeBtnText,
+                    mediaSource === MEDIA_SOURCE.LIBRARY &&
+                      styles.locationModeBtnTextDisabled,
                     locationMode === LOCATION_MODES.CURRENT &&
                       styles.locationModeBtnTextActive,
                   ]}
@@ -592,6 +574,11 @@ const PostCreationForm = ({
                 </Text>
               </TouchableOpacity>
             </View>
+            {mediaSource === MEDIA_SOURCE.LIBRARY && (
+              <Text style={styles.inlineHint}>
+                Library media requires choosing a location on the map.
+              </Text>
+            )}
           </ScrollView>
 
           <View style={styles.actions}>
@@ -692,6 +679,33 @@ const createStyles = (palette, isDark) =>
       color: palette.subtext,
       marginBottom: 8,
       marginTop: -2,
+    },
+    audienceRow: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 8,
+      marginBottom: 8,
+    },
+    audienceBtn: {
+      width: "48%",
+      paddingVertical: 9,
+      backgroundColor: palette.mutedSurface,
+      borderRadius: SIZES.radius,
+      alignItems: "center",
+      borderWidth: 1,
+      borderColor: palette.border,
+    },
+    audienceBtnActive: {
+      backgroundColor: palette.primary,
+      borderColor: palette.primary,
+    },
+    audienceBtnText: {
+      fontSize: 12,
+      fontWeight: "700",
+      color: palette.text,
+    },
+    audienceBtnTextActive: {
+      color: palette.onPrimary,
     },
     mediaRow: {
       flexDirection: "row",
@@ -861,6 +875,9 @@ const createStyles = (palette, isDark) =>
       borderWidth: 1,
       borderColor: palette.border,
     },
+    locationModeBtnDisabled: {
+      opacity: 0.5,
+    },
     locationModeBtnActive: {
       backgroundColor: palette.primary,
       borderColor: palette.primary,
@@ -869,6 +886,9 @@ const createStyles = (palette, isDark) =>
       fontSize: 12,
       fontWeight: "700",
       color: palette.text,
+    },
+    locationModeBtnTextDisabled: {
+      color: palette.subtext,
     },
     locationModeBtnTextActive: {
       color: palette.onPrimary,
