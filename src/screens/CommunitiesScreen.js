@@ -491,10 +491,7 @@ const CommunitiesScreen = ({ navigation }) => {
           .map((row) => {
             const layer = row.layer;
             const { baseKind, layerIcon } = parseLayerKindMetadata(layer.kind);
-            const hasPref = prefsMap.has(layer.id);
-            const inCollection =
-              (hasPref ? !prefsMap.get(layer.id) : true) &&
-              !removedLayerIds.has(layer.id);
+            const inCollection = !removedLayerIds.has(layer.id);
             const ownerLabel =
               layer.owner_type === "community"
                 ? ownerCommunityMap.get(layer.owner_id) || "Community"

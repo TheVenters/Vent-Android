@@ -1157,6 +1157,17 @@ const MapScreen = ({ navigation, route }) => {
     }, [currentUser?.id, communityMapContext?.id, fetchAccessibleLayers]),
   );
 
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        // Ensure map-only overlays never leak across tabs/screens.
+        setLayerPostsModalVisible(false);
+        setCloudPostsModalVisible(false);
+        setShowDetailModal(false);
+      };
+    }, []),
+  );
+
   const clearCommunityMapContext = () => {
     setCommunityMapContext(null);
     if (route?.params?.communityMap) {

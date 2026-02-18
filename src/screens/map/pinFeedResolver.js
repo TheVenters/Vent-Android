@@ -335,11 +335,8 @@ export const resolvePinsForMap = async ({
             : null),
         author_username:
           pin.author_username || profileByUserId.get(pin.user_id)?.username || "",
-        layer_emoji:
-          (topLayerId ? layerIconById.get(topLayerId) || null : null) ||
-          (pin?.explicit_layer_id
-            ? layerIconById.get(String(pin.explicit_layer_id)) || null
-            : null),
+        // Strict priority: only the resolved top layer controls marker emoji.
+        layer_emoji: topLayerId ? layerIconById.get(topLayerId) || null : null,
       };
     })
     .filter(hasValidCoordinate);
