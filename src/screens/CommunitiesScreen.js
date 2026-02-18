@@ -44,7 +44,7 @@ const OWNER_LABELS = {
   community: "Community",
   user: "User",
 };
-const ICON_TRACE_ENABLED = true;
+const ICON_TRACE_ENABLED = false;
 const logIconTrace = (label, payload = null) => {
   if (!ICON_TRACE_ENABLED) return;
   if (payload === null) {

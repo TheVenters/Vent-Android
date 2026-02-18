@@ -98,6 +98,7 @@ const NETWORK_BACKOFF_MS = 20000;
 const MAP_POSTS_CACHE_KEY = "map_posts_cache_v1";
 const PIN_COMMENT_MAX_LENGTH = 500;
 const LAYER_TRACE_ENABLED = false;
+const COMMUNITY_MAP_TRACE_ENABLED = false;
 const isRlsPolicyError = (error) =>
   error?.code === "42501" ||
   String(error?.message || "")
@@ -148,6 +149,15 @@ const logLayerTrace = (label, payload = null) => {
     return;
   }
   console.log(`[LayerTrace] ${label}`, payload);
+};
+
+const logCommunityMapTrace = (label, payload = null) => {
+  if (!COMMUNITY_MAP_TRACE_ENABLED) return;
+  if (payload === null) {
+    console.log(`[CommunityMapTrace] ${label}`);
+    return;
+  }
+  console.log(`[CommunityMapTrace] ${label}`, payload);
 };
 
 const normalizePinComment = (comment) => {
@@ -259,6 +269,7 @@ const MapScreen = ({ navigation, route }) => {
   const lastArrowCalloutPinIdRef = useRef(null);
   const initialBackgroundLayerRefreshDoneRef = useRef(false);
   const initialAppOpenRefreshDoneRef = useRef(false);
+  const lastCommunityMapRefreshIdRef = useRef(null);
   const pinLoadRequestSeqRef = useRef(0);
   const latestEnabledLayerKeyRef = useRef("");
   const allLoadedPostsRef = useRef([]);
@@ -407,7 +418,12 @@ const MapScreen = ({ navigation, route }) => {
         return applyFallbackLayers(userId);
       }
 
-      const requestKey = `${userId || "guest"}:${communityId || "none"}`;
+      const effectiveCommunityId =
+        communityId ||
+        communityMapContext?.id ||
+        route?.params?.communityMap?.id ||
+        null;
+      const requestKey = `${userId || "guest"}:${effectiveCommunityId || "none"}`;
       const inFlight = layerFetchInFlightRef.current;
       if (inFlight.key === requestKey && inFlight.promise) {
         return inFlight.promise;
@@ -530,7 +546,7 @@ const MapScreen = ({ navigation, route }) => {
         const activeCommunityIds = [
           ...new Set([
             ...activeMemberships.map((row) => row.community_id),
-            ...(communityId ? [communityId] : []),
+            ...(effectiveCommunityId ? [effectiveCommunityId] : []),
           ]),
         ];
 
@@ -626,9 +642,26 @@ const MapScreen = ({ navigation, route }) => {
 
         const forcedCommunityLayerIds = new Set(
           communityLayerLinks
-            .filter((row) => row.community_id === communityId)
+            .filter((row) => row.community_id === effectiveCommunityId)
             .map((row) => row.layer_id),
         );
+        if (effectiveCommunityId) {
+          rawLayers
+            .filter(
+              (layer) =>
+                (layer.owner_type || "system") === "community" &&
+                layer.owner_id === effectiveCommunityId,
+            )
+            .forEach((layer) => forcedCommunityLayerIds.add(layer.id));
+        }
+        logCommunityMapTrace("refreshAccessibleLayers:forcedCandidates", {
+          communityId: effectiveCommunityId || null,
+          forcedCommunityLayerIds: Array.from(forcedCommunityLayerIds),
+          linkedRows: communityLayerLinks.length,
+          rawCommunityLayerCount: rawLayers.filter(
+            (layer) => (layer.owner_type || "system") === "community",
+          ).length,
+        });
 
         const mappedLayers = rawLayers.map((layer) => {
           const ownerType = layer.owner_type || "system";
@@ -700,8 +733,8 @@ const MapScreen = ({ navigation, route }) => {
 
         const collectionScopedLayers = mappedLayers.filter((layer) => {
           if (layer.owner_type !== "community") return true;
-          if (removedLayerIds.has(layer.id)) return false;
           if (forcedCommunityLayerIds.has(layer.id)) return true;
+          if (removedLayerIds.has(layer.id)) return false;
           return Boolean(layer.isCommunityAccessible);
         });
 
@@ -772,7 +805,7 @@ const MapScreen = ({ navigation, route }) => {
           resolvedUserId,
         );
         const sortedLayers = sortLayers(withCoreSystemLayers);
-        const nextLayers = [...sortedLayers].sort((a, b) => {
+        const nextLayersByPref = [...sortedLayers].sort((a, b) => {
           const rankA = Number.isFinite(a?.pref_sort_order)
             ? a.pref_sort_order
             : Number.MAX_SAFE_INTEGER;
@@ -782,6 +815,12 @@ const MapScreen = ({ navigation, route }) => {
           if (rankA !== rankB) return rankA - rankB;
           return 0;
         });
+        const nextLayers = effectiveCommunityId
+          ? nextLayersByPref.map((layer) => ({
+              ...layer,
+              isEnabled: forcedCommunityLayerIds.has(layer.id),
+            }))
+          : nextLayersByPref;
 
         logLayerTrace("refreshAccessibleLayers:finalLayers", {
           total: nextLayers.length,
@@ -796,10 +835,26 @@ const MapScreen = ({ navigation, route }) => {
         });
 
         setLayers(nextLayers);
-        if (communityId) {
+        if (effectiveCommunityId) {
           const firstCommunityLayer = nextLayers.find((layer) =>
             forcedCommunityLayerIds.has(layer.id),
           );
+          logCommunityMapTrace("refreshAccessibleLayers:selectedLayer", {
+            communityId: effectiveCommunityId,
+            selected: firstCommunityLayer?.id || null,
+            enabledForcedLayers: nextLayers
+              .filter(
+                (layer) =>
+                  forcedCommunityLayerIds.has(layer.id) && layer.isEnabled,
+              )
+              .map((layer) => layer.id),
+            enabledNonCommunityLayers: nextLayers
+              .filter(
+                (layer) =>
+                  !forcedCommunityLayerIds.has(layer.id) && layer.isEnabled,
+              )
+              .map((layer) => layer.id),
+          });
           setSelectedLayerId(
             (prev) =>
               firstCommunityLayer?.id ||
@@ -847,8 +902,10 @@ const MapScreen = ({ navigation, route }) => {
       activateNetworkBackoff,
       alertWithThrottle,
       applyFallbackLayers,
+      communityMapContext?.id,
       isNetworkBackoffActive,
       logErrorWithThrottle,
+      route?.params?.communityMap?.id,
       warnWithThrottle,
       userPostingLayerId,
     ],
@@ -921,10 +978,12 @@ const MapScreen = ({ navigation, route }) => {
 
   useEffect(() => {
     const incomingCommunityMap = route?.params?.communityMap;
+    logCommunityMapTrace("route:communityMapParam", incomingCommunityMap || null);
     if (incomingCommunityMap?.id) {
       setCommunityMapContext(incomingCommunityMap);
+      fetchAccessibleLayers(currentUser?.id, incomingCommunityMap.id);
     }
-  }, [route?.params?.communityMap]);
+  }, [currentUser?.id, fetchAccessibleLayers, route?.params?.communityMap]);
 
   useEffect(() => {
     fetchAccessibleLayers(currentUser?.id, communityMapContext?.id);
@@ -933,6 +992,7 @@ const MapScreen = ({ navigation, route }) => {
   useEffect(() => {
     if (initialBackgroundLayerRefreshDoneRef.current) return;
     if (!currentUser?.id) return;
+    if (communityMapContext?.id) return;
 
     initialBackgroundLayerRefreshDoneRef.current = true;
     const timer = setTimeout(() => {
@@ -1355,6 +1415,14 @@ useEffect(() => {
     layers,
     restoreCachedPosts,
   ]);
+
+  useEffect(() => {
+    const communityId = communityMapContext?.id || null;
+    if (!communityId) return;
+    if (lastCommunityMapRefreshIdRef.current === communityId) return;
+    lastCommunityMapRefreshIdRef.current = communityId;
+    handleRefreshLayersAndPins();
+  }, [communityMapContext?.id, handleRefreshLayersAndPins]);
 
   useEffect(() => {
     if (initialAppOpenRefreshDoneRef.current) return;
