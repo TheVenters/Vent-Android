@@ -34,6 +34,10 @@ import {
   encodeLayerKindWithIcon,
   parseLayerKindMetadata,
 } from "../utils/layerKind";
+import {
+  readRemovedLayerIds,
+  setLayerRemovedState,
+} from "../utils/removedLayerIds";
 
 const OWNER_LABELS = {
   system: "System",
@@ -431,6 +435,7 @@ const CommunitiesScreen = ({ navigation }) => {
         }
 
         let prefsMap = new Map();
+        let removedLayerIds = new Set();
         if (userId && linkedLayerIds.length > 0) {
           const linkedLayerIdSet = new Set(linkedLayerIds);
           const session = await getActiveSession();
@@ -478,6 +483,7 @@ const CommunitiesScreen = ({ navigation }) => {
           prefsMap = new Map(
             (prefsRows || []).map((row) => [row.layer_id, row.hidden]),
           );
+          removedLayerIds = await readRemovedLayerIds(userId);
         }
 
         const mappedLayers = linkedRows
@@ -486,7 +492,9 @@ const CommunitiesScreen = ({ navigation }) => {
             const layer = row.layer;
             const { baseKind, layerIcon } = parseLayerKindMetadata(layer.kind);
             const hasPref = prefsMap.has(layer.id);
-            const inCollection = hasPref ? !prefsMap.get(layer.id) : true;
+            const inCollection =
+              (hasPref ? !prefsMap.get(layer.id) : true) &&
+              !removedLayerIds.has(layer.id);
             const ownerLabel =
               layer.owner_type === "community"
                 ? ownerCommunityMap.get(layer.owner_id) || "Community"
@@ -767,6 +775,7 @@ const CommunitiesScreen = ({ navigation }) => {
       if (edgeResult.error) {
         throw edgeResult.error;
       }
+      await setLayerRemovedState(sessionUserId, layerId, hidden);
 
       if (selectedCommunityId) {
         await loadCommunityDetail(selectedCommunityId, sessionUserId);

@@ -76,6 +76,7 @@ import {
   toNormalizedLayerIdKey,
 } from "./map/layerRuntime";
 import { resolvePinsForMap } from "./map/pinFeedResolver";
+import { readRemovedLayerIds, setLayerRemovedState } from "../utils/removedLayerIds";
 
 const formatUsernameForLayer = (user) => {
   const fromMeta =
@@ -695,8 +696,11 @@ const MapScreen = ({ navigation, route }) => {
           })),
         });
 
+        const removedLayerIds = await readRemovedLayerIds(resolvedUserId);
+
         const collectionScopedLayers = mappedLayers.filter((layer) => {
           if (layer.owner_type !== "community") return true;
+          if (removedLayerIds.has(layer.id)) return false;
           if (forcedCommunityLayerIds.has(layer.id)) return true;
           return Boolean(layer.isCommunityAccessible);
         });
@@ -1563,6 +1567,7 @@ useEffect(() => {
                   actorUserId,
                 );
                 if (edgeResult.error) throw edgeResult.error;
+                await setLayerRemovedState(userId, layer.id, true);
 
                 await handleRefreshLayersAndPins();
               } catch (error) {
