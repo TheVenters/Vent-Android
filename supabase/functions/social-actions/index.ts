@@ -33,6 +33,10 @@ type SocialAction =
   | "create_pins"
   | "list_pins"
   | "delete_pin"
+  | "create_community"
+  | "create_community_layer"
+  | "set_layer_icon"
+  | "ensure_user_posting_layer"
   | "join_community"
   | "send_direct_message"
   | "send_community_message"
@@ -137,17 +141,26 @@ const areUsersAcceptedFriends = async (
   return Number(friendshipRes.count || 0) > 0;
 };
 
+const canActorViewPin = async (
+  adminClient: ReturnType<typeof createClient>,
+  pinId: string,
+  actorId: string,
+) => {
+  const visibilityRes = await adminClient.rpc("can_actor_view_pin", {
+    target_pin_id: pinId,
+    actor_id: actorId,
+  });
+  if (visibilityRes.error) throw visibilityRes.error;
+  return Boolean(visibilityRes.data);
+};
+
 const isVisibleToActor = async (
   adminClient: ReturnType<typeof createClient>,
   actorId: string,
-  pin: { user_id: string; layer: string },
+  pinId: string,
 ) => {
-  if (pin.layer === "public") return true;
-  if (pin.user_id === actorId) return true;
-  if (pin.layer === "private") return false;
-  if (pin.layer !== "friends") return false;
-
-  return await areUsersAcceptedFriends(adminClient, actorId, pin.user_id);
+  if (!isUuid(pinId) || !isUuid(actorId)) return false;
+  return canActorViewPin(adminClient, pinId, actorId);
 };
 
 const computeVoteSummary = async (
@@ -198,7 +211,7 @@ const handleVote = async (
   if (pinRes.data.user_id === actorId) {
     return jsonResponse(403, { error: "You cannot vote on your own pin." });
   }
-  const visible = await isVisibleToActor(adminClient, actorId, pinRes.data);
+  const visible = await isVisibleToActor(adminClient, actorId, pinId);
   if (!visible) {
     return jsonResponse(403, { error: "Pin not accessible for current user." });
   }
@@ -257,7 +270,7 @@ const handleVoteSummary = async (
     return jsonResponse(404, { error: "Pin not found." });
   }
 
-  const visible = await isVisibleToActor(adminClient, actorId, pinRes.data);
+  const visible = await isVisibleToActor(adminClient, actorId, pinId);
   if (!visible) {
     return jsonResponse(403, { error: "Pin not accessible for current user." });
   }
@@ -504,7 +517,7 @@ const handleListComments = async (
     return jsonResponse(404, { error: "Pin not found." });
   }
 
-  const visible = await isVisibleToActor(adminClient, actorId, pinRes.data);
+  const visible = await isVisibleToActor(adminClient, actorId, pinId);
   if (!visible) {
     return jsonResponse(403, { error: "Pin not accessible for current user." });
   }
@@ -543,7 +556,7 @@ const handleAddComment = async (
     return jsonResponse(404, { error: "Pin not found." });
   }
 
-  const visible = await isVisibleToActor(adminClient, actorId, pinRes.data);
+  const visible = await isVisibleToActor(adminClient, actorId, pinId);
   if (!visible) {
     return jsonResponse(403, { error: "Pin not accessible for current user." });
   }
@@ -1133,71 +1146,57 @@ const handleListPins = async (
   actorId: string,
   payload: Record<string, unknown>,
 ) => {
-  const requestedLayerKeys = Array.isArray(payload.layerKeys)
-    ? payload.layerKeys
-    : [];
+  const requestedLayerKeys = Array.isArray(payload.layerKeys) ? payload.layerKeys : [];
   const layerKeys = Array.from(
     new Set(
       requestedLayerKeys
         .map((value) => asString(value).toLowerCase())
-        .filter((value) => ["public", "friends", "private", "events"].includes(value)),
+        .filter((value) => ["public", "friends", "private"].includes(value)),
     ),
   );
-  if (layerKeys.length === 0) {
-    return jsonResponse(400, { error: "layerKeys must include at least one valid layer." });
-  }
 
   const requestedLimit = Number(payload.limit);
   const limit = Number.isFinite(requestedLimit)
     ? Math.max(1, Math.min(5000, Math.floor(requestedLimit)))
     : 3000;
+  const fetchLimit = Math.max(limit, Math.min(5000, limit * 4));
 
   const pinsRes = await adminClient
     .from("pins")
     .select("*")
-    .in("layer", layerKeys)
     .order("created_at", { ascending: false })
-    .limit(limit);
+    .limit(fetchLimit);
   if (pinsRes.error) {
     return jsonResponse(400, { error: pinsRes.error.message });
   }
 
-  const rows = pinsRes.data || [];
-  let friendIdSet = new Set<string>();
-  if (layerKeys.includes("friends")) {
-    const friendshipRes = await adminClient
-      .from("friends")
-      .select("user_id,friend_id,status")
-      .or(`user_id.eq.${actorId},friend_id.eq.${actorId}`)
-      .eq("status", "accepted");
-    if (friendshipRes.error) {
-      return jsonResponse(400, { error: friendshipRes.error.message });
-    }
-
-    friendIdSet = new Set(
-      (friendshipRes.data || [])
-        .map((row) => (row.user_id === actorId ? row.friend_id : row.user_id))
-        .filter(Boolean),
-    );
+  const visibleRows: Record<string, unknown>[] = [];
+  for (const pin of pinsRes.data || []) {
+    const pinId = asString(pin?.id);
+    if (!isUuid(pinId)) continue;
+    const visible = await canActorViewPin(adminClient, pinId, actorId);
+    if (visible) visibleRows.push(pin);
   }
 
-  const pins = rows.filter((pin) => {
-    const pinLayer = asString(pin?.layer).toLowerCase();
-    if (pinLayer === "public") return true;
-    if (pinLayer === "private") {
-      return pin?.user_id === actorId;
-    }
-    if (pinLayer === "friends") {
-      return pin?.user_id === actorId || friendIdSet.has(pin?.user_id);
-    }
-    return false;
-  });
+  const includePublic = layerKeys.length === 0 || layerKeys.includes("public");
+  const includeFriends = layerKeys.includes("friends");
+  const includePrivate = layerKeys.includes("private");
+  const pins = visibleRows
+    .filter((pin) => {
+      const isOwn = asString(pin?.user_id) === actorId;
+      if (includePublic) return true;
+      if (includeFriends && !isOwn) return true;
+      if (includePrivate && isOwn) return true;
+      return false;
+    })
+    .slice(0, limit);
 
   return jsonResponse(200, {
     success: true,
     pins,
     count: pins.length,
-    requestedCount: rows.length,
+    requestedCount: (pinsRes.data || []).length,
+    visibleCount: visibleRows.length,
   });
 };
 
@@ -1272,6 +1271,370 @@ const handleSetLayerOrder = async (
     success: true,
     layerIds,
     count: layerIds.length,
+  });
+};
+
+const handleCreateCommunity = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const name = asString(payload.name).slice(0, 80);
+  const description = asString(payload.description);
+  const incomingSlug = asString(payload.slug);
+  const slug = (incomingSlug || name)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+
+  if (!name) {
+    return jsonResponse(400, { error: "name is required." });
+  }
+  if (!slug) {
+    return jsonResponse(400, { error: "slug is required." });
+  }
+
+  let createRes = await adminClient
+    .from("communities")
+    .insert({
+      slug,
+      name,
+      description: description || null,
+      lead_admin_user_id: actorId,
+      owner_user_id: actorId,
+    })
+    .select("id,slug,name,description,lead_admin_user_id,owner_user_id,created_at")
+    .single();
+
+  const createErrorCode = asString(createRes.error?.code);
+  const createErrorMessage = asString(createRes.error?.message).toLowerCase();
+  if (
+    createRes.error &&
+    createErrorCode === "42703" &&
+    createErrorMessage.includes("owner_user_id")
+  ) {
+    // Legacy schema fallback where owner_user_id does not exist yet.
+    createRes = await adminClient
+      .from("communities")
+      .insert({
+        slug,
+        name,
+        description: description || null,
+        lead_admin_user_id: actorId,
+      })
+      .select("id,slug,name,description,lead_admin_user_id,created_at")
+      .single();
+  }
+
+  if (createRes.error) {
+    if (asString(createRes.error.code) === "23505") {
+      return jsonResponse(409, { error: "A community with this slug already exists." });
+    }
+    return jsonResponse(400, { error: createRes.error.message });
+  }
+
+  const membershipRes = await adminClient
+    .from("community_members")
+    .upsert(
+      [
+        {
+          community_id: createRes.data.id,
+          user_id: actorId,
+          role: "admin",
+          status: "accepted",
+        },
+      ],
+      { onConflict: "community_id,user_id" },
+    )
+    .select("community_id,user_id,status,role")
+    .single();
+
+  if (membershipRes.error) {
+    return jsonResponse(400, { error: membershipRes.error.message });
+  }
+
+  return jsonResponse(200, {
+    success: true,
+    community: createRes.data,
+    membership: membershipRes.data,
+  });
+};
+
+const handleCreateCommunityLayer = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const communityId = asString(payload.communityId);
+  const name = asString(payload.name).slice(0, 80);
+  const kind = asString(payload.kind) || "user_overlay";
+
+  if (!isUuid(communityId)) {
+    return jsonResponse(400, { error: "communityId is required." });
+  }
+  if (!name) {
+    return jsonResponse(400, { error: "name is required." });
+  }
+
+  const communityRes = await adminClient
+    .from("communities")
+    .select("id")
+    .eq("id", communityId)
+    .maybeSingle();
+  if (communityRes.error) {
+    return jsonResponse(400, { error: communityRes.error.message });
+  }
+  if (!communityRes.data) {
+    return jsonResponse(404, { error: "Community not found." });
+  }
+
+  const profileRes = await adminClient
+    .from("profiles")
+    .select("is_admin")
+    .eq("id", actorId)
+    .maybeSingle();
+  if (profileRes.error) {
+    return jsonResponse(400, { error: profileRes.error.message });
+  }
+  const isGlobalAdmin = Boolean(profileRes.data?.is_admin);
+
+  const adminMembershipRes = await adminClient
+    .from("community_members")
+    .select("user_id")
+    .eq("community_id", communityId)
+    .eq("user_id", actorId)
+    .in("status", ["accepted", "active"])
+    .in("role", ["admin", "owner", "mod"])
+    .maybeSingle();
+  if (adminMembershipRes.error) {
+    return jsonResponse(400, { error: adminMembershipRes.error.message });
+  }
+
+  if (!isGlobalAdmin && !adminMembershipRes.data) {
+    return jsonResponse(403, { error: "Only community admins can create layers." });
+  }
+
+  const maxSortRes = await adminClient
+    .from("community_layers")
+    .select("sort_order")
+    .eq("community_id", communityId)
+    .order("sort_order", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (maxSortRes.error) {
+    return jsonResponse(400, { error: maxSortRes.error.message });
+  }
+  const nextSort = Number(maxSortRes.data?.sort_order || 0) + 1;
+
+  const layerInsertRes = await adminClient
+    .from("layers")
+    .insert({
+      name,
+      kind,
+      enabled: true,
+      owner_type: "community",
+      owner_id: communityId,
+      is_public: true,
+    })
+    .select("id,name,kind,owner_type,owner_id,enabled,is_public")
+    .single();
+  if (layerInsertRes.error) {
+    return jsonResponse(400, { error: layerInsertRes.error.message });
+  }
+
+  const linkRes = await adminClient.from("community_layers").upsert(
+    {
+      community_id: communityId,
+      layer_id: layerInsertRes.data.id,
+      enabled: true,
+      sort_order: nextSort,
+    },
+    { onConflict: "community_id,layer_id" },
+  );
+  if (linkRes.error) {
+    return jsonResponse(400, { error: linkRes.error.message });
+  }
+
+  return jsonResponse(200, {
+    success: true,
+    layer: layerInsertRes.data,
+    sort_order: nextSort,
+  });
+};
+
+const handleSetLayerIcon = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const layerId = asString(payload.layerId);
+  const kind = asString(payload.kind);
+
+  if (!isUuid(layerId)) {
+    return jsonResponse(400, { error: "layerId is required." });
+  }
+  if (!kind) {
+    return jsonResponse(400, { error: "kind is required." });
+  }
+
+  const layerRes = await adminClient
+    .from("layers")
+    .select("id,owner_type,owner_id")
+    .eq("id", layerId)
+    .maybeSingle();
+  if (layerRes.error) {
+    return jsonResponse(400, { error: layerRes.error.message });
+  }
+  if (!layerRes.data) {
+    return jsonResponse(404, { error: "Layer not found." });
+  }
+
+  const profileRes = await adminClient
+    .from("profiles")
+    .select("is_admin")
+    .eq("id", actorId)
+    .maybeSingle();
+  if (profileRes.error) {
+    return jsonResponse(400, { error: profileRes.error.message });
+  }
+  const isGlobalAdmin = Boolean(profileRes.data?.is_admin);
+
+  const ownerType = asString(layerRes.data.owner_type) || "system";
+  const ownerId = asString(layerRes.data.owner_id);
+  let canEdit = isGlobalAdmin;
+
+  if (!canEdit && ownerType === "community" && isUuid(ownerId)) {
+    const adminMembershipRes = await adminClient
+      .from("community_members")
+      .select("user_id")
+      .eq("community_id", ownerId)
+      .eq("user_id", actorId)
+      .in("status", ["accepted", "active"])
+      .in("role", ["admin", "owner", "mod"])
+      .maybeSingle();
+    if (adminMembershipRes.error) {
+      return jsonResponse(400, { error: adminMembershipRes.error.message });
+    }
+    canEdit = Boolean(adminMembershipRes.data);
+  }
+
+  if (!canEdit && ownerType === "user") {
+    canEdit = ownerId === actorId;
+  }
+
+  if (!canEdit) {
+    return jsonResponse(403, { error: "Not allowed to update this layer icon." });
+  }
+
+  const updateRes = await adminClient
+    .from("layers")
+    .update({ kind })
+    .eq("id", layerId)
+    .select("id,name,kind,owner_type,owner_id,enabled,is_public")
+    .maybeSingle();
+  if (updateRes.error) {
+    return jsonResponse(400, { error: updateRes.error.message });
+  }
+  if (!updateRes.data) {
+    return jsonResponse(404, { error: "Layer update returned no rows." });
+  }
+
+  return jsonResponse(200, { success: true, layer: updateRes.data });
+};
+
+const handleEnsureUserPostingLayer = async (
+  adminClient: ReturnType<typeof createClient>,
+  actorId: string,
+  payload: Record<string, unknown>,
+) => {
+  const preferredName = asString(payload.name);
+  const legacyName = asString(payload.legacyName);
+  const kind = asString(payload.kind) || "user_posts";
+  const fallbackName = preferredName || legacyName || `user-${actorId}-posts`;
+
+  const ownedRes = await adminClient
+    .from("layers")
+    .select("id,name,kind,owner_type,owner_id,enabled,is_public,created_at")
+    .eq("owner_type", "user")
+    .eq("kind", kind)
+    .eq("owner_id", actorId)
+    .order("created_at", { ascending: true })
+    .limit(5);
+  if (ownedRes.error) {
+    return jsonResponse(400, { error: ownedRes.error.message });
+  }
+
+  const ownedLayer = (ownedRes.data || [])[0] || null;
+  if (ownedLayer) {
+    if (preferredName && ownedLayer.name !== preferredName) {
+      const renameRes = await adminClient
+        .from("layers")
+        .update({ name: preferredName })
+        .eq("id", ownedLayer.id)
+        .select("id,name,kind,owner_type,owner_id,enabled,is_public")
+        .single();
+      if (renameRes.error) {
+        return jsonResponse(400, { error: renameRes.error.message });
+      }
+      return jsonResponse(200, { success: true, layer: renameRes.data });
+    }
+    return jsonResponse(200, { success: true, layer: ownedLayer });
+  }
+
+  if (legacyName) {
+    const legacyRes = await adminClient
+      .from("layers")
+      .select("id,name,kind,owner_type,owner_id,enabled,is_public")
+      .eq("owner_type", "user")
+      .eq("kind", kind)
+      .eq("name", legacyName)
+      .limit(5);
+    if (legacyRes.error) {
+      return jsonResponse(400, { error: legacyRes.error.message });
+    }
+    const reusableLegacyLayer = (legacyRes.data || []).find((layer) => {
+      const ownerId = asString(layer?.owner_id);
+      return !ownerId || ownerId === actorId;
+    });
+    if (reusableLegacyLayer?.id) {
+      const claimRes = await adminClient
+        .from("layers")
+        .update({
+          owner_id: actorId,
+          name: preferredName || legacyName,
+          enabled: true,
+          is_public: false,
+        })
+        .eq("id", reusableLegacyLayer.id)
+        .select("id,name,kind,owner_type,owner_id,enabled,is_public")
+        .single();
+      if (claimRes.error) {
+        return jsonResponse(400, { error: claimRes.error.message });
+      }
+      return jsonResponse(200, { success: true, layer: claimRes.data });
+    }
+  }
+
+  const createRes = await adminClient
+    .from("layers")
+    .insert({
+      kind,
+      name: fallbackName,
+      enabled: true,
+      owner_type: "user",
+      owner_id: actorId,
+      is_public: false,
+    })
+    .select("id,name,kind,owner_type,owner_id,enabled,is_public")
+    .single();
+  if (createRes.error) {
+    return jsonResponse(400, { error: createRes.error.message });
+  }
+
+  return jsonResponse(200, {
+    success: true,
+    layer: createRes.data,
   });
 };
 
@@ -1700,6 +2063,10 @@ Deno.serve(async (req) => {
           action !== "list_direct_messages" &&
           action !== "mark_direct_messages_read" &&
           action !== "list_community_messages" &&
+          action !== "create_community" &&
+          action !== "create_community_layer" &&
+          action !== "set_layer_icon" &&
+          action !== "ensure_user_posting_layer" &&
           action !== "join_community" &&
           action !== "leave_community" &&
           action !== "send_direct_message" &&
@@ -1807,6 +2174,26 @@ Deno.serve(async (req) => {
     if (action === "delete_pin") {
       return await withRefreshedTokens(
         await handleDeletePin(adminClient, actorId, payload),
+      );
+    }
+    if (action === "create_community") {
+      return await withRefreshedTokens(
+        await handleCreateCommunity(adminClient, actorId, payload),
+      );
+    }
+    if (action === "create_community_layer") {
+      return await withRefreshedTokens(
+        await handleCreateCommunityLayer(adminClient, actorId, payload),
+      );
+    }
+    if (action === "set_layer_icon") {
+      return await withRefreshedTokens(
+        await handleSetLayerIcon(adminClient, actorId, payload),
+      );
+    }
+    if (action === "ensure_user_posting_layer") {
+      return await withRefreshedTokens(
+        await handleEnsureUserPostingLayer(adminClient, actorId, payload),
       );
     }
     if (action === "join_community") {

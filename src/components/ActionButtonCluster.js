@@ -33,12 +33,11 @@ const ActionButtonCluster = ({
   onOpenLayerPosts,
   onToggleLayer,
   onMoveLayer,
+  onRemoveLayer,
   onRefreshLayers,
   onPostSubmit,
   userLocation,
   onSearch,
-  mapMode,
-  onToggleMapMode,
   onArrowPinFocus,
 }) => {
   const toRadians = useCallback((degrees) => (degrees * Math.PI) / 180, []);
@@ -360,44 +359,6 @@ const ActionButtonCluster = ({
               <Text style={styles.menuItemText}>{item}</Text>
             </TouchableOpacity>
           ))}
-          <View style={styles.mapModeRow}>
-            <TouchableOpacity
-              style={[
-                styles.mapModePill,
-                mapMode !== "explore" && styles.mapModePillActive,
-              ]}
-              onPress={() =>
-                mapMode === "explore" && onToggleMapMode && onToggleMapMode()
-              }
-            >
-              <Text
-                style={[
-                  styles.mapModePillText,
-                  mapMode !== "explore" && styles.mapModePillTextActive,
-                ]}
-              >
-                UserMap
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.mapModePill,
-                mapMode === "explore" && styles.mapModePillActive,
-              ]}
-              onPress={() =>
-                mapMode !== "explore" && onToggleMapMode && onToggleMapMode()
-              }
-            >
-              <Text
-                style={[
-                  styles.mapModePillText,
-                  mapMode === "explore" && styles.mapModePillTextActive,
-                ]}
-              >
-                Explore
-              </Text>
-            </TouchableOpacity>
-          </View>
         </Animated.View>
 
         <Animated.View style={arrowButtonStyle}>
@@ -443,6 +404,7 @@ const ActionButtonCluster = ({
         onOpenLayerPosts={onOpenLayerPosts}
         onToggleLayer={onToggleLayer}
         onMoveLayer={onMoveLayer}
+        onRemoveLayer={onRemoveLayer}
         onRefresh={onRefreshLayers}
       />
 
@@ -533,32 +495,6 @@ const createStyles = (palette) =>
       marginBottom: 2,
       zIndex: 1000,
       elevation: 1000,
-    },
-    mapModeRow: {
-      flexDirection: "row",
-      backgroundColor: palette.surface,
-      borderRadius: 999,
-      padding: 4,
-      marginBottom: 2,
-      borderWidth: 1,
-      borderColor: palette.border,
-      gap: 4,
-    },
-    mapModePill: {
-      paddingHorizontal: 12,
-      paddingVertical: 7,
-      borderRadius: 999,
-    },
-    mapModePillActive: {
-      backgroundColor: palette.primary,
-    },
-    mapModePillText: {
-      fontSize: 12,
-      fontWeight: "700",
-      color: palette.subtext,
-    },
-    mapModePillTextActive: {
-      color: palette.onPrimary,
     },
     menuItem: {
       backgroundColor: palette.surface,

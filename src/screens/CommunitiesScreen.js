@@ -23,11 +23,13 @@ import {
   supabase,
   supabaseWithAccessToken,
   getCurrentUser,
+  createCommunityViaEdgeFunction,
+  createCommunityLayerViaEdgeFunction,
+  setLayerIconViaEdgeFunction,
   joinCommunityViaEdgeFunction,
   leaveCommunityViaEdgeFunction,
   setLayerPreferenceViaEdgeFunction,
 } from "../services/supabase";
-import { getPinLayerKeyFromLayer } from "../utils/layers";
 import {
   encodeLayerKindWithIcon,
   parseLayerKindMetadata,
@@ -38,11 +40,24 @@ const OWNER_LABELS = {
   community: "Community",
   user: "User",
 };
+const ICON_TRACE_ENABLED = true;
+const logIconTrace = (label, payload = null) => {
+  if (!ICON_TRACE_ENABLED) return;
+  if (payload === null) {
+    console.log(`[IconTrace] ${label}`);
+    return;
+  }
+  console.log(`[IconTrace] ${label}`, payload);
+};
 const isRlsPolicyError = (error) =>
   error?.code === "42501" ||
   String(error?.message || "")
     .toLowerCase()
     .includes("row-level security policy");
+const isUnsupportedEdgeActionError = (error) =>
+  String(error?.message || "")
+    .toLowerCase()
+    .includes("unsupported action");
 
 const slugify = (value) =>
   (value || "")
@@ -151,6 +166,42 @@ const CommunitiesScreen = ({ navigation }) => {
     if (member.user_id) return member.user_id.slice(0, 8);
     return "Unknown";
   }, []);
+
+  const resolveWriteClient = useCallback(
+    async ({
+      requireSignedInMessage = "Please sign in again.",
+      navigateToAccount = false,
+    } = {}) => {
+      const session = await getActiveSession();
+      const token = session?.access_token || null;
+      const actorUserId = session?.user?.id || null;
+      if (!token || !actorUserId || (currentUser?.id && actorUserId !== currentUser.id)) {
+        Alert.alert("Session Expired", requireSignedInMessage);
+        if (navigateToAccount) {
+          navigation.navigate("Account");
+        }
+        return null;
+      }
+      return {
+        session,
+        actorUserId,
+        client: supabaseWithAccessToken(token),
+      };
+    },
+    [currentUser?.id, navigation],
+  );
+
+  const navigateToMapTab = useCallback(
+    (params = undefined) => {
+      const parentNav = navigation.getParent?.();
+      if (parentNav?.navigate) {
+        parentNav.navigate("Map", params);
+        return;
+      }
+      navigation.navigate("Map", params);
+    },
+    [navigation],
+  );
 
   const loadCommunitySummary = useCallback(async (userId) => {
     setLoading(true);
@@ -435,7 +486,7 @@ const CommunitiesScreen = ({ navigation }) => {
             const layer = row.layer;
             const { baseKind, layerIcon } = parseLayerKindMetadata(layer.kind);
             const hasPref = prefsMap.has(layer.id);
-            const inCollection = hasPref ? !prefsMap.get(layer.id) : false;
+            const inCollection = hasPref ? !prefsMap.get(layer.id) : true;
             const ownerLabel =
               layer.owner_type === "community"
                 ? ownerCommunityMap.get(layer.owner_id) || "Community"
@@ -453,36 +504,35 @@ const CommunitiesScreen = ({ navigation }) => {
               ownerLabel,
             };
           });
-
-        const pinLayerKeys = Array.from(
-          new Set(
-            mappedLayers.map((layer) =>
-              getPinLayerKeyFromLayer({
-                kind: layer.kind,
-                name: layer.name,
-                owner_type: layer.owner_type,
-                is_public: layer.is_public,
-              }),
-            ),
-          ),
-        );
+        logIconTrace("loadCommunityDetail:mappedLayers", {
+          communityId,
+          count: mappedLayers.length,
+          layers: mappedLayers.map((layer) => ({
+            id: layer.id,
+            name: layer.name,
+            raw_kind: layer.raw_kind || layer.kind,
+            kind: layer.kind,
+            layer_icon: layer.layer_icon || null,
+            inCollection: Boolean(layer.inCollection),
+          })),
+        });
 
         let totalPosts = 0;
-        if (pinLayerKeys.length > 0) {
-          const communityLayerIdSet = new Set(
-            mappedLayers.map((layer) => layer.id),
-          );
-          const postsRes = await supabase
-            .from("pins")
-            .select("id,layer,geometry")
-            .in("layer", pinLayerKeys)
-            .order("created_at", { ascending: false })
-            .limit(1000);
-          if (postsRes.error) throw postsRes.error;
-
-          totalPosts = (postsRes.data || []).filter((post) =>
-            communityLayerIdSet.has(post?.geometry?.layer_id),
-          ).length;
+        const communityLayerIds = mappedLayers
+          .map((layer) => layer.id)
+          .filter(Boolean);
+        if (communityLayerIds.length > 0) {
+          const membershipsRes = await supabase
+            .from("pin_layer_memberships")
+            .select("pin_id")
+            .in("layer_id", communityLayerIds)
+            .limit(5000);
+          if (membershipsRes.error) throw membershipsRes.error;
+          totalPosts = new Set(
+            (membershipsRes.data || [])
+              .map((row) => row.pin_id)
+              .filter(Boolean),
+          ).size;
         }
 
         const linkedIdSet = new Set(linkedLayerIds);
@@ -755,45 +805,88 @@ const CommunitiesScreen = ({ navigation }) => {
     }
 
     try {
-      const session = await getActiveSession();
-      const token = session?.access_token;
-      if (!token || session?.user?.id !== currentUser.id) {
-        Alert.alert("Session Expired", "Please sign in again to create a community.");
+      const writeContext = await resolveWriteClient({
+        requireSignedInMessage: "Please sign in again to create a community.",
+        navigateToAccount: true,
+      });
+      if (!writeContext) {
         return;
       }
-      const authed = supabaseWithAccessToken(token);
-
-      const createRes = await authed
-        .from("communities")
-        .insert({
-          slug,
-          name: communityNameInput.trim(),
-          description: communityDescriptionInput.trim() || null,
-          lead_admin_user_id: currentUser.id,
-        })
-        .select("id,slug,name,description,lead_admin_user_id,created_at")
-        .single();
-
-      if (createRes.error) throw createRes.error;
-
-      const membershipRes = await authed.from("community_members").insert(
-        {
-          user_id: currentUser.id,
-          community_id: createRes.data.id,
-          role: "admin",
-          status: "accepted",
-        },
+      let createdCommunityId = null;
+      const edgeResult = await createCommunityViaEdgeFunction(
+        communityNameInput.trim(),
+        slug,
+        communityDescriptionInput.trim() || null,
+        writeContext.session.access_token,
+        writeContext.session.refresh_token || null,
+        writeContext.actorUserId,
       );
 
-      if (membershipRes.error) throw membershipRes.error;
+      if (!edgeResult.error) {
+        createdCommunityId = edgeResult.data?.community?.id || null;
+      } else if (isUnsupportedEdgeActionError(edgeResult.error)) {
+        let createRes = await writeContext.client
+          .from("communities")
+          .insert({
+            slug,
+            name: communityNameInput.trim(),
+            description: communityDescriptionInput.trim() || null,
+            lead_admin_user_id: writeContext.actorUserId,
+            owner_user_id: writeContext.actorUserId,
+          })
+          .select("id")
+          .single();
+
+        const createCode = String(createRes.error?.code || "");
+        const createMessage = String(createRes.error?.message || "").toLowerCase();
+        if (
+          createRes.error &&
+          createCode === "42703" &&
+          createMessage.includes("owner_user_id")
+        ) {
+          createRes = await writeContext.client
+            .from("communities")
+            .insert({
+              slug,
+              name: communityNameInput.trim(),
+              description: communityDescriptionInput.trim() || null,
+              lead_admin_user_id: writeContext.actorUserId,
+            })
+            .select("id")
+            .single();
+        }
+
+        if (createRes.error) throw createRes.error;
+        createdCommunityId = createRes.data?.id || null;
+        if (!createdCommunityId) {
+          throw new Error("Community created but ID was not returned.");
+        }
+
+        const membershipRes = await writeContext.client
+          .from("community_members")
+          .upsert(
+            {
+              user_id: writeContext.actorUserId,
+              community_id: createdCommunityId,
+              role: "admin",
+              status: "accepted",
+            },
+            { onConflict: "community_id,user_id" },
+          );
+        if (membershipRes.error) throw membershipRes.error;
+      } else {
+        throw edgeResult.error;
+      }
 
       setShowCreateCommunityModal(false);
       setCommunityNameInput("");
       setCommunityDescriptionInput("");
       setCommunitySlugInput("");
 
-      await loadCommunitySummary(currentUser.id);
-      setSelectedCommunityId(createRes.data.id);
+      await loadCommunitySummary(writeContext.actorUserId);
+      if (createdCommunityId) {
+        setSelectedCommunityId(createdCommunityId);
+      }
     } catch (error) {
       console.error("Error creating community:", error);
       Alert.alert("Error", error.message || "Failed to create community.");
@@ -809,13 +902,35 @@ const CommunitiesScreen = ({ navigation }) => {
     }
 
     try {
-      const { error } = await supabase.rpc("create_community_layer", {
-        p_community_id: selectedCommunityId,
-        p_name: newLayerName.trim(),
-        p_kind: newLayerKind.trim() || "user_overlay",
+      const writeContext = await resolveWriteClient({
+        requireSignedInMessage: "Please sign in again to create a layer.",
+        navigateToAccount: true,
       });
+      if (!writeContext) {
+        return;
+      }
 
-      if (error) throw error;
+      const edgeResult = await createCommunityLayerViaEdgeFunction(
+        selectedCommunityId,
+        newLayerName.trim(),
+        newLayerKind.trim() || "user_overlay",
+        writeContext.session.access_token,
+        writeContext.session.refresh_token || null,
+        writeContext.actorUserId,
+      );
+
+      if (edgeResult.error) {
+        if (!isUnsupportedEdgeActionError(edgeResult.error)) {
+          throw edgeResult.error;
+        }
+
+        const { error } = await writeContext.client.rpc("create_community_layer", {
+          p_community_id: selectedCommunityId,
+          p_name: newLayerName.trim(),
+          p_kind: newLayerKind.trim() || "user_overlay",
+        });
+        if (error) throw error;
+      }
 
       setShowCreateLayerModal(false);
       setNewLayerName("");
@@ -843,13 +958,21 @@ const CommunitiesScreen = ({ navigation }) => {
     }
 
     try {
+      const writeContext = await resolveWriteClient({
+        requireSignedInMessage: "Please sign in again to attach a layer.",
+        navigateToAccount: true,
+      });
+      if (!writeContext) {
+        return;
+      }
+
       const nextSort =
         communityLayers.reduce(
           (max, layer) => Math.max(max, layer.sortOrder || 0),
           0,
         ) + 1;
 
-      const res = await supabase.from("community_layers").upsert(
+      const res = await writeContext.client.from("community_layers").upsert(
         {
           community_id: selectedCommunityId,
           layer_id: layerId,
@@ -902,7 +1025,15 @@ const CommunitiesScreen = ({ navigation }) => {
           style: "destructive",
           onPress: async () => {
             try {
-              const { data, error } = await supabase.rpc(
+              const writeContext = await resolveWriteClient({
+                requireSignedInMessage: "Please sign in again to delete a layer.",
+                navigateToAccount: true,
+              });
+              if (!writeContext) {
+                return;
+              }
+
+              const { data, error } = await writeContext.client.rpc(
                 "delete_community_layer",
                 {
                   p_layer_id: layer.id,
@@ -945,7 +1076,16 @@ const CommunitiesScreen = ({ navigation }) => {
           style: "destructive",
           onPress: async () => {
             try {
-              const { data, error } = await supabase.rpc(
+              const writeContext = await resolveWriteClient({
+                requireSignedInMessage:
+                  "Please sign in again to delete this community.",
+                navigateToAccount: true,
+              });
+              if (!writeContext) {
+                return;
+              }
+
+              const { data, error } = await writeContext.client.rpc(
                 "delete_community_with_layers",
                 {
                   p_community_id: selectedCommunityId,
@@ -992,7 +1132,15 @@ const CommunitiesScreen = ({ navigation }) => {
 
     try {
       setRoleUpdatingUserId(targetUserId);
-      const { error } = await supabase
+      const writeContext = await resolveWriteClient({
+        requireSignedInMessage: "Please sign in again to manage community roles.",
+        navigateToAccount: true,
+      });
+      if (!writeContext) {
+        return;
+      }
+
+      const { error } = await writeContext.client
         .from("community_members")
         .update({ role: nextRole, updated_at: new Date().toISOString() })
         .eq("community_id", selectedCommunityId)
@@ -1035,7 +1183,16 @@ const CommunitiesScreen = ({ navigation }) => {
           onPress: async () => {
             try {
               setLeadTransferUserId(targetUserId);
-              const { data, error } = await supabase.rpc(
+              const writeContext = await resolveWriteClient({
+                requireSignedInMessage:
+                  "Please sign in again to transfer community ownership.",
+                navigateToAccount: true,
+              });
+              if (!writeContext) {
+                return;
+              }
+
+              const { data, error } = await writeContext.client.rpc(
                 "transfer_community_lead_admin",
                 {
                   p_community_id: selectedCommunityId,
@@ -1075,22 +1232,80 @@ const CommunitiesScreen = ({ navigation }) => {
     if (!editingLayer?.id) return;
 
     try {
+      const writeContext = await resolveWriteClient({
+        requireSignedInMessage: "Please sign in again to update layer settings.",
+        navigateToAccount: true,
+      });
+      if (!writeContext) {
+        return;
+      }
+
+      const { baseKind } = parseLayerKindMetadata(
+        editingLayer.raw_kind || editingLayer.kind || "user_overlay",
+      );
       const nextKind = encodeLayerKindWithIcon(
-        editingLayer.kind || "user_overlay",
+        baseKind || "user_overlay",
         layerIconInput,
       );
-      const { error } = await supabase
+      logIconTrace("handleSaveLayerIcon:start", {
+        layerId: editingLayer.id,
+        layerName: editingLayer.name,
+        previousRawKind: editingLayer.raw_kind || editingLayer.kind || null,
+        baseKind: baseKind || "user_overlay",
+        inputIcon: String(layerIconInput || "").trim() || null,
+        nextKind,
+      });
+
+      const updateRes = await setLayerIconViaEdgeFunction(
+        editingLayer.id,
+        nextKind,
+        writeContext.session?.access_token || null,
+        writeContext.session?.refresh_token || null,
+        writeContext.actorUserId,
+      );
+      if (updateRes.error) throw updateRes.error;
+      logIconTrace("handleSaveLayerIcon:updateResult", {
+        row: updateRes.data?.layer || updateRes.data || null,
+      });
+
+      const verifyRes = await writeContext.client
         .from("layers")
-        .update({ kind: nextKind })
-        .eq("id", editingLayer.id);
-      if (error) throw error;
+        .select("id,name,kind,owner_type,owner_id")
+        .eq("id", editingLayer.id)
+        .maybeSingle();
+      if (verifyRes.error) throw verifyRes.error;
+      logIconTrace("handleSaveLayerIcon:verifyReadBack", {
+        row: verifyRes.data || null,
+      });
+
+      setCommunityLayers((prev) =>
+        prev.map((layer) =>
+          layer.id === editingLayer.id
+            ? {
+                ...layer,
+                raw_kind: nextKind,
+                kind: baseKind || layer.kind,
+                layer_icon: String(layerIconInput || "").trim() || null,
+              }
+            : layer,
+        ),
+      );
 
       setShowLayerIconModal(false);
       setEditingLayer(null);
       setLayerIconInput("");
       await loadCommunityDetail(selectedCommunityId, currentUser?.id);
+      logIconTrace("handleSaveLayerIcon:complete", {
+        layerId: editingLayer.id,
+        selectedCommunityId,
+      });
     } catch (error) {
       console.error("Error updating layer icon:", error);
+      logIconTrace("handleSaveLayerIcon:error", {
+        message: error?.message || String(error),
+        code: error?.code || null,
+        details: error?.details || null,
+      });
       Alert.alert("Error", error.message || "Failed to update layer icon.");
     }
   };
@@ -1423,7 +1638,7 @@ const CommunitiesScreen = ({ navigation }) => {
               <TouchableOpacity
                 style={styles.secondaryInlineBtn}
                 onPress={() =>
-                  navigation.navigate("Map", {
+                  navigateToMapTab({
                     communityMap: {
                       id: selectedCommunity.id,
                       name: selectedCommunity.name,
@@ -1660,7 +1875,7 @@ const CommunitiesScreen = ({ navigation }) => {
       <View style={styles.header}>
         <TouchableOpacity
           style={styles.backButton}
-          onPress={() => navigation.navigate("Map")}
+          onPress={() => navigateToMapTab()}
         >
           <Text style={styles.backButtonText}>{"< Map"}</Text>
         </TouchableOpacity>

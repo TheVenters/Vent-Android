@@ -51,6 +51,7 @@ const LayersControlPanel = ({
   onToggleLayer,
   onMoveLayer,
   onRefresh,
+  onRemoveLayer,
 }) => {
   const { palette, isDark } = useAppTheme();
   const styles = createStyles(palette, isDark);
@@ -165,6 +166,18 @@ const LayersControlPanel = ({
                       </View>
 
                       <View style={styles.rowRight}>
+                        {layer.owner_type === "community" &&
+                        !layer.isForcedEnabled ? (
+                          <TouchableOpacity
+                            style={styles.removeBtn}
+                            onPress={(event) => {
+                              event?.stopPropagation?.();
+                              onRemoveLayer && onRemoveLayer(layer);
+                            }}
+                          >
+                            <Text style={styles.removeBtnText}>Remove</Text>
+                          </TouchableOpacity>
+                        ) : null}
                         <View style={styles.reorderButtons}>
                           <TouchableOpacity
                             style={[
@@ -364,6 +377,19 @@ const createStyles = (palette, isDark) =>
       fontSize: 12,
       fontWeight: "800",
       lineHeight: 14,
+    },
+    removeBtn: {
+      borderRadius: SIZES.radius,
+      paddingVertical: 5,
+      paddingHorizontal: 10,
+      backgroundColor: "rgba(239, 68, 68, 0.15)",
+      borderWidth: 1,
+      borderColor: "rgba(239, 68, 68, 0.35)",
+    },
+    removeBtnText: {
+      fontSize: 11,
+      fontWeight: "800",
+      color: "#ef4444",
     },
     layerName: {
       fontSize: 14,

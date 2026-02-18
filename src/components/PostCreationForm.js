@@ -29,7 +29,6 @@ const POST_AUDIENCE = {
   FRIENDS: "friends",
   PUBLIC: "public",
   PRIVATE: "private",
-  COMMUNITY: "community",
 };
 
 const OWNER_LABELS = {
@@ -102,7 +101,7 @@ const PostCreationForm = ({
   useEffect(() => {
     if (!visible) return;
     setBaseAudience(POST_AUDIENCE.FRIENDS);
-    setSelectedCommunityLayerId(communityAudienceLayers[0]?.id || null);
+    setSelectedCommunityLayerId(null);
   }, [communityAudienceLayers, visible]);
 
   const resetForm = () => {
@@ -170,17 +169,6 @@ const PostCreationForm = ({
       );
       return;
     }
-    if (
-      baseAudience === POST_AUDIENCE.COMMUNITY &&
-      !selectedCommunityLayerId
-    ) {
-      Alert.alert(
-        "Community Layer Required",
-        "Choose one of your added community layers before posting.",
-      );
-      return;
-    }
-
     onSubmit({
       title,
       content,
@@ -203,10 +191,7 @@ const PostCreationForm = ({
         baseAudience === POST_AUDIENCE.FRIENDS
           ? friendsBaseLayer?.id || null
           : null,
-      baseCommunityLayerId:
-        baseAudience === POST_AUDIENCE.COMMUNITY
-          ? selectedCommunityLayerId
-          : null,
+      extraCommunityLayerId: selectedCommunityLayerId || null,
     });
 
     resetForm();
@@ -410,73 +395,65 @@ const PostCreationForm = ({
                   Private
                 </Text>
               </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.audienceBtn,
-                  baseAudience === POST_AUDIENCE.COMMUNITY &&
-                    styles.audienceBtnActive,
-                ]}
-                onPress={() => setBaseAudience(POST_AUDIENCE.COMMUNITY)}
-              >
-                <Text
-                  style={[
-                    styles.audienceBtnText,
-                    baseAudience === POST_AUDIENCE.COMMUNITY &&
-                      styles.audienceBtnTextActive,
-                  ]}
-                >
-                  Community
-                </Text>
-              </TouchableOpacity>
             </View>
             <Text style={styles.inlineHint}>
               {baseAudience === POST_AUDIENCE.FRIENDS
                 ? "Posts to your friends layer."
                 : baseAudience === POST_AUDIENCE.PUBLIC
-                  ? "Posts to the public layer."
-                  : baseAudience === POST_AUDIENCE.PRIVATE
-                    ? "Visible only to you."
-                    : "Choose one of your added community layers."}
+                  ? "Posts to the public layer (and friends)."
+                  : "Private is route-controlled: visible only in layers you attach."}
             </Text>
-
-            {baseAudience === POST_AUDIENCE.COMMUNITY && (
-              <>
-                <Text style={styles.sectionLabel}>Community Layer</Text>
-                {communityAudienceLayers.length === 0 ? (
-                  <Text style={styles.emptyStateText}>
-                    You have no added community layers yet.
-                  </Text>
-                ) : (
-                  <View style={styles.layerList}>
-                    {communityAudienceLayers.map((layer) => {
-                      const isSelected =
-                        selectedCommunityLayerId === layer.id;
-                      return (
-                        <TouchableOpacity
-                          key={layer.id}
-                          style={[
-                            styles.layerRow,
-                            isSelected && styles.layerRowSelected,
-                          ]}
-                          onPress={() => setSelectedCommunityLayerId(layer.id)}
-                        >
-                          <View style={styles.layerRowLeft}>
-                            <Text style={styles.layerName}>{layer.name}</Text>
-                            <Text style={styles.layerMeta}>
-                              {OWNER_LABELS[layer.owner_type] || "Community"}{" "}
-                              • {layer.ownerCommunityName || "Community"}
-                            </Text>
-                          </View>
-
-                          <Text style={styles.chooseText}>
-                            {isSelected ? "Selected" : "Select"}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
+            <Text style={styles.sectionLabel}>Optional Community Layer</Text>
+            {communityAudienceLayers.length === 0 ? (
+              <Text style={styles.emptyStateText}>
+                You have no added community layers yet.
+              </Text>
+            ) : (
+              <View style={styles.layerList}>
+                <TouchableOpacity
+                  style={[
+                    styles.layerRow,
+                    !selectedCommunityLayerId && styles.layerRowSelected,
+                  ]}
+                  onPress={() => setSelectedCommunityLayerId(null)}
+                >
+                  <View style={styles.layerRowLeft}>
+                    <Text style={styles.layerName}>None</Text>
+                    <Text style={styles.layerMeta}>
+                      Do not add an extra community layer
+                    </Text>
                   </View>
-                )}
-              </>
+                  <Text style={styles.chooseText}>
+                    {!selectedCommunityLayerId ? "Selected" : "Select"}
+                  </Text>
+                </TouchableOpacity>
+                {communityAudienceLayers.map((layer) => {
+                  const isSelected =
+                    selectedCommunityLayerId === layer.id;
+                  return (
+                    <TouchableOpacity
+                      key={layer.id}
+                      style={[
+                        styles.layerRow,
+                        isSelected && styles.layerRowSelected,
+                      ]}
+                      onPress={() => setSelectedCommunityLayerId(layer.id)}
+                    >
+                      <View style={styles.layerRowLeft}>
+                        <Text style={styles.layerName}>{layer.name}</Text>
+                        <Text style={styles.layerMeta}>
+                          {OWNER_LABELS[layer.owner_type] || "Community"}{" "}
+                          • {layer.ownerCommunityName || "Community"}
+                        </Text>
+                      </View>
+
+                      <Text style={styles.chooseText}>
+                        {isSelected ? "Selected" : "Select"}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
             )}
 
             <Text style={styles.sectionLabel}>Geometry Type</Text>

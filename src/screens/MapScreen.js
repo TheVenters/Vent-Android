@@ -29,9 +29,9 @@ import {
   createPinsViaEdgeFunction,
   deletePinCommentViaEdgeFunction,
   deletePinViaEdgeFunction,
+  ensureUserPostingLayerViaEdgeFunction,
   fetchMyCommunityMembershipsViaEdgeFunction,
   fetchMyLayerPrefsViaEdgeFunction,
-  fetchPinsViaEdgeFunction,
   getPinVoteSummaryViaEdgeFunction,
   listPinCommentsViaEdgeFunction,
   setLayerOrderViaEdgeFunction,
@@ -59,6 +59,23 @@ import {
   sortLayers,
 } from "../utils/layers";
 import { parseLayerKindMetadata } from "../utils/layerKind";
+import {
+  computeMapVisuals,
+  getCloudVisualSignature,
+  getPinVisualSignature,
+  haveSameEntitySignatures,
+  isCloudOnlyPost,
+  isCoordinateWithinRegionBounds,
+} from "./map/mapVisualEngine";
+import {
+  buildFallbackLayers,
+  ensureCoreSystemLayers,
+  getEnabledLayerIdsForMap,
+  isUuid,
+  shouldKeepPinsWhenNoUuidLayers,
+  toNormalizedLayerIdKey,
+} from "./map/layerRuntime";
+import { resolvePinsForMap } from "./map/pinFeedResolver";
 
 const formatUsernameForLayer = (user) => {
   const fromMeta =
@@ -71,13 +88,6 @@ const formatUsernameForLayer = (user) => {
 
 const makeUserPostingLayerName = (user) =>
   `user-${formatUsernameForLayer(user)}-posts`;
-const CLOUD_MIN_POST_COUNT = 2;
-const CLOUD_RADIUS_PADDING_METERS = 40;
-const CLOUD_MIN_RADIUS_METERS = 120;
-const CLOUD_MAX_RADIUS_METERS = 1000;
-const CLUSTER_DISTANCE_PX = 52;
-const CLUSTER_MERGE_DISTANCE_PX = 58;
-const CLUSTER_VIEWPORT_PADDING_PX = 160;
 const DEFAULT_MAP_SIZE = { width: 390, height: 780 };
 const PIN_VOTE_PREFETCH_LIMIT = 6;
 const PIN_VOTE_PREFETCH_DELAY_MS = 180;
@@ -86,151 +96,12 @@ const ERROR_ALERT_COOLDOWN_MS = 15000;
 const NETWORK_BACKOFF_MS = 20000;
 const MAP_POSTS_CACHE_KEY = "map_posts_cache_v1";
 const PIN_COMMENT_MAX_LENGTH = 500;
-
-const toRadians = (degrees) => (degrees * Math.PI) / 180;
-
-const haversineMeters = (a, b) => {
-  const earthRadiusMeters = 6371000;
-  const deltaLat = toRadians(b.latitude - a.latitude);
-  const deltaLng = toRadians(b.longitude - a.longitude);
-  const lat1 = toRadians(a.latitude);
-  const lat2 = toRadians(b.latitude);
-
-  const x =
-    Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
-    Math.sin(deltaLng / 2) *
-      Math.sin(deltaLng / 2) *
-      Math.cos(lat1) *
-      Math.cos(lat2);
-  const y = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
-  return earthRadiusMeters * y;
-};
-
-const hasValidCoordinate = (post) =>
-  typeof post?.lat === "number" &&
-  Number.isFinite(post.lat) &&
-  typeof post?.lng === "number" &&
-  Number.isFinite(post.lng);
-
-const normalizeLongitude = (longitude) => {
-  if (!Number.isFinite(longitude)) return longitude;
-  let next = longitude;
-  while (next > 180) next -= 360;
-  while (next < -180) next += 360;
-  return next;
-};
-
-const isLongitudeWithinBounds = (longitude, minLng, maxLng) => {
-  if (minLng <= maxLng) {
-    return longitude >= minLng && longitude <= maxLng;
-  }
-  return longitude >= minLng || longitude <= maxLng;
-};
-
-const isCoordinateWithinRegionBounds = (
-  coordinate,
-  mapRegion,
-  paddingRatio = 0,
-) => {
-  if (
-    !Number.isFinite(coordinate?.latitude) ||
-    !Number.isFinite(coordinate?.longitude)
-  ) {
-    return false;
-  }
-
-  const centerLat = Number(mapRegion?.latitude);
-  const centerLng = Number(mapRegion?.longitude);
-  const latitudeDelta = Number(mapRegion?.latitudeDelta);
-  const longitudeDelta = Number(mapRegion?.longitudeDelta);
-
-  if (
-    !Number.isFinite(centerLat) ||
-    !Number.isFinite(centerLng) ||
-    !Number.isFinite(latitudeDelta) ||
-    !Number.isFinite(longitudeDelta) ||
-    latitudeDelta <= 0 ||
-    longitudeDelta <= 0
-  ) {
-    return true;
-  }
-
-  const latPadding = latitudeDelta * paddingRatio;
-  const lngPadding = longitudeDelta * paddingRatio;
-
-  const minLat = centerLat - latitudeDelta / 2 - latPadding;
-  const maxLat = centerLat + latitudeDelta / 2 + latPadding;
-  if (coordinate.latitude < minLat || coordinate.latitude > maxLat) {
-    return false;
-  }
-
-  if (longitudeDelta + lngPadding * 2 >= 360) {
-    return true;
-  }
-
-  const longitude = normalizeLongitude(coordinate.longitude);
-  const minLng = normalizeLongitude(centerLng - longitudeDelta / 2 - lngPadding);
-  const maxLng = normalizeLongitude(centerLng + longitudeDelta / 2 + lngPadding);
-  return isLongitudeWithinBounds(longitude, minLng, maxLng);
-};
-
-const toScreenPoint = (coordinate, mapRegion, mapSize) => {
-  const width = Number(mapSize?.width || 0);
-  const height = Number(mapSize?.height || 0);
-  const latitudeDelta = Number(mapRegion?.latitudeDelta || 0);
-  const longitudeDelta = Number(mapRegion?.longitudeDelta || 0);
-  const centerLat = Number(mapRegion?.latitude || 0);
-  const centerLng = Number(mapRegion?.longitude || 0);
-
-  if (
-    width <= 0 ||
-    height <= 0 ||
-    latitudeDelta <= 0 ||
-    longitudeDelta <= 0 ||
-    !Number.isFinite(centerLat) ||
-    !Number.isFinite(centerLng)
-  ) {
-    return null;
-  }
-
-  const minLat = centerLat - latitudeDelta / 2;
-  const maxLat = centerLat + latitudeDelta / 2;
-  const minLng = centerLng - longitudeDelta / 2;
-
-  return {
-    x: ((coordinate.longitude - minLng) / longitudeDelta) * width,
-    y: ((maxLat - coordinate.latitude) / latitudeDelta) * height,
-  };
-};
-
-const isScreenPointWithinClusterViewport = (
-  screenPoint,
-  mapSize,
-  paddingPx = CLUSTER_VIEWPORT_PADDING_PX,
-) => {
-  if (!screenPoint) return false;
-  const width = Number(mapSize?.width || 0);
-  const height = Number(mapSize?.height || 0);
-  if (width <= 0 || height <= 0) return false;
-
-  return (
-    screenPoint.x >= -paddingPx &&
-    screenPoint.x <= width + paddingPx &&
-    screenPoint.y >= -paddingPx &&
-    screenPoint.y <= height + paddingPx
-  );
-};
-
-const isCloudOnlyPost = (pin) => pin?.geometry?.visibility_mode === "cloud_only";
+const LAYER_TRACE_ENABLED = false;
 const isRlsPolicyError = (error) =>
   error?.code === "42501" ||
   String(error?.message || "")
     .toLowerCase()
     .includes("row-level security policy");
-const isUuid = (value) =>
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    String(value || ""),
-  );
 
 const formatErrorMessage = (error) => {
   if (!error) return "Unknown error";
@@ -269,311 +140,13 @@ const isTransientNetworkError = (error) => {
   );
 };
 
-const getRandomCoordinateWithinRadius = (latitude, longitude, radiusMeters) => {
-  const randomDistance = Math.sqrt(Math.random()) * radiusMeters;
-  const randomAngle = Math.random() * Math.PI * 2;
-  const metersPerLatDegree = 111320;
-  const latAdjustment = (randomDistance * Math.cos(randomAngle)) / metersPerLatDegree;
-  const lngDivider = Math.max(0.000001, Math.cos(toRadians(latitude)));
-  const lngAdjustment =
-    (randomDistance * Math.sin(randomAngle)) /
-    (metersPerLatDegree * lngDivider);
-
-  return {
-    latitude: latitude + latAdjustment,
-    longitude: longitude + lngAdjustment,
-  };
-};
-
-const buildCloudFromPosts = (groupPosts) => {
-  if (!Array.isArray(groupPosts) || groupPosts.length === 0) {
-    return null;
+const logLayerTrace = (label, payload = null) => {
+  if (!LAYER_TRACE_ENABLED) return;
+  if (payload === null) {
+    console.log(`[LayerTrace] ${label}`);
+    return;
   }
-
-  const sum = groupPosts.reduce(
-    (acc, post) => ({
-      lat: acc.lat + post.lat,
-      lng: acc.lng + post.lng,
-    }),
-    { lat: 0, lng: 0 },
-  );
-  const center = {
-    latitude: sum.lat / groupPosts.length,
-    longitude: sum.lng / groupPosts.length,
-  };
-
-  const farthest = groupPosts.reduce((maxDistance, post) => {
-    const distance = haversineMeters(center, {
-      latitude: post.lat,
-      longitude: post.lng,
-    });
-    return Math.max(maxDistance, distance);
-  }, 0);
-
-  const computedRadius = Math.min(
-    CLOUD_MAX_RADIUS_METERS,
-    Math.max(CLOUD_MIN_RADIUS_METERS, farthest + CLOUD_RADIUS_PADDING_METERS),
-  );
-
-  const sortedPostIds = groupPosts
-    .map((post) => String(post?.id || ""))
-    .filter(Boolean)
-    .sort();
-
-  return {
-    id: `cloud-${sortedPostIds.join("-")}`,
-    center,
-    radiusMeters: computedRadius,
-    count: groupPosts.length,
-    privacyCount: groupPosts.filter(isCloudOnlyPost).length,
-    posts: groupPosts,
-  };
-};
-
-const buildCloudsFromPosts = (posts, mapRegion, mapSize) => {
-  const candidates = (posts || []).filter(hasValidCoordinate);
-  if (candidates.length < CLOUD_MIN_POST_COUNT) return [];
-
-  const clusterDistancePx = CLUSTER_DISTANCE_PX;
-  const clusterDistancePxSq = clusterDistancePx * clusterDistancePx;
-  const cellSize = clusterDistancePx;
-  const toCell = (value) => Math.floor(value / cellSize);
-  const cellKey = (x, y) => `${x}:${y}`;
-
-  const points = candidates
-    .map((post) => {
-      const coord = { latitude: post.lat, longitude: post.lng };
-      const screenPoint = toScreenPoint(coord, mapRegion, mapSize);
-      if (
-        !screenPoint ||
-        !isScreenPointWithinClusterViewport(screenPoint, mapSize)
-      ) {
-        return null;
-      }
-      return {
-        post,
-        screenX: screenPoint.x,
-        screenY: screenPoint.y,
-        cellX: toCell(screenPoint.x),
-        cellY: toCell(screenPoint.y),
-      };
-    })
-    .filter(Boolean);
-
-  if (points.length < CLOUD_MIN_POST_COUNT) return [];
-
-  const grid = new Map();
-  points.forEach((point, index) => {
-    const key = cellKey(point.cellX, point.cellY);
-    const bucket = grid.get(key) || [];
-    bucket.push(index);
-    grid.set(key, bucket);
-  });
-
-  const visited = new Array(points.length).fill(false);
-  const clouds = [];
-
-  for (let i = 0; i < points.length; i += 1) {
-    if (visited[i]) continue;
-    const queue = [i];
-    const groupIndexes = [];
-    visited[i] = true;
-
-    while (queue.length > 0) {
-      const sourceIndex = queue.shift();
-      const source = points[sourceIndex];
-      groupIndexes.push(sourceIndex);
-
-      for (let x = source.cellX - 1; x <= source.cellX + 1; x += 1) {
-        for (let y = source.cellY - 1; y <= source.cellY + 1; y += 1) {
-          const neighborIndexes = grid.get(cellKey(x, y)) || [];
-          for (let k = 0; k < neighborIndexes.length; k += 1) {
-            const targetIndex = neighborIndexes[k];
-            if (visited[targetIndex]) continue;
-            const target = points[targetIndex];
-            const deltaX = source.screenX - target.screenX;
-            const deltaY = source.screenY - target.screenY;
-            const distanceSq = deltaX * deltaX + deltaY * deltaY;
-            if (distanceSq <= clusterDistancePxSq) {
-              visited[targetIndex] = true;
-              queue.push(targetIndex);
-            }
-          }
-        }
-      }
-    }
-
-    if (groupIndexes.length < CLOUD_MIN_POST_COUNT) continue;
-
-    const groupPosts = groupIndexes.map((index) => points[index].post);
-    const cloud = buildCloudFromPosts(groupPosts);
-    if (cloud) {
-      clouds.push(cloud);
-    }
-  }
-
-  return clouds;
-};
-
-const mergeNearbyClouds = (clouds, mapRegion, mapSize) => {
-  if (!Array.isArray(clouds) || clouds.length < 2) return clouds || [];
-
-  const mergeDistanceSq = CLUSTER_MERGE_DISTANCE_PX * CLUSTER_MERGE_DISTANCE_PX;
-  const visited = new Array(clouds.length).fill(false);
-  const merged = [];
-
-  const cloudNodes = clouds.map((cloud) => ({
-    cloud,
-    screenPoint: toScreenPoint(cloud.center, mapRegion, mapSize),
-  }));
-
-  for (let i = 0; i < cloudNodes.length; i += 1) {
-    if (visited[i]) continue;
-    visited[i] = true;
-    const queue = [i];
-    const groupIndexes = [];
-
-    while (queue.length > 0) {
-      const sourceIndex = queue.shift();
-      groupIndexes.push(sourceIndex);
-      const source = cloudNodes[sourceIndex];
-      if (!source?.screenPoint) continue;
-
-      for (let j = 0; j < cloudNodes.length; j += 1) {
-        if (visited[j]) continue;
-        const target = cloudNodes[j];
-        if (!target?.screenPoint) continue;
-
-        const deltaX = source.screenPoint.x - target.screenPoint.x;
-        const deltaY = source.screenPoint.y - target.screenPoint.y;
-        const distanceSq = deltaX * deltaX + deltaY * deltaY;
-        if (distanceSq <= mergeDistanceSq) {
-          visited[j] = true;
-          queue.push(j);
-        }
-      }
-    }
-
-    if (groupIndexes.length === 1) {
-      merged.push(cloudNodes[groupIndexes[0]].cloud);
-      continue;
-    }
-
-    const mergedPosts = [];
-    groupIndexes.forEach((index) => {
-      mergedPosts.push(...(cloudNodes[index].cloud?.posts || []));
-    });
-    const mergedCloud = buildCloudFromPosts(mergedPosts);
-    if (mergedCloud) {
-      merged.push(mergedCloud);
-    }
-  }
-
-  return merged;
-};
-
-const computeMapVisuals = (posts, mapRegion, mapSize, focusedPinId = null) => {
-  const normalizedPosts = (Array.isArray(posts) ? posts : []).filter(
-    hasValidCoordinate,
-  );
-
-  const baseClusters = buildCloudsFromPosts(
-    normalizedPosts,
-    mapRegion,
-    mapSize,
-  );
-  const clusters = mergeNearbyClouds(baseClusters, mapRegion, mapSize);
-
-  const visibleClouds = [];
-  const clusteredPinnedIds = new Set();
-  const clusteredPostIds = new Set();
-
-  clusters.forEach((cloud) => {
-    const pinnedCount = cloud.count - cloud.privacyCount;
-    const hasPrivacyPosts = cloud.privacyCount > 0;
-    const shouldShowCloud = hasPrivacyPosts || pinnedCount >= CLOUD_MIN_POST_COUNT;
-    if (!shouldShowCloud) return;
-
-    const cloudScreenPoint = toScreenPoint(cloud.center, mapRegion, mapSize);
-    const isCloudVisible = isScreenPointWithinClusterViewport(
-      cloudScreenPoint,
-      mapSize,
-      CLUSTER_VIEWPORT_PADDING_PX,
-    );
-    if (!isCloudVisible) return;
-
-    (cloud.posts || []).forEach((post) => {
-      if (post?.id) clusteredPostIds.add(post.id);
-    });
-    if (pinnedCount >= CLOUD_MIN_POST_COUNT) {
-      (cloud.posts || []).forEach((post) => {
-        if (post?.id && !isCloudOnlyPost(post)) {
-          clusteredPinnedIds.add(post.id);
-        }
-      });
-    }
-    const badgeCount = pinnedCount > 0 ? pinnedCount : cloud.count;
-    visibleClouds.push({ ...cloud, badgeCount });
-  });
-
-  // Cloud-only posts must always surface as a cloud, even when isolated.
-  normalizedPosts
-    .filter((post) => isCloudOnlyPost(post) && !clusteredPostIds.has(post.id))
-    .forEach((post) => {
-      const cloudCenter = { latitude: post.lat, longitude: post.lng };
-      const cloudScreenPoint = toScreenPoint(cloudCenter, mapRegion, mapSize);
-      if (
-        !isScreenPointWithinClusterViewport(
-          cloudScreenPoint,
-          mapSize,
-          CLUSTER_VIEWPORT_PADDING_PX,
-        )
-      ) {
-        return;
-      }
-      visibleClouds.push({
-        id: `cloud-single-${post.id}`,
-        center: cloudCenter,
-        radiusMeters: CLOUD_MIN_RADIUS_METERS,
-        count: 1,
-        privacyCount: 1,
-        posts: [post],
-        badgeCount: 1,
-      });
-    });
-
-  // Hide only pins represented by visible clusters; this keeps transitions
-  // stable while preserving cluster readability.
-  const focusedPinIdText = String(focusedPinId || "");
-  const visiblePins = normalizedPosts.filter(
-    (post) => {
-      if (isCloudOnlyPost(post)) return false;
-      const postIdText = String(post?.id || "");
-      const isFocusedPin = focusedPinIdText && postIdText === focusedPinIdText;
-      return isFocusedPin || !clusteredPinnedIds.has(post.id);
-    },
-  );
-
-  return { visiblePins, visibleClouds };
-};
-
-const haveSameEntityIds = (left, right) => {
-  if (left === right) return true;
-  if (!Array.isArray(left) || !Array.isArray(right)) return false;
-  if (left.length !== right.length) return false;
-
-  for (let i = 0; i < left.length; i += 1) {
-    if (String(left[i]?.id || "") !== String(right[i]?.id || "")) {
-      return false;
-    }
-  }
-  return true;
-};
-
-const toTitle = (value) => {
-  const str = String(value || "").trim();
-  if (!str) return "Unknown";
-  return str.charAt(0).toUpperCase() + str.slice(1);
+  console.log(`[LayerTrace] ${label}`, payload);
 };
 
 const normalizePinComment = (comment) => {
@@ -624,76 +197,6 @@ const collectCommentThreadIds = (comments, rootCommentId) => {
   return ids;
 };
 
-const isUserPostingLayer = (layer) => {
-  const ownerType = layer?.owner_type || "system";
-  const { baseKind } = parseLayerKindMetadata(layer?.kind);
-  return ownerType === "user" && (baseKind || layer?.kind) === "user_posts";
-};
-
-const isFallbackLayer = (layer) =>
-  String(layer?.id || "").startsWith("fallback-");
-
-const buildFallbackLayers = (userId) => {
-  const asEnabled = Boolean(userId);
-  return [
-    {
-      id: "fallback-public",
-      name: "Public",
-      display_name: "Public",
-      kind: "public",
-      raw_kind: "public",
-      owner_type: "system",
-      owner_id: null,
-      is_public: true,
-      enabled: true,
-      isEnabled: true,
-      layer_icon: null,
-      ownerCommunityName: null,
-      sourceCommunityIds: [],
-      viewerCanManage: true,
-    },
-    {
-      id: "fallback-friends",
-      name: "Friends",
-      display_name: "Friends",
-      kind: "friends",
-      raw_kind: "friends",
-      owner_type: "system",
-      owner_id: null,
-      is_public: false,
-      enabled: true,
-      isEnabled: asEnabled,
-      layer_icon: null,
-      ownerCommunityName: null,
-      sourceCommunityIds: [],
-      viewerCanManage: true,
-    },
-  ];
-};
-
-const ensureCoreSystemLayers = (inputLayers, userId) => {
-  const nextLayers = Array.isArray(inputLayers) ? [...inputLayers] : [];
-  const systemKinds = new Set(
-    nextLayers
-      .filter((layer) => (layer.owner_type || "system") === "system")
-      .map((layer) => getPinLayerKeyFromLayer(layer)),
-  );
-  const fallbackByKind = new Map(
-    buildFallbackLayers(userId).map((layer) => [
-      getPinLayerKeyFromLayer(layer),
-      layer,
-    ]),
-  );
-
-  ["public", "friends"].forEach((kind) => {
-    if (!systemKinds.has(kind) && fallbackByKind.has(kind)) {
-      nextLayers.push(fallbackByKind.get(kind));
-    }
-  });
-
-  return nextLayers;
-};
-
 const MapScreen = ({ navigation, route }) => {
   const { isDark, palette } = useAppTheme();
   const styles = createStyles(palette);
@@ -717,7 +220,6 @@ const MapScreen = ({ navigation, route }) => {
   const [isSubmittingComment, setIsSubmittingComment] = useState(false);
   const [deletingCommentId, setDeletingCommentId] = useState(null);
   const [mapType, setMapType] = useState("standard");
-  const [mapMode, setMapMode] = useState("user");
   const [userLocation, setUserLocation] = useState(null);
 
   const [isDrawingMode, setIsDrawingMode] = useState(false);
@@ -731,7 +233,6 @@ const MapScreen = ({ navigation, route }) => {
   const [layerPosts, setLayerPosts] = useState([]);
   const [layerPostsLoading, setLayerPostsLoading] = useState(false);
   const [userPostingLayerId, setUserPostingLayerId] = useState(null);
-  const [friendUserIds, setFriendUserIds] = useState([]);
   const [selectedPinLayers, setSelectedPinLayers] = useState([]);
   const [allLoadedPosts, setAllLoadedPosts] = useState([]);
   const [arrowFocusedPinId, setArrowFocusedPinId] = useState(null);
@@ -756,6 +257,14 @@ const MapScreen = ({ navigation, route }) => {
   const arrowCalloutTimerRef = useRef(null);
   const lastArrowCalloutPinIdRef = useRef(null);
   const initialBackgroundLayerRefreshDoneRef = useRef(false);
+  const initialAppOpenRefreshDoneRef = useRef(false);
+  const pinLoadRequestSeqRef = useRef(0);
+  const latestEnabledLayerKeyRef = useRef("");
+  const allLoadedPostsRef = useRef([]);
+
+  useEffect(() => {
+    allLoadedPostsRef.current = allLoadedPosts;
+  }, [allLoadedPosts]);
 
   useEffect(() => {
     selectedPinIdRef.current = selectedPin?.id || null;
@@ -824,10 +333,11 @@ const MapScreen = ({ navigation, route }) => {
       return fallback;
     });
     setSelectedLayerId((prev) => resolveNextSelectedLayerId(fallback, prev));
+    return fallback;
   }, []);
 
   const restoreCachedPosts = useCallback(async () => {
-    if (allLoadedPosts.length > 0) return;
+    if ((allLoadedPostsRef.current || []).length > 0) return;
     try {
       const raw = await AsyncStorage.getItem(MAP_POSTS_CACHE_KEY);
       if (!raw) return;
@@ -838,7 +348,7 @@ const MapScreen = ({ navigation, route }) => {
     } catch (_) {
       // Ignore cache parse/read failures.
     }
-  }, [allLoadedPosts.length]);
+  }, []);
 
   const resolveCurrentUserId = useCallback(async () => {
     // For RLS-gated writes, require an active auth session so auth.uid() is
@@ -888,48 +398,12 @@ const MapScreen = ({ navigation, route }) => {
     layers.find((layer) => layer.id === selectedLayerId && layer.isEnabled) ||
     null;
 
-  const enabledPinLayerKeys = useMemo(() => {
-    const myPostsEnabled = layers.some(
-      (layer) => layer.isEnabled && isUserPostingLayer(layer),
-    );
-
-    if (mapMode === "explore") {
-      const keys = Array.from(
-        new Set([
-          "public",
-          ...layers
-            .filter((layer) => layer.isEnabled && !isUserPostingLayer(layer))
-            .map((layer) => getPinLayerKeyFromLayer(layer)),
-          ...(currentUser?.id && myPostsEnabled
-            ? ["friends", "private"]
-            : []),
-        ]),
-      );
-      return keys.length > 0 ? keys : ["public"];
-    }
-
-    const keys = Array.from(
-      new Set(
-        layers
-          .filter((layer) => layer.isEnabled && !isUserPostingLayer(layer))
-          .map((layer) => getPinLayerKeyFromLayer(layer)),
-      ),
-    );
-    if (currentUser?.id) {
-      if (myPostsEnabled) {
-        keys.push("public", "friends", "private");
-      } else {
-        keys.push("private");
-      }
-    }
-    return Array.from(new Set(keys));
-  }, [currentUser?.id, layers, mapMode]);
+  const enabledPinLayerKeys = useMemo(() => getEnabledLayerIdsForMap(layers), [layers]);
 
   const fetchAccessibleLayers = useCallback(
     async (userId, communityId) => {
       if (isNetworkBackoffActive()) {
-        applyFallbackLayers(userId);
-        return;
+        return applyFallbackLayers(userId);
       }
 
       const requestKey = `${userId || "guest"}:${communityId || "none"}`;
@@ -1103,8 +577,7 @@ const MapScreen = ({ navigation, route }) => {
         ]);
 
         if (layerIdSet.size === 0) {
-          applyFallbackLayers(resolvedUserId);
-          return;
+          return applyFallbackLayers(resolvedUserId);
         }
 
         const rawLayers = allLayerRows.filter((row) => layerIdSet.has(row.id));
@@ -1179,7 +652,10 @@ const MapScreen = ({ navigation, route }) => {
             ? true
             : hasPref
               ? !prefHidden
-              : isDbEnabled && (ownerType === "system" || ownerType === "user");
+              : isDbEnabled &&
+                (ownerType === "system" ||
+                  ownerType === "user" ||
+                  isLinkedToActiveCommunity);
 
           const ownerCommunity = layer.owner_id
             ? communitiesMap.get(layer.owner_id)
@@ -1194,17 +670,29 @@ const MapScreen = ({ navigation, route }) => {
             raw_kind: layer.kind,
             layer_icon: layerIcon,
             owner_type: ownerType,
-            display_name:
-              ownerType === "user" && (baseKind || layer.kind) === "user_posts"
-                ? "My Posts"
-                : layer.name,
+            display_name: ownerType === "user" ? "My Posts" : layer.name,
             isEnabled,
+            pref_hidden: prefHidden,
             pref_sort_order: prefSortOrder,
             ownerCommunityName: ownerCommunity?.name || null,
             sourceCommunityIds,
             isCommunityAccessible: isLinkedToActiveCommunity,
             viewerCanManage,
           };
+        });
+
+        logLayerTrace("refreshAccessibleLayers:mappedLayers", {
+          total: mappedLayers.length,
+          layers: mappedLayers.map((layer) => ({
+            id: layer.id,
+            name: layer.display_name || layer.name,
+            owner_type: layer.owner_type,
+            owner_id: layer.owner_id || null,
+            kind: layer.kind,
+            raw_kind: layer.raw_kind || layer.kind,
+            isEnabled: Boolean(layer.isEnabled),
+            viewerCanManage: layer.viewerCanManage !== false,
+          })),
         });
 
         const collectionScopedLayers = mappedLayers.filter((layer) => {
@@ -1290,6 +778,19 @@ const MapScreen = ({ navigation, route }) => {
           if (rankA !== rankB) return rankA - rankB;
           return 0;
         });
+
+        logLayerTrace("refreshAccessibleLayers:finalLayers", {
+          total: nextLayers.length,
+          enabled: nextLayers.filter((layer) => layer.isEnabled).length,
+          layers: nextLayers.map((layer) => ({
+            id: layer.id,
+            name: layer.display_name || layer.name,
+            owner_type: layer.owner_type,
+            kind: layer.kind,
+            isEnabled: Boolean(layer.isEnabled),
+          })),
+        });
+
         setLayers(nextLayers);
         if (communityId) {
           const firstCommunityLayer = nextLayers.find((layer) =>
@@ -1305,20 +806,21 @@ const MapScreen = ({ navigation, route }) => {
             resolveNextSelectedLayerId(nextLayers, prev),
           );
         }
+        return nextLayers;
       } catch (error) {
         const transient = isTransientNetworkError(error);
         if (transient) {
           activateNetworkBackoff();
-          applyFallbackLayers(userId || currentUser?.id || null);
           warnWithThrottle(
             "network-unavailable",
             "Network temporarily unavailable. Showing cached/offline data where possible.",
           );
-          return;
+          return applyFallbackLayers(userId || currentUser?.id || null);
         }
 
         logErrorWithThrottle("layers-load", "Error loading layers:", error);
         alertWithThrottle("layers-load", "Error", "Failed to load layers from Supabase.");
+        return null;
       } finally {
         setLayersLoading(false);
       }
@@ -1457,79 +959,65 @@ const MapScreen = ({ navigation, route }) => {
     layers,
   ]);
 
-  useEffect(() => {
-    const loadFriendIds = async () => {
-      if (!currentUser?.id) {
-        setFriendUserIds([]);
-        return;
-      }
-      try {
-        const { data, error } = await supabase
-          .from("friends")
-          .select("user_id,friend_id,status")
-          .or(`user_id.eq.${currentUser.id},friend_id.eq.${currentUser.id}`)
-          .eq("status", "accepted");
-        if (error) throw error;
-
-        const ids = Array.from(
-          new Set(
-            (data || []).map((row) =>
-              row.user_id === currentUser.id ? row.friend_id : row.user_id,
-            ),
-          ),
-        );
-        setFriendUserIds(ids);
-      } catch (error) {
-        if (isTransientNetworkError(error)) {
-          activateNetworkBackoff();
-          warnWithThrottle(
-            "network-unavailable",
-            "Network temporarily unavailable. Showing cached/offline data where possible.",
-          );
-          return;
-        }
-        logErrorWithThrottle("friend-ids", "Error loading friend ids:", error);
-        setFriendUserIds([]);
-      }
-    };
-
-    loadFriendIds();
-  }, [
-    activateNetworkBackoff,
-    currentUser?.id,
-    logErrorWithThrottle,
-    warnWithThrottle,
-  ]);
-
   const ensureUserPostingLayer = useCallback(async () => {
     if (!currentUser?.id) return null;
     if (userPostingLayerId) return userPostingLayerId;
 
     const layerName = makeUserPostingLayerName(currentUser);
     const legacyLayerName = `user-${currentUser.id}-posts`;
+
     try {
-      const existingRes = await supabase
+      const session = await getActiveSession();
+      const token = session?.access_token || null;
+      const actorUserId = session?.user?.id || currentUser.id;
+      const writer = token ? supabaseWithAccessToken(token) : supabase;
+
+      if (token && actorUserId === currentUser.id) {
+        const edgeResult = await ensureUserPostingLayerViaEdgeFunction(
+          layerName,
+          legacyLayerName,
+          "user_posts",
+          token,
+          session?.refresh_token || null,
+          actorUserId,
+        );
+        if (!edgeResult.error) {
+          const edgeLayerId = String(edgeResult.data?.layer?.id || "");
+          if (edgeLayerId) {
+            setUserPostingLayerId(edgeLayerId);
+            return edgeLayerId;
+          }
+        } else {
+          const message = String(edgeResult.error?.message || "").toLowerCase();
+          if (!message.includes("unsupported action")) {
+            throw edgeResult.error;
+          }
+        }
+      }
+
+      const existingOwnedRes = await writer
         .from("layers")
         .select("id,name,owner_id")
         .eq("owner_type", "user")
         .eq("kind", "user_posts")
-        .eq("name", layerName)
+        .eq("owner_id", actorUserId)
+        .order("created_at", { ascending: true })
         .maybeSingle();
 
-      if (existingRes.error) throw existingRes.error;
-      if (existingRes.data?.id) {
-        if (!existingRes.data.owner_id) {
-          const { error: backfillOwnerError } = await supabase
+      if (existingOwnedRes.error) throw existingOwnedRes.error;
+      if (existingOwnedRes.data?.id) {
+        if (existingOwnedRes.data.name !== layerName) {
+          const { error: renameError } = await writer
             .from("layers")
-            .update({ owner_id: currentUser.id })
-            .eq("id", existingRes.data.id);
-          if (backfillOwnerError) throw backfillOwnerError;
+            .update({ name: layerName })
+            .eq("id", existingOwnedRes.data.id);
+          if (renameError) throw renameError;
         }
-        setUserPostingLayerId(existingRes.data.id);
-        return existingRes.data.id;
+        setUserPostingLayerId(existingOwnedRes.data.id);
+        return existingOwnedRes.data.id;
       }
 
-      const legacyRes = await supabase
+      const legacyRes = await writer
         .from("layers")
         .select("id,name,owner_id")
         .eq("owner_type", "user")
@@ -1538,23 +1026,23 @@ const MapScreen = ({ navigation, route }) => {
         .maybeSingle();
       if (legacyRes.error) throw legacyRes.error;
       if (legacyRes.data?.id) {
-        const { error: normalizeError } = await supabase
+        const normalizeRes = await writer
           .from("layers")
-          .update({ name: layerName, owner_id: currentUser.id })
+          .update({ name: layerName, owner_id: actorUserId })
           .eq("id", legacyRes.data.id);
-        if (normalizeError) throw normalizeError;
+        if (normalizeRes.error) throw normalizeRes.error;
         setUserPostingLayerId(legacyRes.data.id);
         return legacyRes.data.id;
       }
 
-      const createRes = await supabase
+      const createRes = await writer
         .from("layers")
         .insert({
           kind: "user_posts",
           name: layerName,
           enabled: true,
           owner_type: "user",
-          owner_id: currentUser.id,
+          owner_id: actorUserId,
           is_public: false,
         })
         .select("id")
@@ -1612,17 +1100,31 @@ const MapScreen = ({ navigation, route }) => {
     }
   };
 
-  useEffect(() => {
-    if (enabledPinLayerKeys.length === 0) {
-      setMapVisuals({ pins: [], clouds: [] });
-      restoreCachedPosts();
-      return undefined;
-    }
+useEffect(() => {
+  latestEnabledLayerKeyRef.current = toNormalizedLayerIdKey(enabledPinLayerKeys);
 
-    loadPins(enabledPinLayerKeys);
-    const unsubscribe = subscribeToPins(enabledPinLayerKeys);
-    return unsubscribe;
-  }, [enabledPinLayerKeys, restoreCachedPosts]);
+  // When layer IDs are unavailable (e.g., offline fallback layers like
+  // `fallback-public` / `fallback-friends`), `enabledPinLayerKeys` will be empty
+  // because it only contains UUID layer IDs.
+  if (enabledPinLayerKeys.length === 0) {
+    // Invalidate any in-flight load so stale responses cannot repopulate pins.
+    pinLoadRequestSeqRef.current += 1;
+    const keepPins = shouldKeepPinsWhenNoUuidLayers(layers);
+    if (keepPins) {
+      // Offline/fallback-only mode: keep cached data.
+      restoreCachedPosts();
+    } else {
+      // User intentionally disabled everything: show an empty map.
+      setAllLoadedPosts([]);
+      setMapVisuals({ pins: [], clouds: [] });
+    }
+    return undefined;
+  }
+
+  loadPins(enabledPinLayerKeys);
+  const unsubscribe = subscribeToPins(enabledPinLayerKeys);
+  return unsubscribe;
+}, [enabledPinLayerKeys, layers, restoreCachedPosts]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -1633,8 +1135,16 @@ const MapScreen = ({ navigation, route }) => {
         arrowFocusedPinId,
       );
       setMapVisuals((prev) => {
-        const samePins = haveSameEntityIds(prev.pins, visiblePins);
-        const sameClouds = haveSameEntityIds(prev.clouds, visibleClouds);
+        const samePins = haveSameEntitySignatures(
+          prev.pins,
+          visiblePins,
+          getPinVisualSignature,
+        );
+        const sameClouds = haveSameEntitySignatures(
+          prev.clouds,
+          visibleClouds,
+          getCloudVisualSignature,
+        );
         if (samePins && sameClouds) return prev;
         return { pins: visiblePins, clouds: visibleClouds };
       });
@@ -1663,15 +1173,26 @@ const MapScreen = ({ navigation, route }) => {
     }
   };
 
-  const loadPins = async (pinLayerKeys) => {
-    if (!pinLayerKeys || pinLayerKeys.length === 0) {
-      setMapVisuals({ pins: [], clouds: [] });
-      setAllLoadedPosts([]);
+  const loadPins = async (enabledLayerIdsInput) => {
+    const requestSeq = ++pinLoadRequestSeqRef.current;
+    const requestLayerKey = toNormalizedLayerIdKey(enabledLayerIdsInput);
+    const isStaleRequest = () =>
+      requestSeq !== pinLoadRequestSeqRef.current ||
+      requestLayerKey !== latestEnabledLayerKeyRef.current;
+
+    if (!enabledLayerIdsInput || enabledLayerIdsInput.length === 0) {
+      if (isStaleRequest()) return;
+      if (shouldKeepPinsWhenNoUuidLayers(layers)) {
+        restoreCachedPosts();
+      } else {
+        setAllLoadedPosts([]);
+        setMapVisuals({ pins: [], clouds: [] });
+      }
       return;
     }
 
     try {
-      const queryLayerKeys = pinLayerKeys;
+      // Resolve an authenticated reader if possible (needed for RLS-friendly reads).
       let readAccessToken = null;
       let readRefreshToken = null;
       let readActorUserId = currentUser?.id || null;
@@ -1691,191 +1212,99 @@ const MapScreen = ({ navigation, route }) => {
             readActorUserId = fallbackSession?.user?.id || readActorUserId;
           }
         } catch (_) {
-          // Ignore fallback session lookup errors and continue anon for reads.
+          // Ignore fallback session lookup errors.
         }
       }
-      let data = null;
-      let error = null;
-      if (readAccessToken && readActorUserId) {
-        const edgeResult = await fetchPinsViaEdgeFunction(
-          queryLayerKeys,
-          readAccessToken,
-          readRefreshToken,
-          readActorUserId,
-          3000,
-        );
-        if (!edgeResult.error) {
-          data = Array.isArray(edgeResult?.data?.pins) ? edgeResult.data.pins : [];
+
+      const reader = readAccessToken
+        ? supabaseWithAccessToken(readAccessToken)
+        : supabase;
+
+      let resolvedRequestUserId = null;
+      try {
+        const actorProbe = await reader.rpc("request_user_id");
+        if (!actorProbe.error) {
+          resolvedRequestUserId = actorProbe.data || null;
+        }
+      } catch (_) {
+        // Optional probe for debugging auth context; ignore failures.
+      }
+
+      const enabledLayerIds = Array.from(
+        new Set(
+          (enabledLayerIdsInput || []).filter((id) => isUuid(String(id || ""))),
+        ),
+      );
+      logLayerTrace("loadPins:enabledLayerIds", {
+        requestSeq,
+        readActorUserId,
+        resolvedRequestUserId,
+        hasAccessToken: Boolean(readAccessToken),
+        enabledLayerIds,
+        enabledLayers: layers
+          .filter((layer) => enabledLayerIds.includes(layer.id))
+          .map((layer) => ({
+            id: layer.id,
+            name: layer.display_name || layer.name,
+            owner_type: layer.owner_type,
+            kind: layer.kind,
+          })),
+      });
+      if (enabledLayerIds.length === 0) {
+        if (isStaleRequest()) return;
+        if (shouldKeepPinsWhenNoUuidLayers(layers)) {
+          restoreCachedPosts();
         } else {
-          const edgeErrorText = String(
-            edgeResult?.error?.message || "",
-          ).toLowerCase();
-          const canFallbackToDirectRead =
-            edgeResult?.status === 404 ||
-            edgeResult?.status === 405 ||
-            edgeErrorText.includes("unsupported action") ||
-            edgeErrorText.includes("edge function failed (404)") ||
-            edgeErrorText.includes("edge function failed (405)");
-          if (!canFallbackToDirectRead) {
-            throw edgeResult.error;
-          }
+          setAllLoadedPosts([]);
+          setMapVisuals({ pins: [], clouds: [] });
         }
+        return;
       }
 
-      if (!Array.isArray(data)) {
-        const reader = readAccessToken
-          ? supabaseWithAccessToken(readAccessToken)
-          : supabase;
-        const directRead = await reader
-          .from("pins")
-          .select("*")
-          .in("layer", queryLayerKeys)
-          .order("created_at", { ascending: false });
-        data = directRead.data;
-        error = directRead.error;
-      }
-
-      if (error) throw error;
-      const enabledLayerIds = new Set(
-        layers.filter((layer) => layer.isEnabled).map((layer) => layer.id),
-      );
-      const enabledUserPostingLayerId =
-        layers.find((layer) => layer.isEnabled && isUserPostingLayer(layer))
-          ?.id || null;
-      const ownUserIdForMyPosts = readActorUserId || currentUser?.id || null;
-      const layerById = new Map(layers.map((layer) => [layer.id, layer]));
-      const systemLayerIdByKey = new Map();
-      layers
-        .filter((layer) => layer.owner_type === "system")
-        .forEach((layer) => {
-          const key = getPinLayerKeyFromLayer(layer);
-          if (!systemLayerIdByKey.has(key)) {
-            systemLayerIdByKey.set(key, layer.id);
-          }
-        });
-      const resolveEffectiveLayerId = (pin) => {
-        const explicit = String(pin?.geometry?.layer_id || "");
-        if (explicit) return explicit;
-        const legacyKey = String(pin?.layer || "").toLowerCase();
-        return String(systemLayerIdByKey.get(legacyKey) || "");
-      };
-      const resolveRenderableLayerId = (pin) => {
-        const effectiveLayerId = resolveEffectiveLayerId(pin);
-        if (enabledLayerIds.has(effectiveLayerId)) {
-          return effectiveLayerId;
-        }
-        if (
-          enabledUserPostingLayerId &&
-          ownUserIdForMyPosts &&
-          String(pin?.user_id || "") === String(ownUserIdForMyPosts)
-        ) {
-          return enabledUserPostingLayerId;
-        }
-        return effectiveLayerId;
-      };
-      const filtered = (data || []).filter((pin) => {
-        const layerId = resolveRenderableLayerId(pin);
-        if (!layerId) return false;
-        if (!enabledLayerIds.has(layerId)) return false;
-        const layerMeta = layerById.get(layerId) || null;
-        if (isUserPostingLayer(layerMeta)) {
-          return (
-            Boolean(ownUserIdForMyPosts) &&
-            String(pin?.user_id || "") === String(ownUserIdForMyPosts)
-          );
-        }
-        return true;
+      const ownUserId = readActorUserId || currentUser?.id || null;
+      const withLayerIcon = await resolvePinsForMap({
+        reader,
+        layers,
+        enabledLayerIds,
+        ownUserId,
+        currentUser,
+        accessToken: readAccessToken,
+        refreshToken: readRefreshToken,
+        resolvedRequestUserId,
       });
-      const deduped = [];
-      const byGroup = new Map();
-      const layerOrderIndex = new Map(
-        layers.map((layer, index) => [layer.id, index]),
-      );
-      filtered.forEach((pin) => {
-        const groupKey =
-          pin?.geometry?.cross_post_group_id ||
-          `${pin.user_id || "anon"}-${pin.caption || ""}-${pin.content || ""}-${pin.lat}-${pin.lng}-${pin.created_at || pin.id}`;
-        const existing = byGroup.get(groupKey);
-        if (!existing) {
-          byGroup.set(groupKey, pin);
-          return;
-        }
-
-        const existingLayerId = resolveRenderableLayerId(existing);
-        const currentLayerId = resolveRenderableLayerId(pin);
-        const existingRank = layerOrderIndex.has(existingLayerId)
-          ? layerOrderIndex.get(existingLayerId)
-          : Number.MAX_SAFE_INTEGER;
-        const currentRank = layerOrderIndex.has(currentLayerId)
-          ? layerOrderIndex.get(currentLayerId)
-          : Number.MAX_SAFE_INTEGER;
-        if (currentRank < existingRank) {
-          byGroup.set(groupKey, pin);
-        }
+      logLayerTrace("loadPins:resolvedPins", {
+        requestSeq,
+        pinCount: withLayerIcon.length,
+        sample: withLayerIcon.slice(0, 25).map((pin) => ({
+          id: pin.id,
+          user_id: pin.user_id,
+          caption: pin.caption || null,
+          layer_id: pin?.geometry?.layer_id || null,
+          layer_emoji: pin.layer_emoji || null,
+          base_audience: pin.base_audience || pin.layer || null,
+        })),
       });
-      byGroup.forEach((pin) => deduped.push(pin));
 
-      const userIds = Array.from(
-        new Set(deduped.map((pin) => pin.user_id).filter(Boolean)),
-      );
-      const profileByUserId = new Map();
-      if (userIds.length > 0) {
-        const { data: profiles, error: profileError } = await supabase
-          .from("profiles")
-          .select("id,username,avatar_url")
-          .in("id", userIds);
-        if (profileError) throw profileError;
-        (profiles || []).forEach((profile) =>
-          profileByUserId.set(profile.id, profile),
-        );
+      if (withLayerIcon.length === 0) {
+        if (isStaleRequest()) return;
+        setAllLoadedPosts([]);
+        try {
+          await AsyncStorage.setItem(MAP_POSTS_CACHE_KEY, JSON.stringify([]));
+        } catch (_) {
+          // Ignore cache write failures.
+        }
+        return;
       }
 
-      const layerIconById = new Map(
-        layers.map((layer) => [layer.id, layer.layer_icon || null]),
-      );
-      const withLayerIcon = deduped
-        .map((pin) => {
-          const numericLat = Number(pin?.lat);
-          const numericLng = Number(pin?.lng);
-          const effectiveLayerId = resolveRenderableLayerId(pin);
-          const baseGeometry =
-            pin?.geometry && typeof pin.geometry === "object"
-              ? pin.geometry
-              : {};
-          return {
-            ...pin,
-            lat: Number.isFinite(numericLat) ? numericLat : pin?.lat,
-            lng: Number.isFinite(numericLng) ? numericLng : pin?.lng,
-            geometry: {
-              ...baseGeometry,
-              layer_id:
-                effectiveLayerId || String(baseGeometry?.layer_id || "") || null,
-            },
-            author_avatar_url:
-              profileByUserId.get(pin.user_id)?.avatar_url ||
-              (pin.user_id === currentUser?.id
-                ? currentUser?.user_metadata?.avatar_url || null
-                : null),
-            author_username:
-              pin.author_username ||
-              profileByUserId.get(pin.user_id)?.username ||
-              "",
-            layer_emoji: effectiveLayerId
-              ? layerIconById.get(effectiveLayerId) || null
-              : null,
-          };
-        })
-        .filter(hasValidCoordinate);
+      if (isStaleRequest()) return;
       setAllLoadedPosts(withLayerIcon);
       try {
-        await AsyncStorage.setItem(
-          MAP_POSTS_CACHE_KEY,
-          JSON.stringify(withLayerIcon),
-        );
+        await AsyncStorage.setItem(MAP_POSTS_CACHE_KEY, JSON.stringify(withLayerIcon));
       } catch (_) {
         // Ignore cache write failures.
       }
     } catch (error) {
+      if (isStaleRequest()) return;
       if (isTransientNetworkError(error)) {
         activateNetworkBackoff();
         warnWithThrottle(
@@ -1891,6 +1320,51 @@ const MapScreen = ({ navigation, route }) => {
     }
   };
 
+  const handleRefreshLayersAndPins = useCallback(async () => {
+    const refreshedLayers = await fetchAccessibleLayers(
+      currentUser?.id,
+      communityMapContext?.id,
+    );
+    const sourceLayers =
+      Array.isArray(refreshedLayers) && refreshedLayers.length > 0
+        ? refreshedLayers
+        : layers;
+    const refreshedEnabledLayerIds = getEnabledLayerIdsForMap(
+      sourceLayers,
+    );
+    if (refreshedEnabledLayerIds.length === 0) {
+      if (shouldKeepPinsWhenNoUuidLayers(sourceLayers)) {
+        // Offline/fallback-only state.
+        restoreCachedPosts();
+      } else {
+        // User intentionally disabled all layers.
+        setAllLoadedPosts([]);
+        setMapVisuals({ pins: [], clouds: [] });
+      }
+      return;
+    }
+    await loadPins(refreshedEnabledLayerIds);
+  }, [
+    communityMapContext?.id,
+    currentUser?.id,
+    fetchAccessibleLayers,
+    layers,
+    restoreCachedPosts,
+  ]);
+
+  useEffect(() => {
+    if (initialAppOpenRefreshDoneRef.current) return;
+    if (!currentUser?.id) return;
+    if (layersLoading) return;
+
+    initialAppOpenRefreshDoneRef.current = true;
+    const timer = setTimeout(() => {
+      handleRefreshLayersAndPins();
+    }, 550);
+
+    return () => clearTimeout(timer);
+  }, [currentUser?.id, handleRefreshLayersAndPins, layersLoading]);
+
   const loadPinAssociations = async (pin) => {
     if (!pin) {
       setSelectedPinLayers([]);
@@ -1898,46 +1372,23 @@ const MapScreen = ({ navigation, route }) => {
     }
 
     try {
-      const groupId = pin?.geometry?.cross_post_group_id;
-      let relatedRows = [pin];
-      if (groupId) {
-        let associationRows = null;
-        let lastError = null;
-
-        // Try expression filter first (works for JSON/JSONB), then fallback.
-        const byExpression = await supabase
-          .from("pins")
-          .select("id,layer,geometry")
-          .eq("geometry->>cross_post_group_id", groupId);
-        if (!byExpression.error) {
-          associationRows = byExpression.data;
-        } else {
-          lastError = byExpression.error;
-          const byContains = await supabase
-            .from("pins")
-            .select("id,layer,geometry")
-            .contains("geometry", { cross_post_group_id: groupId });
-          if (!byContains.error) {
-            associationRows = byContains.data;
-            lastError = null;
-          } else {
-            lastError = byContains.error;
-          }
-        }
-
-        if (Array.isArray(associationRows) && associationRows.length > 0) {
-          relatedRows = associationRows;
-        } else if (lastError) {
-          console.warn(
-            "Pin association lookup failed, falling back to current pin only:",
-            lastError?.message || lastError,
-          );
-        }
+      const pinId = String(pin?.id || "");
+      if (!pinId) {
+        setSelectedPinLayers([]);
+        return;
       }
+
+      const membershipsRes = await supabase
+        .from("pin_layer_memberships")
+        .select("layer_id")
+        .eq("pin_id", pinId);
+      if (membershipsRes.error) throw membershipsRes.error;
 
       const layerIds = Array.from(
         new Set(
-          relatedRows.map((row) => row?.geometry?.layer_id).filter(Boolean),
+          (membershipsRes.data || [])
+            .map((row) => row?.layer_id)
+            .filter(Boolean),
         ),
       );
       const inMemoryNameMap = new Map(
@@ -1955,17 +1406,9 @@ const MapScreen = ({ navigation, route }) => {
         );
       }
 
-      const labels = Array.from(
-        new Set(
-          relatedRows.map((row) => {
-            const layerId = row?.geometry?.layer_id;
-            if (layerId && inMemoryNameMap.has(layerId)) {
-              return inMemoryNameMap.get(layerId);
-            }
-            return toTitle(row?.layer || "public");
-          }),
-        ),
-      ).filter(Boolean);
+      const labels = layerIds
+        .map((layerId) => inMemoryNameMap.get(layerId) || null)
+        .filter(Boolean);
       setSelectedPinLayers(labels);
     } catch (error) {
       console.error(
@@ -1976,8 +1419,10 @@ const MapScreen = ({ navigation, route }) => {
     }
   };
 
-  const subscribeToPins = (pinLayerKeys) => {
-    const keySet = new Set(pinLayerKeys);
+  const subscribeToPins = (enabledLayerIds) => {
+    const idSet = new Set(
+      (enabledLayerIds || []).filter((id) => isUuid(String(id || ""))),
+    );
     const subscription = supabase
       .channel(`pins-enabled-map`)
       .on(
@@ -1987,13 +1432,24 @@ const MapScreen = ({ navigation, route }) => {
           schema: "public",
           table: "pins",
         },
+        () => {
+          loadPins(enabledLayerIds);
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "pin_layer_memberships",
+        },
         (payload) => {
-          const eventLayer =
-            payload?.new?.layer ||
-            payload?.old?.layer ||
-            payload?.record?.layer;
-          if (eventLayer && keySet.has(eventLayer)) {
-            loadPins(pinLayerKeys);
+          const eventLayerId =
+            payload?.new?.layer_id ||
+            payload?.old?.layer_id ||
+            payload?.record?.layer_id;
+          if (!eventLayerId || idSet.has(String(eventLayerId))) {
+            loadPins(enabledLayerIds);
           }
         },
       )
@@ -2071,6 +1527,54 @@ const MapScreen = ({ navigation, route }) => {
       }
     },
     [layers, persistLayerOrderToSupabase, resolveCurrentUserId],
+  );
+
+  const handleRemoveLayer = useCallback(
+    async (layer) => {
+      if (!layer?.id) return;
+      if ((layer.owner_type || "system") === "system") {
+        Alert.alert("Not Allowed", "System layers cannot be removed.");
+        return;
+      }
+
+      Alert.alert(
+        "Remove Layer",
+        `Remove '${layer.display_name || layer.name}' from your Layers list?`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Remove",
+            style: "destructive",
+            onPress: async () => {
+              try {
+                const userId = await resolveCurrentUserId();
+                if (!userId) return;
+
+                const session = await getActiveSession();
+                const accessToken = session?.access_token || null;
+                const refreshToken = session?.refresh_token || null;
+                const actorUserId = session?.user?.id || userId;
+
+                const edgeResult = await setLayerPreferenceViaEdgeFunction(
+                  layer.id,
+                  true,
+                  accessToken,
+                  refreshToken,
+                  actorUserId,
+                );
+                if (edgeResult.error) throw edgeResult.error;
+
+                await handleRefreshLayersAndPins();
+              } catch (error) {
+                console.error("Error removing layer from list:", error);
+                Alert.alert("Error", "Failed to remove layer from your list.");
+              }
+            },
+          },
+        ],
+      );
+    },
+    [handleRefreshLayersAndPins, resolveCurrentUserId],
   );
 
   const handleMapPress = (event) => {
@@ -2168,7 +1672,7 @@ const MapScreen = ({ navigation, route }) => {
       const storedLat = baseLat;
       const storedLng = baseLng;
       const baseAudienceRaw = String(postData?.baseAudience || "").toLowerCase();
-      const baseAudience = ["friends", "public", "private", "community"].includes(
+      const baseAudience = ["friends", "public", "private"].includes(
         baseAudienceRaw,
       )
         ? baseAudienceRaw
@@ -2181,9 +1685,9 @@ const MapScreen = ({ navigation, route }) => {
         typeof postData?.baseFriendsLayerId === "string"
           ? postData.baseFriendsLayerId
           : null;
-      const baseCommunityLayerId =
-        typeof postData?.baseCommunityLayerId === "string"
-          ? postData.baseCommunityLayerId
+      const extraCommunityLayerId =
+        typeof postData?.extraCommunityLayerId === "string"
+          ? postData.extraCommunityLayerId
           : null;
       const postableLayerRows = layers.filter((layer) => {
         const pinLayerKey = getPinLayerKeyFromLayer(layer);
@@ -2231,11 +1735,9 @@ const MapScreen = ({ navigation, route }) => {
                   getPinLayerKeyFromLayer(layer) === "friends",
                 )?.id || null
           : null;
-      const resolvedCommunityLayerId =
-        baseAudience === "community"
-          ? baseCommunityLayerId && communityLayerIdSet.has(baseCommunityLayerId)
-            ? baseCommunityLayerId
-            : null
+      const resolvedExtraCommunityLayerId =
+        extraCommunityLayerId && communityLayerIdSet.has(extraCommunityLayerId)
+          ? extraCommunityLayerId
           : null;
       if (baseAudience === "public" && !resolvedPublicBaseLayerId) {
         Alert.alert(
@@ -2251,95 +1753,57 @@ const MapScreen = ({ navigation, route }) => {
         );
         return;
       }
-      if (baseAudience === "community" && !resolvedCommunityLayerId) {
+      if (extraCommunityLayerId && !resolvedExtraCommunityLayerId) {
         Alert.alert(
-          "Community Layer Required",
-          "Choose one of your added community layers before posting.",
+          "Community Layer Unavailable",
+          "That community layer is not available right now.",
         );
         return;
       }
-
-      const layerMap = new Map(layers.map((layer) => [layer.id, layer]));
-      let resolvedTargetLayerId = null;
-      let resolvedLayerKey = "friends";
-      if (baseAudience === "public") {
-        resolvedTargetLayerId = resolvedPublicBaseLayerId;
-        resolvedLayerKey = "public";
-      } else if (baseAudience === "friends") {
-        resolvedTargetLayerId = resolvedFriendsBaseLayerId;
-        resolvedLayerKey = "friends";
-      } else if (baseAudience === "private") {
-        resolvedTargetLayerId = authorLayerId;
-        resolvedLayerKey = "private";
-      } else if (baseAudience === "community") {
-        resolvedTargetLayerId = resolvedCommunityLayerId;
-        const communityLayer =
-          layerMap.get(resolvedCommunityLayerId) || null;
-        resolvedLayerKey = getPinLayerKeyFromLayer(communityLayer);
+      const targetLayerIdForGeometry =
+        resolvedExtraCommunityLayerId || authorLayerId;
+      let geometry;
+      if (postData.geometryType === GEOMETRY_TYPES.POINT) {
+        geometry = {
+          type: "Point",
+          coordinates: [storedLng, storedLat],
+          layer_id: targetLayerIdForGeometry,
+          author_layer_id: authorLayerId,
+          author_user_id: activeUserId,
+          visibility_mode: "pinned",
+        };
+      } else if (drawingCoords.length > 0) {
+        const coordinates = drawingCoords.map((coord) => [
+          coord.longitude,
+          coord.latitude,
+        ]);
+        geometry = {
+          type:
+            postData.geometryType === GEOMETRY_TYPES.PLANE
+              ? "Polygon"
+              : "LineString",
+          coordinates:
+            postData.geometryType === GEOMETRY_TYPES.PLANE
+              ? [coordinates]
+              : coordinates,
+          layer_id: targetLayerIdForGeometry,
+          author_layer_id: authorLayerId,
+          author_user_id: activeUserId,
+          visibility_mode: "pinned",
+        };
+      } else {
+        geometry = {
+          type: "Point",
+          coordinates: [storedLng, storedLat],
+          layer_id: targetLayerIdForGeometry,
+          author_layer_id: authorLayerId,
+          author_user_id: activeUserId,
+          visibility_mode: "pinned",
+        };
       }
-      if (!resolvedTargetLayerId) {
-        Alert.alert("Error", "Unable to resolve a target layer for this post.");
-        return;
-      }
 
-      const targetLayerIds = [resolvedTargetLayerId];
-      const crossPostGroupId =
-        globalThis.crypto?.randomUUID?.() ||
-        `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-
-      const insertRows = targetLayerIds.map((targetLayerId) => {
-        const targetLayer =
-          layerMap.get(targetLayerId) ||
-          (targetLayerId === authorLayerId
-            ? { kind: "user_posts", owner_type: "user", name: "My Posts" }
-            : null);
-        const postPinLayerKey =
-          resolvedLayerKey || getPinLayerKeyFromLayer(targetLayer || null);
-
-        let geometry;
-        if (postData.geometryType === GEOMETRY_TYPES.POINT) {
-          geometry = {
-            type: "Point",
-            coordinates: [storedLng, storedLat],
-            layer_id: targetLayerId,
-            author_layer_id: authorLayerId,
-            author_user_id: activeUserId,
-            cross_post_group_id: crossPostGroupId,
-            visibility_mode: "pinned",
-          };
-        } else if (drawingCoords.length > 0) {
-          const coordinates = drawingCoords.map((coord) => [
-            coord.longitude,
-            coord.latitude,
-          ]);
-          geometry = {
-            type:
-              postData.geometryType === GEOMETRY_TYPES.PLANE
-                ? "Polygon"
-                : "LineString",
-            coordinates:
-              postData.geometryType === GEOMETRY_TYPES.PLANE
-                ? [coordinates]
-                : coordinates,
-            layer_id: targetLayerId,
-            author_layer_id: authorLayerId,
-            author_user_id: activeUserId,
-            cross_post_group_id: crossPostGroupId,
-            visibility_mode: "pinned",
-          };
-        } else {
-          geometry = {
-            type: "Point",
-            coordinates: [storedLng, storedLat],
-            layer_id: targetLayerId,
-            author_layer_id: authorLayerId,
-            author_user_id: activeUserId,
-            cross_post_group_id: crossPostGroupId,
-            visibility_mode: "pinned",
-          };
-        }
-
-        return {
+      const insertRows = [
+        {
           user_id: activeUserId,
           type: postData.mediaUrl ? "media" : "text",
           content: postData.content,
@@ -2348,13 +1812,16 @@ const MapScreen = ({ navigation, route }) => {
           media_type: postData.mediaType,
           lat: storedLat,
           lng: storedLng,
-          layer: postPinLayerKey,
+          layer: baseAudience,
+          base_audience: baseAudience,
+          author_layer_id: authorLayerId,
+          explicit_layer_id: resolvedExtraCommunityLayerId,
           author_name: activeUser?.user_metadata?.display_name || "Anonymous",
           author_username: activeUser?.user_metadata?.username || "",
           posted_from_current_location: postData.locationMode === "current",
           geometry,
-        };
-      });
+        },
+      ];
 
       const edgeCreateResult = await createPinsViaEdgeFunction(
         insertRows,
@@ -2439,38 +1906,36 @@ const MapScreen = ({ navigation, route }) => {
     setLayerPostsModalVisible(true);
     setLayerPostsLoading(true);
     try {
-      let rows = null;
-      let lastError = null;
+      const membershipsRes = await supabase
+        .from("pin_layer_memberships")
+        .select("pin_id")
+        .eq("layer_id", layer.id)
+        .limit(200);
+      if (membershipsRes.error) throw membershipsRes.error;
 
-      const byExpression = await supabase
-        .from("pins")
-        .select("id,user_id,caption,content,author_name,created_at,layer,geometry")
-        .eq("geometry->>layer_id", layer.id)
-        .order("created_at", { ascending: false })
-        .limit(50);
-      if (!byExpression.error) {
-        rows = byExpression.data || [];
-      } else {
-        lastError = byExpression.error;
-        const byContains = await supabase
-          .from("pins")
-          .select("id,user_id,caption,content,author_name,created_at,layer,geometry")
-          .contains("geometry", { layer_id: layer.id })
-          .order("created_at", { ascending: false })
-          .limit(50);
-        if (!byContains.error) {
-          rows = byContains.data || [];
-          lastError = null;
-        } else {
-          lastError = byContains.error;
-        }
+      const pinIds = Array.from(
+        new Set(
+          (membershipsRes.data || [])
+            .map((row) => String(row?.pin_id || ""))
+            .filter(Boolean),
+        ),
+      );
+      if (pinIds.length === 0) {
+        setLayerPosts([]);
+        return;
       }
 
-      if (!rows && lastError) throw lastError;
-      const exactLayerPosts = (rows || []).filter((post) => {
-        if (isCloudOnlyPost(post)) return false;
-        return String(post?.geometry?.layer_id || "") === String(layer.id || "");
-      });
+      const pinsRes = await supabase
+        .from("pins")
+        .select("id,user_id,caption,content,author_name,created_at,layer,geometry")
+        .in("id", pinIds)
+        .order("created_at", { ascending: false })
+        .limit(50);
+      if (pinsRes.error) throw pinsRes.error;
+
+      const exactLayerPosts = (pinsRes.data || []).filter(
+        (post) => !isCloudOnlyPost(post),
+      );
       setLayerPosts(exactLayerPosts);
     } catch (error) {
       console.error("Error loading layer posts:", error);
@@ -3346,6 +2811,7 @@ const MapScreen = ({ navigation, route }) => {
           Alert.alert("Error", "Invalid visibility option.");
           return;
         } else {
+          normalizedUpdates.base_audience = nextLayer;
           normalizedUpdates.layer = nextLayer;
         }
       }
@@ -3486,47 +2952,7 @@ const MapScreen = ({ navigation, route }) => {
       }
 
       const authed = supabaseWithAccessToken(session.access_token);
-
-      const targetPin =
-        allLoadedPosts.find((pin) => pin.id === pinId) ||
-        (selectedPin?.id === pinId ? selectedPin : null);
-      const groupId = targetPin?.geometry?.cross_post_group_id || null;
-      let pinIdsToDelete = [pinId];
-
-      if (groupId) {
-        let relatedRows = null;
-        const byExpression = await authed
-          .from("pins")
-          .select("id")
-          .eq("geometry->>cross_post_group_id", groupId);
-
-        if (!byExpression.error) {
-          relatedRows = byExpression.data;
-        } else {
-          const byContains = await authed
-            .from("pins")
-            .select("id")
-            .contains("geometry", { cross_post_group_id: groupId });
-          if (!byContains.error) {
-            relatedRows = byContains.data;
-          } else {
-            console.warn(
-              "Group delete lookup failed; falling back to single pin delete:",
-              formatErrorMessage(byContains.error),
-            );
-          }
-        }
-
-        if (Array.isArray(relatedRows) && relatedRows.length > 0) {
-          pinIdsToDelete = Array.from(
-            new Set(
-              relatedRows
-                .map((row) => row?.id)
-                .filter((id) => typeof id === "string" && id.length > 0),
-            ),
-          );
-        }
-      }
+      const pinIdsToDelete = [pinId];
 
       const { data: deletedRows, error } = await authed
         .from("pins")
@@ -3735,16 +3161,11 @@ const MapScreen = ({ navigation, route }) => {
           onOpenLayerPosts={openLayerPosts}
           onToggleLayer={handleToggleLayer}
           onMoveLayer={handleMoveLayer}
-          onRefreshLayers={() =>
-            fetchAccessibleLayers(currentUser?.id, communityMapContext?.id)
-          }
+          onRemoveLayer={handleRemoveLayer}
+          onRefreshLayers={handleRefreshLayersAndPins}
           onPostSubmit={handlePostSubmit}
           userLocation={userLocation}
           onSearch={handleSearch}
-          mapMode={mapMode}
-          onToggleMapMode={() =>
-            setMapMode((prev) => (prev === "explore" ? "user" : "explore"))
-          }
           onArrowPinFocus={handleArrowPinFocus}
         />
       )}

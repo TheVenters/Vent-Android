@@ -1,3 +1,0 @@
--- Placeholder migration to align local migration history with remote.
--- Remote already has version 20260216000001 recorded.
--- Intentionally no-op.

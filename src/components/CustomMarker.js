@@ -20,6 +20,14 @@ const CustomMarkerComponent = ({ pin, onPress }, ref) => {
     return () => clearTimeout(timer);
   }, [pin?.author_avatar_url, pin?.id]);
 
+  useEffect(() => {
+    setTracksViewChanges(true);
+    const timer = setTimeout(() => {
+      setTracksViewChanges(false);
+    }, 220);
+    return () => clearTimeout(timer);
+  }, [pin?.layer_emoji, pin?.geometry?.layer_id]);
+
   const markerInitial = useMemo(() => {
     const source = String(pin.author_username || pin.author_name || "?").trim();
     return source ? source.charAt(0).toUpperCase() : "?";

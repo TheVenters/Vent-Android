@@ -139,10 +139,18 @@ export const supabaseWithAccessToken = (accessToken) => {
   }
 
   const client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    global: { fetch: resilientFetch },
-    // Use the built-in third-party auth hook so PostgREST/realtime always
-    // resolve the JWT from this callback instead of falling back to anon.
-    accessToken: async () => accessToken,
+    global: {
+      fetch: resilientFetch,
+      // Force authenticated PostgREST requests for RLS-gated reads/writes.
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    },
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+      detectSessionInUrl: false,
+    },
   });
 
   globalThis.__VENT_SUPABASE_HELPER__ = { token: accessToken, client };
@@ -566,6 +574,65 @@ export const joinCommunityViaEdgeFunction = async (
     refreshToken,
   );
 
+export const createCommunityViaEdgeFunction = async (
+  name,
+  slug,
+  description,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'create_community',
+    { name, slug, description, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const createCommunityLayerViaEdgeFunction = async (
+  communityId,
+  name,
+  kind,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'create_community_layer',
+    { communityId, name, kind, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const setLayerIconViaEdgeFunction = async (
+  layerId,
+  kind,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'set_layer_icon',
+    { layerId, kind, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const ensureUserPostingLayerViaEdgeFunction = async (
+  name,
+  legacyName,
+  kind,
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+) =>
+  socialAction(
+    'ensure_user_posting_layer',
+    { name, legacyName, kind, actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
 export const sendDirectMessageViaEdgeFunction = async (
   receiverId,
   content,
@@ -627,6 +694,39 @@ export const fetchMyLayerPrefsViaEdgeFunction = async (
   socialAction(
     'my_layer_prefs',
     { actorUserId },
+    accessToken,
+    refreshToken,
+  );
+
+export const fetchMyPinsViaEdgeFunction = async (
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+  limit = 3000,
+) =>
+  socialAction(
+    "list_pins",
+    {
+      layerKeys: ["private"],
+      actorUserId,
+      limit,
+    },
+    accessToken,
+    refreshToken,
+  );
+
+export const fetchVisiblePinsViaEdgeFunction = async (
+  accessToken,
+  refreshToken = null,
+  actorUserId = null,
+  limit = 3000,
+) =>
+  socialAction(
+    "list_pins",
+    {
+      actorUserId,
+      limit,
+    },
     accessToken,
     refreshToken,
   );
