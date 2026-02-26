@@ -65,7 +65,6 @@ import {
   getPinVisualSignature,
   haveSameEntitySignatures,
   isCloudOnlyPost,
-  isCoordinateWithinRegionBounds,
 } from "./map/mapVisualEngine";
 import {
   buildFallbackLayers,
@@ -97,8 +96,468 @@ const ERROR_ALERT_COOLDOWN_MS = 15000;
 const NETWORK_BACKOFF_MS = 20000;
 const MAP_POSTS_CACHE_KEY = "map_posts_cache_v1";
 const PIN_COMMENT_MAX_LENGTH = 500;
+const PIN_VIEWPORT_PADDING_RATIO = 0.1;
 const LAYER_TRACE_ENABLED = false;
 const COMMUNITY_MAP_TRACE_ENABLED = false;
+const DRAW_POINT_MIN_DISTANCE_METERS = 6;
+const DRAW_SIMPLIFY_TOLERANCE_METERS = 9;
+const DRAW_MAX_LINE_POINTS = 80;
+const DRAW_MAX_PLANE_POINTS = 60;
+const DRAW_SINGLE_TOUCH_GESTURE_BUFFER_MS = 120;
+const PLANE_EDGE_INSERT_THRESHOLD_METERS = 24;
+const PLANE_CORNER_MERGE_THRESHOLD_METERS = 14;
+const PLANE_CORNER_MERGE_HOLD_MS = 550;
+const PLANE_RECT_DRAG_END_DEBOUNCE_MS = 140;
+
+const toRadians = (degrees) => (degrees * Math.PI) / 180;
+
+const haversineMeters = (a, b) => {
+  const earthRadiusMeters = 6371000;
+  const deltaLat = toRadians(b.latitude - a.latitude);
+  const deltaLng = toRadians(b.longitude - a.longitude);
+  const lat1 = toRadians(a.latitude);
+  const lat2 = toRadians(b.latitude);
+
+  const x =
+    Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+    Math.sin(deltaLng / 2) *
+      Math.sin(deltaLng / 2) *
+      Math.cos(lat1) *
+      Math.cos(lat2);
+  const y = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+  return earthRadiusMeters * y;
+};
+
+const getLineMidpointCoordinate = (coords) => {
+  if (!Array.isArray(coords) || coords.length === 0) return null;
+  if (coords.length === 1) return coords[0];
+
+  const segments = [];
+  let totalDistance = 0;
+  for (let i = 0; i < coords.length - 1; i += 1) {
+    const start = coords[i];
+    const end = coords[i + 1];
+    const distance = haversineMeters(start, end);
+    if (!Number.isFinite(distance) || distance <= 0) continue;
+    segments.push({ start, end, distance });
+    totalDistance += distance;
+  }
+  if (totalDistance <= 0 || segments.length === 0) {
+    return coords[Math.floor(coords.length / 2)] || coords[0];
+  }
+
+  const halfway = totalDistance / 2;
+  let traversed = 0;
+  for (const segment of segments) {
+    if (traversed + segment.distance >= halfway) {
+      const ratio = (halfway - traversed) / segment.distance;
+      return {
+        latitude:
+          segment.start.latitude +
+          (segment.end.latitude - segment.start.latitude) * ratio,
+        longitude:
+          segment.start.longitude +
+          (segment.end.longitude - segment.start.longitude) * ratio,
+      };
+    }
+    traversed += segment.distance;
+  }
+
+  return coords[coords.length - 1];
+};
+
+const getPolygonCenterCoordinate = (coords) => {
+  if (!Array.isArray(coords) || coords.length === 0) return null;
+  const valid = coords.filter(
+    (coord) =>
+      Number.isFinite(coord?.latitude) && Number.isFinite(coord?.longitude),
+  );
+  if (valid.length === 0) return null;
+  const sum = valid.reduce(
+    (acc, coord) => ({
+      latitude: acc.latitude + coord.latitude,
+      longitude: acc.longitude + coord.longitude,
+    }),
+    { latitude: 0, longitude: 0 },
+  );
+  return {
+    latitude: sum.latitude / valid.length,
+    longitude: sum.longitude / valid.length,
+  };
+};
+
+const douglasPeucker = (points, epsilonMeters) => {
+  if (!Array.isArray(points) || points.length <= 2) {
+    return Array.isArray(points) ? points : [];
+  }
+
+  let maxDistance = 0;
+  let splitIndex = -1;
+  const start = points[0];
+  const end = points[points.length - 1];
+
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const distance = distancePointToSegmentMeters(points[i], start, end);
+    if (distance > maxDistance) {
+      maxDistance = distance;
+      splitIndex = i;
+    }
+  }
+
+  if (splitIndex >= 0 && maxDistance > epsilonMeters) {
+    const left = douglasPeucker(points.slice(0, splitIndex + 1), epsilonMeters);
+    const right = douglasPeucker(points.slice(splitIndex), epsilonMeters);
+    return [...left.slice(0, -1), ...right];
+  }
+
+  return [start, end];
+};
+
+const downsampleCoordinates = (coords, maxPoints, isClosed = false) => {
+  if (!Array.isArray(coords) || coords.length <= maxPoints) {
+    return Array.isArray(coords) ? coords : [];
+  }
+  if (!Number.isFinite(maxPoints) || maxPoints < 2) return coords;
+
+  if (!isClosed) {
+    const first = coords[0];
+    const last = coords[coords.length - 1];
+    const interior = coords.slice(1, -1);
+    const keepInterior = Math.max(0, maxPoints - 2);
+    if (interior.length <= keepInterior) return coords;
+    const step = interior.length / keepInterior;
+    const sampled = [];
+    for (let i = 0; i < keepInterior; i += 1) {
+      sampled.push(interior[Math.floor(i * step)]);
+    }
+    return [first, ...sampled, last];
+  }
+
+  const step = coords.length / maxPoints;
+  const sampled = [];
+  for (let i = 0; i < maxPoints; i += 1) {
+    sampled.push(coords[Math.floor(i * step)]);
+  }
+  return sampled;
+};
+
+const simplifyLineCoordinates = (coords) => {
+  if (!Array.isArray(coords) || coords.length < 2) return [];
+  const simplified = douglasPeucker(coords, DRAW_SIMPLIFY_TOLERANCE_METERS);
+  return downsampleCoordinates(simplified, DRAW_MAX_LINE_POINTS, false);
+};
+
+const getPlaneOuterBoundary = (coords) => {
+  if (!Array.isArray(coords) || coords.length < 3) {
+    return Array.isArray(coords) ? coords : [];
+  }
+  const points = coords
+    .filter(
+      (coord) =>
+        Number.isFinite(coord?.latitude) && Number.isFinite(coord?.longitude),
+    )
+    .map((coord) => ({
+      latitude: coord.latitude,
+      longitude: coord.longitude,
+    }));
+  if (points.length < 3) return points;
+
+  const unique = [];
+  const seen = new Set();
+  for (const point of points) {
+    const key = `${point.longitude.toFixed(7)}:${point.latitude.toFixed(7)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(point);
+  }
+  if (unique.length < 3) return unique;
+
+  const sorted = [...unique].sort((a, b) => {
+    if (a.longitude === b.longitude) return a.latitude - b.latitude;
+    return a.longitude - b.longitude;
+  });
+  const cross = (o, a, b) =>
+    (a.longitude - o.longitude) * (b.latitude - o.latitude) -
+    (a.latitude - o.latitude) * (b.longitude - o.longitude);
+
+  const lower = [];
+  for (const point of sorted) {
+    while (
+      lower.length >= 2 &&
+      cross(lower[lower.length - 2], lower[lower.length - 1], point) <= 0
+    ) {
+      lower.pop();
+    }
+    lower.push(point);
+  }
+
+  const upper = [];
+  for (let i = sorted.length - 1; i >= 0; i -= 1) {
+    const point = sorted[i];
+    while (
+      upper.length >= 2 &&
+      cross(upper[upper.length - 2], upper[upper.length - 1], point) <= 0
+    ) {
+      upper.pop();
+    }
+    upper.push(point);
+  }
+
+  const hull = [...lower.slice(0, -1), ...upper.slice(0, -1)];
+  return hull.length >= 3 ? hull : unique;
+};
+
+const simplifyPlaneCoordinates = (coords) => {
+  if (!Array.isArray(coords) || coords.length < 3) return [];
+  const outerBoundary = getPlaneOuterBoundary(coords);
+  if (!Array.isArray(outerBoundary) || outerBoundary.length < 3) return [];
+  const closed = [...outerBoundary, outerBoundary[0]];
+  const simplifiedClosed = douglasPeucker(closed, DRAW_SIMPLIFY_TOLERANCE_METERS);
+  const opened = simplifiedClosed.slice(0, -1);
+  if (opened.length < 3) {
+    return downsampleCoordinates(outerBoundary, DRAW_MAX_PLANE_POINTS, true);
+  }
+  return downsampleCoordinates(opened, DRAW_MAX_PLANE_POINTS, true);
+};
+
+const buildRectangleFromDiagonal = (anchor, target) => {
+  if (
+    !Number.isFinite(anchor?.latitude) ||
+    !Number.isFinite(anchor?.longitude) ||
+    !Number.isFinite(target?.latitude) ||
+    !Number.isFinite(target?.longitude)
+  ) {
+    return [];
+  }
+
+  const minLat = Math.min(anchor.latitude, target.latitude);
+  const maxLat = Math.max(anchor.latitude, target.latitude);
+  const minLng = Math.min(anchor.longitude, target.longitude);
+  const maxLng = Math.max(anchor.longitude, target.longitude);
+
+  return [
+    { latitude: maxLat, longitude: minLng },
+    { latitude: maxLat, longitude: maxLng },
+    { latitude: minLat, longitude: maxLng },
+    { latitude: minLat, longitude: minLng },
+  ];
+};
+
+const distancePointToSegmentMeters = (point, start, end) => {
+  if (
+    !point ||
+    !start ||
+    !end ||
+    !Number.isFinite(point.latitude) ||
+    !Number.isFinite(point.longitude) ||
+    !Number.isFinite(start.latitude) ||
+    !Number.isFinite(start.longitude) ||
+    !Number.isFinite(end.latitude) ||
+    !Number.isFinite(end.longitude)
+  ) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const originLat = (point.latitude + start.latitude + end.latitude) / 3;
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = metersPerDegLat * Math.cos(toRadians(originLat));
+  if (!Number.isFinite(metersPerDegLng) || Math.abs(metersPerDegLng) < 1e-8) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const px = point.longitude * metersPerDegLng;
+  const py = point.latitude * metersPerDegLat;
+  const ax = start.longitude * metersPerDegLng;
+  const ay = start.latitude * metersPerDegLat;
+  const bx = end.longitude * metersPerDegLng;
+  const by = end.latitude * metersPerDegLat;
+
+  const abx = bx - ax;
+  const aby = by - ay;
+  const abLenSq = abx * abx + aby * aby;
+  if (!Number.isFinite(abLenSq) || abLenSq <= 0) {
+    return Math.hypot(px - ax, py - ay);
+  }
+
+  const apx = px - ax;
+  const apy = py - ay;
+  const t = Math.max(0, Math.min(1, (apx * abx + apy * aby) / abLenSq));
+  const closestX = ax + abx * t;
+  const closestY = ay + aby * t;
+  return Math.hypot(px - closestX, py - closestY);
+};
+
+const findNearestPlaneEdgeIndex = (coords, point, thresholdMeters) => {
+  if (!Array.isArray(coords) || coords.length < 2) return -1;
+
+  let bestIndex = -1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (let i = 0; i < coords.length; i += 1) {
+    const start = coords[i];
+    const end = coords[(i + 1) % coords.length];
+    const distance = distancePointToSegmentMeters(point, start, end);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = i;
+    }
+  }
+
+  return bestDistance <= thresholdMeters ? bestIndex : -1;
+};
+
+const hasValidCoordinate = (post) =>
+  typeof post?.lat === "number" &&
+  Number.isFinite(post.lat) &&
+  typeof post?.lng === "number" &&
+  Number.isFinite(post.lng);
+
+const normalizeLongitude = (longitude) => {
+  if (!Number.isFinite(longitude)) return longitude;
+  let next = longitude;
+  while (next > 180) next -= 360;
+  while (next < -180) next += 360;
+  return next;
+};
+
+const isLongitudeWithinBounds = (longitude, minLng, maxLng) => {
+  if (minLng <= maxLng) {
+    return longitude >= minLng && longitude <= maxLng;
+  }
+  return longitude >= minLng || longitude <= maxLng;
+};
+
+const isCoordinateWithinRegionBounds = (
+  coordinate,
+  mapRegion,
+  paddingRatio = 0,
+) => {
+  if (
+    !Number.isFinite(coordinate?.latitude) ||
+    !Number.isFinite(coordinate?.longitude)
+  ) {
+    return false;
+  }
+
+  const centerLat = Number(mapRegion?.latitude);
+  const centerLng = Number(mapRegion?.longitude);
+  const latitudeDelta = Number(mapRegion?.latitudeDelta);
+  const longitudeDelta = Number(mapRegion?.longitudeDelta);
+
+  if (
+    !Number.isFinite(centerLat) ||
+    !Number.isFinite(centerLng) ||
+    !Number.isFinite(latitudeDelta) ||
+    !Number.isFinite(longitudeDelta) ||
+    latitudeDelta <= 0 ||
+    longitudeDelta <= 0
+  ) {
+    return true;
+  }
+
+  const latPadding = latitudeDelta * paddingRatio;
+  const lngPadding = longitudeDelta * paddingRatio;
+
+  const minLat = centerLat - latitudeDelta / 2 - latPadding;
+  const maxLat = centerLat + latitudeDelta / 2 + latPadding;
+  if (coordinate.latitude < minLat || coordinate.latitude > maxLat) {
+    return false;
+  }
+
+  if (longitudeDelta + lngPadding * 2 >= 360) {
+    return true;
+  }
+
+  const longitude = normalizeLongitude(coordinate.longitude);
+  const minLng = normalizeLongitude(centerLng - longitudeDelta / 2 - lngPadding);
+  const maxLng = normalizeLongitude(centerLng + longitudeDelta / 2 + lngPadding);
+  return isLongitudeWithinBounds(longitude, minLng, maxLng);
+};
+
+const toScreenPoint = (coordinate, mapRegion, mapSize) => {
+  const width = Number(mapSize?.width || 0);
+  const height = Number(mapSize?.height || 0);
+  const latitudeDelta = Number(mapRegion?.latitudeDelta || 0);
+  const longitudeDelta = Number(mapRegion?.longitudeDelta || 0);
+  const centerLat = Number(mapRegion?.latitude || 0);
+  const centerLng = Number(mapRegion?.longitude || 0);
+
+  if (
+    width <= 0 ||
+    height <= 0 ||
+    latitudeDelta <= 0 ||
+    longitudeDelta <= 0 ||
+    !Number.isFinite(centerLat) ||
+    !Number.isFinite(centerLng)
+  ) {
+    return null;
+  }
+
+  const minLat = centerLat - latitudeDelta / 2;
+  const maxLat = centerLat + latitudeDelta / 2;
+  const minLng = centerLng - longitudeDelta / 2;
+
+  return {
+    x: ((coordinate.longitude - minLng) / longitudeDelta) * width,
+    y: ((maxLat - coordinate.latitude) / latitudeDelta) * height,
+  };
+};
+
+const isScreenPointWithinClusterViewport = (
+  screenPoint,
+  mapSize,
+  paddingPx = CLUSTER_VIEWPORT_PADDING_PX,
+) => {
+  if (!screenPoint) return false;
+  const width = Number(mapSize?.width || 0);
+  const height = Number(mapSize?.height || 0);
+  if (width <= 0 || height <= 0) return false;
+
+  return (
+    screenPoint.x >= -paddingPx &&
+    screenPoint.x <= width + paddingPx &&
+    screenPoint.y >= -paddingPx &&
+    screenPoint.y <= height + paddingPx
+  );
+};
+
+const isFiniteLngLatPair = (value) =>
+  Array.isArray(value) &&
+  value.length >= 2 &&
+  Number.isFinite(Number(value[0])) &&
+  Number.isFinite(Number(value[1]));
+const toMapCoordinate = (value) => ({
+  longitude: Number(value[0]),
+  latitude: Number(value[1]),
+});
+const getPersistedShapeGeometry = (pin) => {
+  const geometry = pin?.geometry;
+  if (!geometry || typeof geometry !== "object") return null;
+  const type = String(geometry.type || "").toLowerCase();
+  const coordinates = geometry.coordinates;
+
+  if (type === "linestring" && Array.isArray(coordinates)) {
+    const parsed = coordinates
+      .filter(isFiniteLngLatPair)
+      .map(toMapCoordinate);
+    if (parsed.length >= 2) {
+      return { kind: "line", coordinates: parsed };
+    }
+    return null;
+  }
+
+  if (type === "polygon" && Array.isArray(coordinates) && Array.isArray(coordinates[0])) {
+    const outerRing = coordinates[0];
+    const parsed = outerRing
+      .filter(isFiniteLngLatPair)
+      .map(toMapCoordinate);
+    if (parsed.length >= 3) {
+      return { kind: "plane", coordinates: parsed };
+    }
+  }
+
+  return null;
+};
 const isRlsPolicyError = (error) =>
   error?.code === "42501" ||
   String(error?.message || "")
@@ -236,6 +695,7 @@ const MapScreen = ({ navigation, route }) => {
   const [isDrawingMode, setIsDrawingMode] = useState(false);
   const [isPickingPostLocation, setIsPickingPostLocation] = useState(false);
   const [drawingCoords, setDrawingCoords] = useState([]);
+  const [isMapMultiTouchActive, setIsMapMultiTouchActive] = useState(false);
   const [drawingType, setDrawingType] = useState(null);
   const [pendingPostData, setPendingPostData] = useState(null);
   const [communityMapContext, setCommunityMapContext] = useState(null);
@@ -253,6 +713,33 @@ const MapScreen = ({ navigation, route }) => {
   const [mapSize, setMapSize] = useState(DEFAULT_MAP_SIZE);
   const pins = mapVisuals.pins;
   const clouds = mapVisuals.clouds;
+  const persistedShapes = useMemo(
+    () =>
+      allLoadedPosts
+        .filter((pin) => !isCloudOnlyPost(pin))
+        .map((pin) => {
+          const shape = getPersistedShapeGeometry(pin);
+          if (!shape) return null;
+          if (
+            hasValidCoordinate(pin) &&
+            !isCoordinateWithinRegionBounds(
+              { latitude: pin.lat, longitude: pin.lng },
+              region,
+              PIN_VIEWPORT_PADDING_RATIO,
+            )
+          ) {
+            return null;
+          }
+          return {
+            id: String(pin.id || ""),
+            kind: shape.kind,
+            coordinates: shape.coordinates,
+            pin,
+          };
+        })
+        .filter((shape) => shape && shape.id && shape.pin),
+    [allLoadedPosts, region],
+  );
 
   const mapRef = useRef(null);
   const selectedPinIdRef = useRef(null);
@@ -277,10 +764,27 @@ const MapScreen = ({ navigation, route }) => {
   useEffect(() => {
     allLoadedPostsRef.current = allLoadedPosts;
   }, [allLoadedPosts]);
+  const planeRectAnchorRef = useRef(null);
+  const planeRectStopTimerRef = useRef(null);
+  const planeMergeHoldTimerRef = useRef(null);
+  const planeMergeTargetRef = useRef(null);
+  const activeMapTouchCountRef = useRef(0);
+  const multiTouchGestureLockedRef = useRef(false);
+  const suppressDrawUntilRef = useRef(0);
+  const regionGestureSuppressUntilRef = useRef(0);
+  const singleTouchDrawReadyAtRef = useRef(0);
+  const drawingCoordsRef = useRef([]);
+  const activeLineStrokeStartIndexRef = useRef(null);
+  const lineStrokeStartIndicesRef = useRef([]);
+  const activePlaneStrokeStartIndexRef = useRef(null);
+  const planeStrokeStartIndicesRef = useRef([]);
 
   useEffect(() => {
     selectedPinIdRef.current = selectedPin?.id || null;
   }, [selectedPin?.id]);
+  useEffect(() => {
+    drawingCoordsRef.current = Array.isArray(drawingCoords) ? drawingCoords : [];
+  }, [drawingCoords]);
 
   useEffect(() => {
     return () => {
@@ -290,6 +794,19 @@ const MapScreen = ({ navigation, route }) => {
       }
     };
   }, []);
+  useEffect(
+    () => () => {
+      if (planeRectStopTimerRef.current) {
+        clearTimeout(planeRectStopTimerRef.current);
+        planeRectStopTimerRef.current = null;
+      }
+      if (planeMergeHoldTimerRef.current) {
+        clearTimeout(planeMergeHoldTimerRef.current);
+        planeMergeHoldTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   const shouldThrottleError = useCallback((key, cooldownMs) => {
     const now = Date.now();
@@ -1460,6 +1977,10 @@ useEffect(() => {
         setSelectedPinLayers([]);
         return;
       }
+      if (!isUuid(pinId)) {
+        setSelectedPinLayers([]);
+        return;
+      }
 
       const membershipsRes = await supabase
         .from("pin_layer_memberships")
@@ -1660,6 +2181,166 @@ useEffect(() => {
     },
     [handleRefreshLayersAndPins, resolveCurrentUserId],
   );
+  const clearPlaneInteractionTimers = () => {
+    if (planeRectStopTimerRef.current) {
+      clearTimeout(planeRectStopTimerRef.current);
+      planeRectStopTimerRef.current = null;
+    }
+    if (planeMergeHoldTimerRef.current) {
+      clearTimeout(planeMergeHoldTimerRef.current);
+      planeMergeHoldTimerRef.current = null;
+    }
+    planeMergeTargetRef.current = null;
+  };
+
+  const resetLineStrokeTracking = () => {
+    activeLineStrokeStartIndexRef.current = null;
+    lineStrokeStartIndicesRef.current = [];
+  };
+
+  const resetPlaneStrokeTracking = () => {
+    activePlaneStrokeStartIndexRef.current = null;
+    planeStrokeStartIndicesRef.current = [];
+  };
+
+  const beginActiveLineStroke = () => {
+    const startIndex = drawingCoordsRef.current.length;
+    activeLineStrokeStartIndexRef.current = startIndex;
+    const starts = lineStrokeStartIndicesRef.current;
+    const lastStart = starts.length > 0 ? starts[starts.length - 1] : null;
+    if (lastStart !== startIndex) {
+      lineStrokeStartIndicesRef.current = [...starts, startIndex];
+    }
+  };
+
+  const finalizeActiveLineStroke = () => {
+    const startIndex = activeLineStrokeStartIndexRef.current;
+    if (!Number.isInteger(startIndex) || startIndex < 0) {
+      activeLineStrokeStartIndexRef.current = null;
+      return;
+    }
+    const endIndex = drawingCoordsRef.current.length;
+    // If the stroke never added points, discard its stack entry.
+    if (endIndex <= startIndex) {
+      const starts = lineStrokeStartIndicesRef.current;
+      if (starts.length > 0 && starts[starts.length - 1] === startIndex) {
+        lineStrokeStartIndicesRef.current = starts.slice(0, -1);
+      }
+    }
+    activeLineStrokeStartIndexRef.current = null;
+  };
+
+  const beginActivePlaneStroke = () => {
+    const startIndex = drawingCoordsRef.current.length;
+    activePlaneStrokeStartIndexRef.current = startIndex;
+    const starts = planeStrokeStartIndicesRef.current;
+    const lastStart = starts.length > 0 ? starts[starts.length - 1] : null;
+    if (lastStart !== startIndex) {
+      planeStrokeStartIndicesRef.current = [...starts, startIndex];
+    }
+  };
+
+  const finalizeActivePlaneStroke = () => {
+    const startIndex = activePlaneStrokeStartIndexRef.current;
+    if (!Number.isInteger(startIndex) || startIndex < 0) {
+      activePlaneStrokeStartIndexRef.current = null;
+      return;
+    }
+    const endIndex = drawingCoordsRef.current.length;
+    // If the stroke never added points, discard its stack entry.
+    if (endIndex <= startIndex) {
+      const starts = planeStrokeStartIndicesRef.current;
+      if (starts.length > 0 && starts[starts.length - 1] === startIndex) {
+        planeStrokeStartIndicesRef.current = starts.slice(0, -1);
+      }
+    }
+    activePlaneStrokeStartIndexRef.current = null;
+  };
+
+  const updateMapTouchState = (event, phase = "move") => {
+    const now = Date.now();
+    const previousTouchCount = activeMapTouchCountRef.current;
+    const touchesLength = event?.nativeEvent?.touches?.length;
+    const changedTouchesLength = event?.nativeEvent?.changedTouches?.length;
+    // `touches` is authoritative when present, including `0` on touch end.
+    let touchCount = Number(
+      Number.isFinite(touchesLength)
+        ? touchesLength
+        : Number.isFinite(changedTouchesLength)
+          ? changedTouchesLength
+          : 0,
+    );
+    // Some platforms report only changedTouches during simultaneous starts.
+    // Infer count transitions from phase + previous count to avoid false single-touch.
+    if (phase === "start" && previousTouchCount >= 1 && touchCount <= 1) {
+      touchCount = previousTouchCount + 1;
+    } else if (
+      (phase === "end" || phase === "cancel") &&
+      previousTouchCount > 0 &&
+      touchCount >= previousTouchCount
+    ) {
+      touchCount = previousTouchCount - 1;
+    }
+    activeMapTouchCountRef.current = touchCount;
+    if (touchCount > 1) {
+      multiTouchGestureLockedRef.current = true;
+    } else if (touchCount === 0) {
+      multiTouchGestureLockedRef.current = false;
+    }
+    setIsMapMultiTouchActive((prev) => {
+      const next = touchCount > 1 || multiTouchGestureLockedRef.current;
+      return prev === next ? prev : next;
+    });
+
+    if (previousTouchCount === 0 && touchCount > 0) {
+      // New gesture started: wait briefly before allowing draw to avoid
+      // simultaneous two-finger starts being interpreted as single-touch.
+      singleTouchDrawReadyAtRef.current =
+        now + DRAW_SINGLE_TOUCH_GESTURE_BUFFER_MS;
+      suppressDrawUntilRef.current = Math.max(
+        suppressDrawUntilRef.current,
+        singleTouchDrawReadyAtRef.current,
+      );
+    } else if (touchCount !== 1) {
+      singleTouchDrawReadyAtRef.current = 0;
+    }
+
+    if (isDrawingMode && drawingType === GEOMETRY_TYPES.LINE) {
+      if (touchCount > 1 && activeLineStrokeStartIndexRef.current !== null) {
+        finalizeActiveLineStroke();
+      } else if (
+        (touchCount === 0 && previousTouchCount > 0) ||
+        ((phase === "end" || phase === "cancel") &&
+          previousTouchCount === 1 &&
+          activeLineStrokeStartIndexRef.current !== null)
+      ) {
+        finalizeActiveLineStroke();
+      }
+    } else if (isDrawingMode && drawingType === GEOMETRY_TYPES.PLANE) {
+      if (touchCount > 1 && activePlaneStrokeStartIndexRef.current !== null) {
+        finalizeActivePlaneStroke();
+      } else if (
+        (touchCount === 0 && previousTouchCount > 0) ||
+        ((phase === "end" || phase === "cancel") &&
+          previousTouchCount === 1 &&
+          activePlaneStrokeStartIndexRef.current !== null)
+      ) {
+        finalizeActivePlaneStroke();
+      }
+    } else if (activeLineStrokeStartIndexRef.current !== null) {
+      activeLineStrokeStartIndexRef.current = null;
+    } else if (activePlaneStrokeStartIndexRef.current !== null) {
+      activePlaneStrokeStartIndexRef.current = null;
+    }
+
+    if (touchCount > 1) {
+      // Ignore pan-draw callbacks briefly after multi-touch (pinch/two-finger tap).
+      suppressDrawUntilRef.current = now + 260;
+    } else if (touchCount === 0) {
+      // Small cooldown right after ending a two-finger gesture.
+      suppressDrawUntilRef.current = Math.max(suppressDrawUntilRef.current, now + 80);
+    }
+  };
 
   const handleMapPress = (event) => {
     if (isPickingPostLocation && pendingPostData) {
@@ -1671,22 +2352,182 @@ useEffect(() => {
       setPendingPostData(nextPostData);
       setIsPickingPostLocation(false);
       handlePostSubmit(nextPostData);
-      return;
-    }
-
-    if (isDrawingMode) {
-      const { latitude, longitude } = event.nativeEvent.coordinate;
-      setDrawingCoords((prev) => [...prev, { latitude, longitude }]);
     }
   };
 
+  const handleMapLongPress = (event) => {
+    if (!isDrawingMode || drawingType !== GEOMETRY_TYPES.PLANE) return;
+    const { latitude, longitude } = event.nativeEvent.coordinate || {};
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+    const nextCoord = { latitude, longitude };
+
+    if (Array.isArray(drawingCoords) && drawingCoords.length >= 3) {
+      const edgeIndex = findNearestPlaneEdgeIndex(
+        drawingCoords,
+        nextCoord,
+        PLANE_EDGE_INSERT_THRESHOLD_METERS,
+      );
+      if (edgeIndex >= 0) {
+        setDrawingCoords((prev) => {
+          if (!Array.isArray(prev) || prev.length < 3) return prev;
+          const updated = [...prev];
+          updated.splice(edgeIndex + 1, 0, nextCoord);
+          return updated;
+        });
+      }
+      return;
+    }
+
+    planeRectAnchorRef.current = nextCoord;
+    clearPlaneInteractionTimers();
+    setDrawingCoords(buildRectangleFromDiagonal(nextCoord, nextCoord));
+  };
+
+  const handleMapPanDrag = (event) => {
+    if (!isDrawingMode) return;
+    if (activeMapTouchCountRef.current > 1) return;
+    if (multiTouchGestureLockedRef.current) return;
+    if (Date.now() < regionGestureSuppressUntilRef.current) return;
+    if (Date.now() < suppressDrawUntilRef.current) return;
+    if (Date.now() < singleTouchDrawReadyAtRef.current) return;
+    if (
+      drawingType === GEOMETRY_TYPES.LINE &&
+      activeLineStrokeStartIndexRef.current === null
+    ) {
+      beginActiveLineStroke();
+    } else if (
+      drawingType === GEOMETRY_TYPES.PLANE &&
+      activePlaneStrokeStartIndexRef.current === null
+    ) {
+      beginActivePlaneStroke();
+    }
+    const { latitude, longitude } = event.nativeEvent.coordinate || {};
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+    const nextCoord = { latitude, longitude };
+
+    if (
+      drawingType === GEOMETRY_TYPES.LINE ||
+      drawingType === GEOMETRY_TYPES.PLANE
+    ) {
+      setDrawingCoords((prev) => {
+        if (!Array.isArray(prev) || prev.length === 0) return [nextCoord];
+        const lastCoord = prev[prev.length - 1];
+        const distanceMeters = haversineMeters(lastCoord, nextCoord);
+        if (!Number.isFinite(distanceMeters)) return prev;
+        if (distanceMeters < DRAW_POINT_MIN_DISTANCE_METERS) return prev;
+        return [...prev, nextCoord];
+      });
+      return;
+    }
+  };
+
+  const handlePlaneCornerDragStart = () => {
+    if (planeMergeHoldTimerRef.current) {
+      clearTimeout(planeMergeHoldTimerRef.current);
+      planeMergeHoldTimerRef.current = null;
+    }
+    planeMergeTargetRef.current = null;
+  };
+
+  const handlePlaneCornerDrag = (index, event) => {
+    const { latitude, longitude } = event?.nativeEvent?.coordinate || {};
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+    const draggedCoord = { latitude, longitude };
+
+    setDrawingCoords((prev) => {
+      if (!Array.isArray(prev) || prev.length < 3) return prev;
+      if (index < 0 || index >= prev.length) return prev;
+      const updated = [...prev];
+      updated[index] = draggedCoord;
+
+      if (updated.length <= 3) {
+        if (planeMergeHoldTimerRef.current) {
+          clearTimeout(planeMergeHoldTimerRef.current);
+          planeMergeHoldTimerRef.current = null;
+        }
+        planeMergeTargetRef.current = null;
+        return updated;
+      }
+
+      let nearestIndex = -1;
+      let nearestDistance = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < updated.length; i += 1) {
+        if (i === index) continue;
+        const distance = haversineMeters(draggedCoord, updated[i]);
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearestIndex = i;
+        }
+      }
+
+      const canMerge =
+        nearestIndex >= 0 &&
+        nearestDistance <= PLANE_CORNER_MERGE_THRESHOLD_METERS &&
+        updated.length > 3;
+
+      if (!canMerge) {
+        if (planeMergeHoldTimerRef.current) {
+          clearTimeout(planeMergeHoldTimerRef.current);
+          planeMergeHoldTimerRef.current = null;
+        }
+        planeMergeTargetRef.current = null;
+        return updated;
+      }
+
+      if (planeMergeTargetRef.current !== nearestIndex) {
+        if (planeMergeHoldTimerRef.current) {
+          clearTimeout(planeMergeHoldTimerRef.current);
+        }
+        planeMergeTargetRef.current = nearestIndex;
+        planeMergeHoldTimerRef.current = setTimeout(() => {
+          setDrawingCoords((current) => {
+            if (!Array.isArray(current) || current.length <= 3) return current;
+            if (index < 0 || index >= current.length) return current;
+            const withoutDragged = current.filter((_, i) => i !== index);
+            return withoutDragged.length >= 3 ? withoutDragged : current;
+          });
+          planeMergeHoldTimerRef.current = null;
+          planeMergeTargetRef.current = null;
+        }, PLANE_CORNER_MERGE_HOLD_MS);
+      }
+
+      return updated;
+    });
+  };
+
+  const handlePlaneCornerDragEnd = (index, event) => {
+    const { latitude, longitude } = event?.nativeEvent?.coordinate || {};
+    if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+      setDrawingCoords((prev) => {
+        if (!Array.isArray(prev) || index < 0 || index >= prev.length) return prev;
+        const updated = [...prev];
+        updated[index] = { latitude, longitude };
+        return updated;
+      });
+    }
+
+    if (planeMergeHoldTimerRef.current) {
+      clearTimeout(planeMergeHoldTimerRef.current);
+      planeMergeHoldTimerRef.current = null;
+    }
+    planeMergeTargetRef.current = null;
+  };
+
   const handleStartDrawing = (geometryType) => {
+    clearPlaneInteractionTimers();
+    resetLineStrokeTracking();
+    resetPlaneStrokeTracking();
+    planeRectAnchorRef.current = null;
     setIsDrawingMode(true);
     setDrawingType(geometryType);
     setDrawingCoords([]);
   };
 
   const handleFinishDrawing = () => {
+    clearPlaneInteractionTimers();
+    resetLineStrokeTracking();
+    resetPlaneStrokeTracking();
+    planeRectAnchorRef.current = null;
     setIsDrawingMode(false);
   };
 
@@ -1697,7 +2538,11 @@ useEffect(() => {
       return;
     }
 
-    if (postData.locationMode === "pick_on_map" && !postData.location) {
+    if (
+      postData.locationMode === "pick_on_map" &&
+      !postData.location &&
+      postData.geometryType === GEOMETRY_TYPES.POINT
+    ) {
       setPendingPostData(postData);
       setIsPickingPostLocation(true);
       Alert.alert("Select Location", "Tap on the map to place this post.");
@@ -1716,12 +2561,41 @@ useEffect(() => {
       return;
     }
 
+    const rawDrawingCoords = Array.isArray(drawingCoords) ? drawingCoords : [];
+    const finalizedDrawingCoords =
+      postData.geometryType === GEOMETRY_TYPES.LINE
+        ? simplifyLineCoordinates(rawDrawingCoords)
+        : postData.geometryType === GEOMETRY_TYPES.PLANE
+          ? simplifyPlaneCoordinates(rawDrawingCoords)
+          : rawDrawingCoords;
+
     if (
       postData.geometryType !== GEOMETRY_TYPES.POINT &&
-      drawingCoords.length === 0
+      finalizedDrawingCoords.length === 0
     ) {
       setPendingPostData(postData);
       handleStartDrawing(postData.geometryType);
+      return;
+    }
+    if (
+      String(postData?.postVisibilityMode || "pinned").toLowerCase() !==
+        "cloud_only" &&
+      postData.geometryType === GEOMETRY_TYPES.LINE &&
+      finalizedDrawingCoords.length < 2
+    ) {
+      Alert.alert("Add More Path Points", "Drag to draw at least a short path.");
+      return;
+    }
+    if (
+      String(postData?.postVisibilityMode || "pinned").toLowerCase() !==
+        "cloud_only" &&
+      postData.geometryType === GEOMETRY_TYPES.PLANE &&
+      finalizedDrawingCoords.length < 3
+    ) {
+      Alert.alert(
+        "Add More Plane Points",
+        "Draw at least 3 points for a plane.",
+      );
       return;
     }
 
@@ -1753,8 +2627,14 @@ useEffect(() => {
         postData.location?.latitude ||
         userLocation?.latitude ||
         region.latitude;
-      const storedLat = baseLat;
-      const storedLng = baseLng;
+      let storedLat = baseLat;
+      let storedLng = baseLng;
+      const postVisibilityMode = String(
+        postData?.postVisibilityMode || "pinned",
+      ).toLowerCase();
+      const crossPostGroupId = `${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 10)}`;
       const baseAudienceRaw = String(postData?.baseAudience || "").toLowerCase();
       const baseAudience = ["friends", "public", "private"].includes(
         baseAudienceRaw,
@@ -1846,6 +2726,25 @@ useEffect(() => {
       }
       const targetLayerIdForGeometry =
         resolvedExtraCommunityLayerId || authorLayerId;
+      if (
+        postData.geometryType === GEOMETRY_TYPES.LINE &&
+        finalizedDrawingCoords.length >= 2
+      ) {
+        const lineMidpoint = getLineMidpointCoordinate(finalizedDrawingCoords);
+        if (lineMidpoint) {
+          storedLat = lineMidpoint.latitude;
+          storedLng = lineMidpoint.longitude;
+        }
+      } else if (
+        postData.geometryType === GEOMETRY_TYPES.PLANE &&
+        finalizedDrawingCoords.length >= 3
+      ) {
+        const planeCenter = getPolygonCenterCoordinate(finalizedDrawingCoords);
+        if (planeCenter) {
+          storedLat = planeCenter.latitude;
+          storedLng = planeCenter.longitude;
+        }
+      }
       let geometry;
       if (postData.geometryType === GEOMETRY_TYPES.POINT) {
         geometry = {
@@ -1854,10 +2753,10 @@ useEffect(() => {
           layer_id: targetLayerIdForGeometry,
           author_layer_id: authorLayerId,
           author_user_id: activeUserId,
-          visibility_mode: "pinned",
+          visibility_mode: postVisibilityMode,
         };
-      } else if (drawingCoords.length > 0) {
-        const coordinates = drawingCoords.map((coord) => [
+      } else if (finalizedDrawingCoords.length > 0) {
+        const coordinates = finalizedDrawingCoords.map((coord) => [
           coord.longitude,
           coord.latitude,
         ]);
@@ -1873,7 +2772,7 @@ useEffect(() => {
           layer_id: targetLayerIdForGeometry,
           author_layer_id: authorLayerId,
           author_user_id: activeUserId,
-          visibility_mode: "pinned",
+          visibility_mode: postVisibilityMode,
         };
       } else {
         geometry = {
@@ -1882,7 +2781,7 @@ useEffect(() => {
           layer_id: targetLayerIdForGeometry,
           author_layer_id: authorLayerId,
           author_user_id: activeUserId,
-          visibility_mode: "pinned",
+          visibility_mode: postVisibilityMode,
         };
       }
 
@@ -1949,8 +2848,32 @@ useEffect(() => {
         }
       }
 
-      loadPins(enabledPinLayerKeys);
-      if (postData.geometryType === GEOMETRY_TYPES.POINT) {
+      const layerIconById = new Map(
+        layers.map((layer) => [layer.id, layer.layer_icon || null]),
+      );
+      const optimisticCreatedAt = new Date().toISOString();
+      const optimisticRows = insertRows.map((row, index) => ({
+        ...row,
+        id: `temp-${crossPostGroupId}-${index}`,
+        created_at: optimisticCreatedAt,
+        updated_at: optimisticCreatedAt,
+        author_avatar_url: activeUser?.user_metadata?.avatar_url || null,
+        layer_emoji: row?.geometry?.layer_id
+          ? layerIconById.get(row.geometry.layer_id) || null
+          : null,
+      }));
+      setAllLoadedPosts((prev) => {
+        const previous = Array.isArray(prev) ? prev : [];
+        return [...optimisticRows, ...previous];
+      });
+
+      if (Array.isArray(enabledPinLayerKeys) && enabledPinLayerKeys.length > 0) {
+        loadPins(enabledPinLayerKeys);
+      }
+      if (
+        postVisibilityMode !== "cloud_only" &&
+        postData.geometryType === GEOMETRY_TYPES.POINT
+      ) {
         const createdCoordinate = {
           latitude: storedLat,
           longitude: storedLng,
@@ -2035,6 +2958,13 @@ useEffect(() => {
     { preferCache = true, suppressState = false, backgroundRefresh = true } = {},
   ) => {
     if (!pinId) return [];
+    if (!isUuid(pinId)) {
+      if (!suppressState && selectedPinIdRef.current === pinId) {
+        setPinComments([]);
+        setPinCommentsLoading(false);
+      }
+      return [];
+    }
 
     const cached = pinCommentsCacheRef.current.get(pinId);
     if (cached && preferCache && !suppressState) {
@@ -2167,6 +3097,13 @@ useEffect(() => {
     { preferCache = true, suppressState = false, backgroundRefresh = true } = {},
   ) => {
     if (!pinId) return null;
+    if (!isUuid(pinId)) {
+      const emptySummary = { upvotes: 0, downvotes: 0, userVote: 0 };
+      if (!suppressState && selectedPinIdRef.current === pinId) {
+        setPinVoteSummary(emptySummary);
+      }
+      return emptySummary;
+    }
 
     const cached = pinVoteSummaryCacheRef.current.get(pinId);
     if (cached && preferCache && !suppressState) {
@@ -2296,6 +3233,7 @@ useEffect(() => {
         .filter(
           (pinId) =>
             pinId &&
+            isUuid(pinId) &&
             !pinVoteSummaryCacheRef.current.has(pinId) &&
             !pinVoteRequestRef.current.has(pinId),
         );
@@ -2384,7 +3322,27 @@ useEffect(() => {
       }
       return normalizedRegion;
     });
+    if (
+      multiTouchGestureLockedRef.current &&
+      activeMapTouchCountRef.current <= 1 &&
+      Date.now() >= regionGestureSuppressUntilRef.current
+    ) {
+      multiTouchGestureLockedRef.current = false;
+      setIsMapMultiTouchActive(false);
+    }
   }, []);
+
+  const handleRegionChange = useCallback(() => {
+    if (!isDrawingMode) return;
+    const hasMultiTouchContext =
+      activeMapTouchCountRef.current > 1 || multiTouchGestureLockedRef.current;
+    if (!hasMultiTouchContext) return;
+    const until = Date.now() + 240;
+    regionGestureSuppressUntilRef.current = until;
+    suppressDrawUntilRef.current = Math.max(suppressDrawUntilRef.current, until);
+    multiTouchGestureLockedRef.current = true;
+    setIsMapMultiTouchActive(true);
+  }, [isDrawingMode]);
 
   const showArrowPinCallout = useCallback((pinId, attempt = 0) => {
     const marker = markerRefsByIdRef.current.get(pinId);
@@ -2426,6 +3384,13 @@ useEffect(() => {
 
   const handleVotePin = async (vote) => {
     if (!selectedPin) return;
+    if (!isUuid(selectedPin.id)) {
+      Alert.alert(
+        "Please wait",
+        "This post is still syncing. Voting will be available in a moment.",
+      );
+      return;
+    }
 
     const session = await getActiveSession();
     const userId = session?.user?.id || null;
@@ -2517,6 +3482,13 @@ useEffect(() => {
     if (!selectedPin?.id) return false;
 
     const pinId = selectedPin.id;
+    if (!isUuid(pinId)) {
+      Alert.alert(
+        "Please wait",
+        "This post is still syncing. Commenting will be available in a moment.",
+      );
+      return false;
+    }
     const trimmedContent = String(content || "").trim();
     const parentCommentIdRaw = String(options?.parentCommentId || "").trim();
     const parentCommentId = parentCommentIdRaw
@@ -3106,14 +4078,25 @@ useEffect(() => {
             return { width, height };
           });
         }}
+        onRegionChange={handleRegionChange}
         onRegionChangeComplete={handleRegionChangeComplete}
         mapType={mapType}
         customMapStyle={isDark ? MAP_DARK_STYLE : []}
-        onPress={
-          isDrawingMode || isPickingPostLocation ? handleMapPress : undefined
+        onPress={isPickingPostLocation ? handleMapPress : undefined}
+        onLongPress={undefined}
+        onPanDrag={
+          isDrawingMode &&
+          (drawingType === GEOMETRY_TYPES.LINE ||
+            drawingType === GEOMETRY_TYPES.PLANE)
+            ? handleMapPanDrag
+            : undefined
         }
+        onTouchStart={(event) => updateMapTouchState(event, "start")}
+        onTouchMove={(event) => updateMapTouchState(event, "move")}
+        onTouchEnd={(event) => updateMapTouchState(event, "end")}
+        onTouchCancel={(event) => updateMapTouchState(event, "cancel")}
         zoomEnabled
-        scrollEnabled
+        scrollEnabled={!isDrawingMode || isMapMultiTouchActive}
         scrollDuringRotateOrZoomEnabled={true}
         rotateEnabled={false}
         pitchEnabled={false}
@@ -3121,6 +4104,28 @@ useEffect(() => {
         showsUserLocation
         showsMyLocationButton={false}
       >
+        {persistedShapes.map((shape) =>
+          shape.kind === "line" ? (
+            <Polyline
+              key={`line-${shape.id}`}
+              coordinates={shape.coordinates}
+              strokeColor={COLORS.primary}
+              strokeWidth={3}
+              tappable
+              onPress={() => handlePinPress(shape.pin)}
+            />
+          ) : (
+            <Polygon
+              key={`plane-${shape.id}`}
+              coordinates={shape.coordinates}
+              strokeColor={COLORS.primary}
+              fillColor="rgba(102, 126, 234, 0.2)"
+              strokeWidth={2}
+              tappable
+              onPress={() => handlePinPress(shape.pin)}
+            />
+          ),
+        )}
         {pins.map((pin) => (
           <CustomMarker
             key={pin.id}
@@ -3171,7 +4176,7 @@ useEffect(() => {
           drawingCoords.length >= 3 &&
           drawingType === GEOMETRY_TYPES.PLANE && (
             <Polygon
-              coordinates={drawingCoords}
+              coordinates={getPlaneOuterBoundary(drawingCoords)}
               strokeColor={COLORS.primary}
               fillColor="rgba(102, 126, 234, 0.2)"
               strokeWidth={2}
@@ -3199,19 +4204,84 @@ useEffect(() => {
       {isDrawingMode && (
         <View style={styles.drawingBar}>
           <Text style={styles.drawingBarText}>
-            Tap map to add points ({drawingCoords.length} placed)
+            {drawingType === GEOMETRY_TYPES.LINE
+              ? `Drag with one finger to draw (${drawingCoords.length} points). Use two fingers to move map.`
+              : `Drag with one finger to draw the plane outline (${drawingCoords.length} points). Use two fingers to move map.`}
           </Text>
-          <TouchableOpacity
-            style={styles.drawingDoneBtn}
-            onPress={() => {
-              handleFinishDrawing();
-              if (pendingPostData) {
-                handlePostSubmit(pendingPostData);
-              }
-            }}
-          >
-            <Text style={styles.drawingDoneBtnText}>Done</Text>
-          </TouchableOpacity>
+          <View style={styles.drawingActions}>
+            <TouchableOpacity
+              style={styles.drawingSecondaryBtn}
+              onPress={() => {
+                setDrawingCoords((prev) => {
+                  if (!Array.isArray(prev) || prev.length === 0) return [];
+                  if (drawingType === GEOMETRY_TYPES.LINE) {
+                    // Ensure any in-flight stroke is closed before undoing.
+                    finalizeActiveLineStroke();
+                    const starts = [
+                      ...lineStrokeStartIndicesRef.current.filter(
+                        (idx) =>
+                          Number.isInteger(idx) && idx >= 0 && idx <= prev.length,
+                      ),
+                    ];
+                    // Drop trailing no-op markers (empty strokes) first.
+                    while (starts.length > 0 && starts[starts.length - 1] >= prev.length) {
+                      starts.pop();
+                    }
+                    if (starts.length > 0) {
+                      const lastStart = starts.pop();
+                      lineStrokeStartIndicesRef.current = starts;
+                      activeLineStrokeStartIndexRef.current = null;
+                      return prev.slice(0, lastStart);
+                    }
+                  } else if (drawingType === GEOMETRY_TYPES.PLANE) {
+                    // Ensure any in-flight stroke is closed before undoing.
+                    finalizeActivePlaneStroke();
+                    const starts = [
+                      ...planeStrokeStartIndicesRef.current.filter(
+                        (idx) =>
+                          Number.isInteger(idx) && idx >= 0 && idx <= prev.length,
+                      ),
+                    ];
+                    // Drop trailing no-op markers (empty strokes) first.
+                    while (starts.length > 0 && starts[starts.length - 1] >= prev.length) {
+                      starts.pop();
+                    }
+                    if (starts.length > 0) {
+                      const lastStart = starts.pop();
+                      planeStrokeStartIndicesRef.current = starts;
+                      activePlaneStrokeStartIndexRef.current = null;
+                      return prev.slice(0, lastStart);
+                    }
+                  }
+                  return prev.slice(0, -1);
+                });
+              }}
+            >
+              <Text style={styles.drawingSecondaryBtnText}>Undo</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.drawingSecondaryBtn}
+              onPress={() => {
+                handleFinishDrawing();
+                setDrawingType(null);
+                setDrawingCoords([]);
+                setPendingPostData(null);
+              }}
+            >
+              <Text style={styles.drawingSecondaryBtnText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.drawingDoneBtn, { marginLeft: 0 }]}
+              onPress={() => {
+                handleFinishDrawing();
+                if (pendingPostData) {
+                  handlePostSubmit(pendingPostData);
+                }
+              }}
+            >
+              <Text style={styles.drawingDoneBtnText}>Done</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       )}
 
@@ -3523,6 +4593,31 @@ const createStyles = (palette) =>
       color: palette.onPrimary,
       fontSize: 14,
       fontWeight: "700",
+    },
+    drawingActions: {
+      flexDirection: "row",
+      alignItems: "center",
+      marginLeft: 12,
+      gap: 8,
+    },
+    drawingSecondaryBtn: {
+      backgroundColor: palette.mutedSurface,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: SIZES.radius,
+    },
+    drawingSecondaryBtnText: {
+      color: palette.text,
+      fontSize: 13,
+      fontWeight: "700",
+    },
+    planeCornerPin: {
+      width: 16,
+      height: 16,
+      borderRadius: 8,
+      backgroundColor: palette.primary,
+      borderWidth: 2,
+      borderColor: palette.surface,
     },
     cloudCountBadge: {
       minWidth: 36,
