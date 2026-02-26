@@ -13,6 +13,7 @@ import {
   Alert,
   Modal,
   ScrollView,
+  Platform,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect } from "@react-navigation/native";
@@ -670,6 +671,8 @@ const collectCommentThreadIds = (comments, rootCommentId) => {
 const MapScreen = ({ navigation, route }) => {
   const { isDark, palette } = useAppTheme();
   const styles = createStyles(palette);
+  const mapProvider = Platform.OS === "android" ? PROVIDER_GOOGLE : undefined;
+  const appleMapInterfaceStyle = isDark ? "dark" : "light";
 
   const [region, setRegion] = useState(DEFAULT_REGION);
   const [mapVisuals, setMapVisuals] = useState({ pins: [], clouds: [] });
@@ -4056,7 +4059,7 @@ useEffect(() => {
       <MapView
         ref={mapRef}
         style={styles.map}
-        provider={PROVIDER_GOOGLE}
+        provider={mapProvider}
         initialRegion={region}
         onLayout={(event) => {
           const { width, height } = event.nativeEvent.layout || {};
@@ -4081,7 +4084,8 @@ useEffect(() => {
         onRegionChange={handleRegionChange}
         onRegionChangeComplete={handleRegionChangeComplete}
         mapType={mapType}
-        customMapStyle={isDark ? MAP_DARK_STYLE : []}
+        customMapStyle={mapProvider && isDark ? MAP_DARK_STYLE : undefined}
+        userInterfaceStyle={mapProvider ? undefined : appleMapInterfaceStyle}
         onPress={isPickingPostLocation ? handleMapPress : undefined}
         onLongPress={undefined}
         onPanDrag={
