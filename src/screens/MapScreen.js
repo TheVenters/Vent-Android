@@ -2553,16 +2553,6 @@ useEffect(() => {
     }
 
     const mediaSource = String(postData?.mediaSource || "").toLowerCase();
-    if (
-      mediaSource === "library" &&
-      postData.locationMode === "current"
-    ) {
-      Alert.alert(
-        "Choose On Map Required",
-        "Library media must be posted by choosing a location on the map.",
-      );
-      return;
-    }
 
     const rawDrawingCoords = Array.isArray(drawingCoords) ? drawingCoords : [];
     const finalizedDrawingCoords =
@@ -2804,7 +2794,8 @@ useEffect(() => {
           explicit_layer_id: resolvedExtraCommunityLayerId,
           author_name: activeUser?.user_metadata?.display_name || "Anonymous",
           author_username: activeUser?.user_metadata?.username || "",
-          posted_from_current_location: postData.locationMode === "current",
+          posted_from_current_location:
+            postData.locationMode === "current" && mediaSource !== "library",
           geometry,
         },
       ];

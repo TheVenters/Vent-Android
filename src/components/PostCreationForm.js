@@ -117,15 +117,6 @@ const PostCreationForm = ({
     setBaseAudience(POST_AUDIENCE.FRIENDS);
   };
 
-  useEffect(() => {
-    if (
-      mediaSource === MEDIA_SOURCE.LIBRARY &&
-      locationMode === LOCATION_MODES.CURRENT
-    ) {
-      setLocationMode(LOCATION_MODES.PICK_ON_MAP);
-    }
-  }, [locationMode, mediaSource]);
-
   const handleClose = () => {
     resetForm();
     onClose();
@@ -134,17 +125,6 @@ const PostCreationForm = ({
   const handleSubmit = () => {
     if (!title.trim()) {
       Alert.alert("Error", "Please enter a title.");
-      return;
-    }
-
-    if (
-      mediaSource === MEDIA_SOURCE.LIBRARY &&
-      locationMode !== LOCATION_MODES.PICK_ON_MAP
-    ) {
-      Alert.alert(
-        "Location Required",
-        "Library media must be posted by choosing a location on the map.",
-      );
       return;
     }
 
@@ -203,9 +183,6 @@ const PostCreationForm = ({
     setMediaUrl(asset.uri);
     setMediaType(asset.type === "video" ? "video" : "photo");
     setMediaSource(source || null);
-    if (source === MEDIA_SOURCE.LIBRARY) {
-      setLocationMode(LOCATION_MODES.PICK_ON_MAP);
-    }
   };
 
   const pickMediaFromLibrary = async () => {
@@ -503,27 +480,14 @@ const PostCreationForm = ({
               <TouchableOpacity
                 style={[
                   styles.locationModeBtn,
-                  mediaSource === MEDIA_SOURCE.LIBRARY &&
-                    styles.locationModeBtnDisabled,
                   locationMode === LOCATION_MODES.CURRENT &&
                     styles.locationModeBtnActive,
                 ]}
-                onPress={() => {
-                  if (mediaSource === MEDIA_SOURCE.LIBRARY) {
-                    Alert.alert(
-                      "Current Location Disabled",
-                      "Library media must be posted by choosing a location on the map.",
-                    );
-                    return;
-                  }
-                  setLocationMode(LOCATION_MODES.CURRENT);
-                }}
+                onPress={() => setLocationMode(LOCATION_MODES.CURRENT)}
               >
                 <Text
                   style={[
                     styles.locationModeBtnText,
-                    mediaSource === MEDIA_SOURCE.LIBRARY &&
-                      styles.locationModeBtnTextDisabled,
                     locationMode === LOCATION_MODES.CURRENT &&
                       styles.locationModeBtnTextActive,
                   ]}
@@ -553,7 +517,8 @@ const PostCreationForm = ({
             </View>
             {mediaSource === MEDIA_SOURCE.LIBRARY && (
               <Text style={styles.inlineHint}>
-                Library media requires choosing a location on the map.
+                Library media can use current location, but it will not be marked
+                as location-verified.
               </Text>
             )}
           </ScrollView>
@@ -852,9 +817,6 @@ const createStyles = (palette, isDark) =>
       borderWidth: 1,
       borderColor: palette.border,
     },
-    locationModeBtnDisabled: {
-      opacity: 0.5,
-    },
     locationModeBtnActive: {
       backgroundColor: palette.primary,
       borderColor: palette.primary,
@@ -863,9 +825,6 @@ const createStyles = (palette, isDark) =>
       fontSize: 12,
       fontWeight: "700",
       color: palette.text,
-    },
-    locationModeBtnTextDisabled: {
-      color: palette.subtext,
     },
     locationModeBtnTextActive: {
       color: palette.onPrimary,
