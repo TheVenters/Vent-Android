@@ -69,6 +69,7 @@ import {
 } from "./map/mapVisualEngine";
 import {
   buildFallbackLayers,
+  getEnabledAudienceKeysForMap,
   ensureCoreSystemLayers,
   getEnabledLayerIdsForMap,
   isUuid,
@@ -109,6 +110,18 @@ const PLANE_EDGE_INSERT_THRESHOLD_METERS = 24;
 const PLANE_CORNER_MERGE_THRESHOLD_METERS = 14;
 const PLANE_CORNER_MERGE_HOLD_MS = 550;
 const PLANE_RECT_DRAG_END_DEBOUNCE_MS = 140;
+
+const normalizeAudienceKeys = (audienceKeys) =>
+  Array.from(
+    new Set(
+      (Array.isArray(audienceKeys) ? audienceKeys : [])
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ).sort();
+
+const buildLayerRequestKey = (layerIds, audienceKeys) =>
+  `${toNormalizedLayerIdKey(layerIds)}::${normalizeAudienceKeys(audienceKeys).join("|")}`;
 
 const toRadians = (degrees) => (degrees * Math.PI) / 180;
 
@@ -763,10 +776,22 @@ const MapScreen = ({ navigation, route }) => {
   const pinLoadRequestSeqRef = useRef(0);
   const latestEnabledLayerKeyRef = useRef("");
   const allLoadedPostsRef = useRef([]);
+  const localFallbackEnabledByAudienceRef = useRef(new Map());
 
   useEffect(() => {
     allLoadedPostsRef.current = allLoadedPosts;
   }, [allLoadedPosts]);
+  useEffect(() => {
+    const nextFallbackState = new Map(localFallbackEnabledByAudienceRef.current);
+    (Array.isArray(layers) ? layers : []).forEach((layer) => {
+      if (isUuid(String(layer?.id || ""))) return;
+      if ((layer?.owner_type || "system") !== "system") return;
+      const key = getPinLayerKeyFromLayer(layer);
+      if (!["public", "friends"].includes(key)) return;
+      nextFallbackState.set(key, Boolean(layer?.isEnabled));
+    });
+    localFallbackEnabledByAudienceRef.current = nextFallbackState;
+  }, [layers]);
   const planeRectAnchorRef = useRef(null);
   const planeRectStopTimerRef = useRef(null);
   const planeMergeHoldTimerRef = useRef(null);
@@ -931,6 +956,10 @@ const MapScreen = ({ navigation, route }) => {
     null;
 
   const enabledPinLayerKeys = useMemo(() => getEnabledLayerIdsForMap(layers), [layers]);
+  const enabledAudienceKeys = useMemo(
+    () => getEnabledAudienceKeysForMap(layers),
+    [layers],
+  );
 
   const fetchAccessibleLayers = useCallback(
     async (userId, communityId) => {
@@ -1335,12 +1364,25 @@ const MapScreen = ({ navigation, route }) => {
           if (rankA !== rankB) return rankA - rankB;
           return 0;
         });
-        const nextLayers = effectiveCommunityId
+        const nextLayersBase = effectiveCommunityId
           ? nextLayersByPref.map((layer) => ({
               ...layer,
               isEnabled: forcedCommunityLayerIds.has(layer.id),
             }))
           : nextLayersByPref;
+        const nextLayers = !effectiveCommunityId
+          ? nextLayersBase.map((layer) => {
+              if (isUuid(String(layer?.id || ""))) return layer;
+              if ((layer?.owner_type || "system") !== "system") return layer;
+              const key = getPinLayerKeyFromLayer(layer);
+              if (!["public", "friends"].includes(key)) return layer;
+              if (!localFallbackEnabledByAudienceRef.current.has(key)) return layer;
+              return {
+                ...layer,
+                isEnabled: Boolean(localFallbackEnabledByAudienceRef.current.get(key)),
+              };
+            })
+          : nextLayersBase;
 
         logLayerTrace("refreshAccessibleLayers:finalLayers", {
           total: nextLayers.length,
@@ -1696,12 +1738,15 @@ const MapScreen = ({ navigation, route }) => {
   };
 
 useEffect(() => {
-  latestEnabledLayerKeyRef.current = toNormalizedLayerIdKey(enabledPinLayerKeys);
+  latestEnabledLayerKeyRef.current = buildLayerRequestKey(
+    enabledPinLayerKeys,
+    enabledAudienceKeys,
+  );
 
   // When layer IDs are unavailable (e.g., offline fallback layers like
   // `fallback-public` / `fallback-friends`), `enabledPinLayerKeys` will be empty
   // because it only contains UUID layer IDs.
-  if (enabledPinLayerKeys.length === 0) {
+  if (enabledPinLayerKeys.length === 0 && enabledAudienceKeys.length === 0) {
     // Invalidate any in-flight load so stale responses cannot repopulate pins.
     pinLoadRequestSeqRef.current += 1;
     const keepPins = shouldKeepPinsWhenNoUuidLayers(layers);
@@ -1716,10 +1761,10 @@ useEffect(() => {
     return undefined;
   }
 
-  loadPins(enabledPinLayerKeys);
+  loadPins(enabledPinLayerKeys, enabledAudienceKeys);
   const unsubscribe = subscribeToPins(enabledPinLayerKeys);
   return unsubscribe;
-}, [enabledPinLayerKeys, layers, restoreCachedPosts]);
+}, [enabledAudienceKeys, enabledPinLayerKeys, layers, restoreCachedPosts]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -1768,14 +1813,23 @@ useEffect(() => {
     }
   };
 
-  const loadPins = async (enabledLayerIdsInput) => {
+  const loadPins = async (
+    enabledLayerIdsInput,
+    enabledAudienceKeysInput = enabledAudienceKeys,
+  ) => {
     const requestSeq = ++pinLoadRequestSeqRef.current;
-    const requestLayerKey = toNormalizedLayerIdKey(enabledLayerIdsInput);
+    const requestLayerKey = buildLayerRequestKey(
+      enabledLayerIdsInput,
+      enabledAudienceKeysInput,
+    );
     const isStaleRequest = () =>
       requestSeq !== pinLoadRequestSeqRef.current ||
       requestLayerKey !== latestEnabledLayerKeyRef.current;
 
-    if (!enabledLayerIdsInput || enabledLayerIdsInput.length === 0) {
+    if (
+      (!enabledLayerIdsInput || enabledLayerIdsInput.length === 0) &&
+      (!enabledAudienceKeysInput || enabledAudienceKeysInput.length === 0)
+    ) {
       if (isStaleRequest()) return;
       if (shouldKeepPinsWhenNoUuidLayers(layers)) {
         restoreCachedPosts();
@@ -1830,12 +1884,14 @@ useEffect(() => {
           (enabledLayerIdsInput || []).filter((id) => isUuid(String(id || ""))),
         ),
       );
+      const normalizedAudienceKeys = normalizeAudienceKeys(enabledAudienceKeysInput);
       logLayerTrace("loadPins:enabledLayerIds", {
         requestSeq,
         readActorUserId,
         resolvedRequestUserId,
         hasAccessToken: Boolean(readAccessToken),
         enabledLayerIds,
+        enabledAudienceKeys: normalizedAudienceKeys,
         enabledLayers: layers
           .filter((layer) => enabledLayerIds.includes(layer.id))
           .map((layer) => ({
@@ -1845,7 +1901,7 @@ useEffect(() => {
             kind: layer.kind,
           })),
       });
-      if (enabledLayerIds.length === 0) {
+      if (enabledLayerIds.length === 0 && normalizedAudienceKeys.length === 0) {
         if (isStaleRequest()) return;
         if (shouldKeepPinsWhenNoUuidLayers(layers)) {
           restoreCachedPosts();
@@ -1861,8 +1917,8 @@ useEffect(() => {
         reader,
         layers,
         enabledLayerIds,
+        enabledAudienceKeys: normalizedAudienceKeys,
         ownUserId,
-        currentUser,
         accessToken: readAccessToken,
         refreshToken: readRefreshToken,
         resolvedRequestUserId,
@@ -1927,7 +1983,13 @@ useEffect(() => {
     const refreshedEnabledLayerIds = getEnabledLayerIdsForMap(
       sourceLayers,
     );
-    if (refreshedEnabledLayerIds.length === 0) {
+    const refreshedEnabledAudienceKeys = getEnabledAudienceKeysForMap(
+      sourceLayers,
+    );
+    if (
+      refreshedEnabledLayerIds.length === 0 &&
+      refreshedEnabledAudienceKeys.length === 0
+    ) {
       if (shouldKeepPinsWhenNoUuidLayers(sourceLayers)) {
         // Offline/fallback-only state.
         restoreCachedPosts();
@@ -1938,7 +2000,7 @@ useEffect(() => {
       }
       return;
     }
-    await loadPins(refreshedEnabledLayerIds);
+    await loadPins(refreshedEnabledLayerIds, refreshedEnabledAudienceKeys);
   }, [
     communityMapContext?.id,
     currentUser?.id,
@@ -2088,6 +2150,17 @@ useEffect(() => {
     setSelectedLayerId(nextSelected);
 
     try {
+      if (!isUuid(String(layerId || ""))) {
+        // Fallback system audiences (`fallback-public` / `fallback-friends`)
+        // are local-only toggles when canonical system UUID layers are absent.
+        const toggledLayer = optimisticLayers.find((layer) => layer.id === layerId);
+        const key = getPinLayerKeyFromLayer(toggledLayer);
+        if (["public", "friends"].includes(key)) {
+          localFallbackEnabledByAudienceRef.current.set(key, Boolean(nextEnabled));
+        }
+        return;
+      }
+
       const session = await getActiveSession();
       const accessToken = session?.access_token || null;
       const refreshToken = session?.refresh_token || null;
@@ -2861,7 +2934,10 @@ useEffect(() => {
         return [...optimisticRows, ...previous];
       });
 
-      if (Array.isArray(enabledPinLayerKeys) && enabledPinLayerKeys.length > 0) {
+      if (
+        (Array.isArray(enabledPinLayerKeys) && enabledPinLayerKeys.length > 0) ||
+        enabledAudienceKeys.length > 0
+      ) {
         loadPins(enabledPinLayerKeys);
       }
       if (

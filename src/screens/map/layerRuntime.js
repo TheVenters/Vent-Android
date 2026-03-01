@@ -92,6 +92,26 @@ export const getEnabledLayerIdsForMap = (layerRows) => {
   return Array.from(new Set(enabledLayerIds));
 };
 
+export const getEnabledAudienceKeysForMap = (layerRows) => {
+  const enabledAudienceKeys = new Set();
+
+  (Array.isArray(layerRows) ? layerRows : []).forEach((layer) => {
+    if (!layer?.isEnabled) return;
+    const canDriveMap =
+      layer?.viewerCanManage !== false || Boolean(layer?.isForcedEnabled);
+    if (!canDriveMap) return;
+
+    const ownerType = layer?.owner_type || "system";
+    if (ownerType !== "system") return;
+
+    const key = getPinLayerKeyFromLayer(layer);
+    if (!["public", "friends", "private"].includes(key)) return;
+    enabledAudienceKeys.add(key);
+  });
+
+  return Array.from(enabledAudienceKeys);
+};
+
 const getEnabledRenderableLayers = (layerRows) =>
   (Array.isArray(layerRows) ? layerRows : []).filter((layer) => {
     if (!layer?.isEnabled) return false;

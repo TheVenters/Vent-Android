@@ -21,8 +21,11 @@ import {
   supabase,
 } from '../services/supabase';
 import { COLORS, SIZES } from '../constants/theme';
+import { useAppTheme } from '../context/ThemeContext';
 
 const FriendsScreen = ({ navigation }) => {
+  const { palette, isDark } = useAppTheme();
+  const styles = createStyles(palette);
   const [currentUser, setCurrentUser] = useState(null);
   const [friends, setFriends] = useState([]);
   const [requests, setRequests] = useState([]);
@@ -302,6 +305,15 @@ const FriendsScreen = ({ navigation }) => {
     );
   };
 
+  const openFriendProfile = (profileId) => {
+    const nextProfileId = String(profileId || '');
+    if (!nextProfileId) return;
+    navigation.navigate('FriendProfile', {
+      profileUserId: nextProfileId,
+      fromFriends: true,
+    });
+  };
+
   if (!currentUser) {
     return (
       <View style={styles.container}>
@@ -324,14 +336,17 @@ const FriendsScreen = ({ navigation }) => {
 
   const renderFriendItem = ({ item }) => (
     <View style={styles.friendItem}>
-      <View style={styles.friendInfo}>
+      <TouchableOpacity
+        style={styles.friendInfo}
+        onPress={() => openFriendProfile(item.friend?.id)}
+      >
         <Text style={styles.friendName}>
           {item.friend?.display_name || 'User'}
         </Text>
         {item.friend?.username && (
           <Text style={styles.friendUsername}>@{item.friend.username}</Text>
         )}
-      </View>
+      </TouchableOpacity>
       <View style={styles.friendActions}>
         <TouchableOpacity
           style={styles.messageButton}
@@ -351,14 +366,17 @@ const FriendsScreen = ({ navigation }) => {
 
   const renderRequestItem = ({ item }) => (
     <View style={styles.friendItem}>
-      <View style={styles.friendInfo}>
+      <TouchableOpacity
+        style={styles.friendInfo}
+        onPress={() => openFriendProfile(item.requester?.id)}
+      >
         <Text style={styles.friendName}>
           {item.requester.display_name || 'User'}
         </Text>
         {item.requester.username && (
           <Text style={styles.friendUsername}>@{item.requester.username}</Text>
         )}
-      </View>
+      </TouchableOpacity>
       <View style={styles.requestActions}>
         <TouchableOpacity
           style={styles.acceptButton}
@@ -378,12 +396,15 @@ const FriendsScreen = ({ navigation }) => {
 
   const renderSearchItem = ({ item }) => (
     <View style={styles.friendItem}>
-      <View style={styles.friendInfo}>
+      <TouchableOpacity
+        style={styles.friendInfo}
+        onPress={() => openFriendProfile(item.id)}
+      >
         <Text style={styles.friendName}>{item.display_name || 'User'}</Text>
         {item.username && (
           <Text style={styles.friendUsername}>@{item.username}</Text>
         )}
-      </View>
+      </TouchableOpacity>
       <TouchableOpacity
         style={styles.addButton}
         onPress={() => sendFriendRequest(item.id)}
@@ -395,7 +416,10 @@ const FriendsScreen = ({ navigation }) => {
 
   const renderSentItem = ({ item }) => (
     <View style={styles.friendItem}>
-      <View style={styles.friendInfo}>
+      <TouchableOpacity
+        style={styles.friendInfo}
+        onPress={() => openFriendProfile(item.friend?.id)}
+      >
         <Text style={styles.friendName}>
           {item.friend?.display_name || 'User'}
         </Text>
@@ -403,7 +427,7 @@ const FriendsScreen = ({ navigation }) => {
           <Text style={styles.friendUsername}>@{item.friend.username}</Text>
         )}
         <Text style={styles.pendingLabel}>Pending</Text>
-      </View>
+      </TouchableOpacity>
       <TouchableOpacity
         style={styles.rejectButton}
         onPress={() => rejectFriendRequest(item.id)}
@@ -429,6 +453,7 @@ const FriendsScreen = ({ navigation }) => {
         <TextInput
           style={styles.searchInput}
           placeholder="Search by username..."
+          placeholderTextColor={palette.subtext}
           value={searchQuery}
           onChangeText={setSearchQuery}
           onSubmitEditing={handleSearch}
@@ -481,7 +506,13 @@ const FriendsScreen = ({ navigation }) => {
           renderItem={renderFriendItem}
           keyExtractor={(item) => item.id}
           refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={palette.primary}
+              colors={[palette.primary]}
+              progressBackgroundColor={isDark ? palette.surface : COLORS.white}
+            />
           }
           ListEmptyComponent={
             <View style={styles.emptyState}>
@@ -499,7 +530,13 @@ const FriendsScreen = ({ navigation }) => {
           renderItem={renderRequestItem}
           keyExtractor={(item) => item.id}
           refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={palette.primary}
+              colors={[palette.primary]}
+              progressBackgroundColor={isDark ? palette.surface : COLORS.white}
+            />
           }
           ListEmptyComponent={
             <View style={styles.emptyState}>
@@ -517,7 +554,13 @@ const FriendsScreen = ({ navigation }) => {
           renderItem={renderSentItem}
           keyExtractor={(item) => item.id}
           refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={palette.primary}
+              colors={[palette.primary]}
+              progressBackgroundColor={isDark ? palette.surface : COLORS.white}
+            />
           }
           ListEmptyComponent={
             <View style={styles.emptyState}>
@@ -532,230 +575,241 @@ const FriendsScreen = ({ navigation }) => {
   );
 };
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.white,
-  },
-  header: {
-    paddingTop: Platform.OS === 'ios' ? 50 : 20,
-    paddingHorizontal: SIZES.xl,
-    paddingBottom: SIZES.lg,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SIZES.md,
-  },
-  backButton: {
-    paddingVertical: SIZES.sm,
-    paddingRight: SIZES.sm,
-  },
-  backButtonText: {
-    fontSize: SIZES.md,
-    fontWeight: '600',
-    color: COLORS.primary,
-  },
-  title: {
-    fontSize: SIZES.xxl,
-    fontWeight: '700',
-  },
-  searchContainer: {
-    flexDirection: 'row',
-    padding: SIZES.lg,
-    gap: SIZES.sm,
-  },
-  searchInput: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: SIZES.radiusLg,
-    padding: SIZES.md,
-    fontSize: SIZES.md,
-  },
-  searchButton: {
-    width: 48,
-    height: 48,
-    borderRadius: SIZES.radiusLg,
-    backgroundColor: COLORS.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  searchIcon: {
-    fontSize: 20,
-  },
-  section: {
-    padding: SIZES.lg,
-  },
-  sectionTitle: {
-    fontSize: SIZES.sm,
-    fontWeight: '600',
-    color: COLORS.gray,
-    marginBottom: SIZES.md,
-  },
-  tabs: {
-    flexDirection: 'row',
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-  },
-  tab: {
-    flex: 1,
-    paddingVertical: SIZES.lg,
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: SIZES.sm,
-  },
-  tabActive: {
-    borderBottomWidth: 2,
-    borderBottomColor: COLORS.primary,
-  },
-  tabText: {
-    fontSize: SIZES.md,
-    fontWeight: '600',
-  },
-  badge: {
-    backgroundColor: COLORS.danger,
-    borderRadius: SIZES.radiusFull,
-    paddingHorizontal: SIZES.sm,
-    paddingVertical: 2,
-    minWidth: 20,
-    alignItems: 'center',
-  },
-  badgeText: {
-    color: COLORS.white,
-    fontSize: SIZES.xs,
-    fontWeight: '600',
-  },
-  friendItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: SIZES.lg,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-  },
-  friendInfo: {
-    flex: 1,
-  },
-  friendName: {
-    fontSize: SIZES.md,
-    fontWeight: '600',
-    color: COLORS.dark,
-  },
-  friendUsername: {
-    fontSize: SIZES.sm,
-    color: COLORS.primary,
-    marginTop: SIZES.xs,
-  },
-  pendingLabel: {
-    marginTop: SIZES.xs,
-    fontSize: SIZES.xs,
-    color: COLORS.gray,
-    fontWeight: '600',
-  },
-  requestActions: {
-    flexDirection: 'row',
-    gap: SIZES.sm,
-  },
-  acceptButton: {
-    paddingHorizontal: SIZES.lg,
-    paddingVertical: SIZES.sm,
-    backgroundColor: COLORS.success,
-    borderRadius: SIZES.radiusLg,
-  },
-  acceptText: {
-    color: COLORS.white,
-    fontSize: SIZES.sm,
-    fontWeight: '600',
-  },
-  rejectButton: {
-    paddingHorizontal: SIZES.lg,
-    paddingVertical: SIZES.sm,
-    backgroundColor: COLORS.danger,
-    borderRadius: SIZES.radiusLg,
-  },
-  rejectText: {
-    color: COLORS.white,
-    fontSize: SIZES.sm,
-    fontWeight: '600',
-  },
-  friendActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SIZES.sm,
-  },
-  messageButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: COLORS.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  messageIcon: {
-    fontSize: 18,
-  },
-  removeButton: {
-    paddingHorizontal: SIZES.lg,
-    paddingVertical: SIZES.sm,
-    backgroundColor: COLORS.light,
-    borderRadius: SIZES.radiusLg,
-  },
-  removeText: {
-    color: COLORS.danger,
-    fontSize: SIZES.sm,
-    fontWeight: '600',
-  },
-  addButton: {
-    paddingHorizontal: SIZES.lg,
-    paddingVertical: SIZES.sm,
-    backgroundColor: COLORS.primary,
-    borderRadius: SIZES.radiusLg,
-  },
-  addText: {
-    color: COLORS.white,
-    fontSize: SIZES.sm,
-    fontWeight: '600',
-  },
-  emptyState: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: SIZES.xxl * 2,
-  },
-  emptyIcon: {
-    fontSize: 48,
-    marginBottom: SIZES.lg,
-  },
-  emptyTitle: {
-    fontSize: SIZES.lg,
-    fontWeight: '600',
-    color: COLORS.dark,
-    marginBottom: SIZES.sm,
-  },
-  emptyText: {
-    fontSize: SIZES.md,
-    color: COLORS.gray,
-    textAlign: 'center',
-    marginBottom: SIZES.sm,
-  },
-  emptyHint: {
-    fontSize: SIZES.sm,
-    color: COLORS.gray,
-    textAlign: 'center',
-    opacity: 0.6,
-  },
-  button: {
-    backgroundColor: COLORS.primary,
-    borderRadius: SIZES.radiusLg,
-    paddingHorizontal: SIZES.xxl,
-    paddingVertical: SIZES.lg,
-  },
-  buttonText: {
-    color: COLORS.white,
-    fontSize: SIZES.md,
-    fontWeight: '600',
-  },
-});
+const createStyles = (palette) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: palette.background,
+    },
+    header: {
+      paddingTop: Platform.OS === 'ios' ? 50 : 20,
+      paddingHorizontal: SIZES.xl,
+      paddingBottom: SIZES.lg,
+      borderBottomWidth: 1,
+      borderBottomColor: palette.border,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SIZES.md,
+    },
+    backButton: {
+      paddingVertical: SIZES.sm,
+      paddingRight: SIZES.sm,
+    },
+    backButtonText: {
+      fontSize: SIZES.md,
+      fontWeight: '600',
+      color: palette.primary,
+    },
+    title: {
+      fontSize: SIZES.xxl,
+      fontWeight: '700',
+      color: palette.text,
+    },
+    searchContainer: {
+      flexDirection: 'row',
+      padding: SIZES.lg,
+      gap: SIZES.sm,
+    },
+    searchInput: {
+      flex: 1,
+      borderWidth: 1,
+      borderColor: palette.border,
+      borderRadius: SIZES.radiusLg,
+      padding: SIZES.md,
+      fontSize: SIZES.md,
+      color: palette.text,
+      backgroundColor: palette.surface,
+    },
+    searchButton: {
+      width: 48,
+      height: 48,
+      borderRadius: SIZES.radiusLg,
+      backgroundColor: palette.primary,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    searchIcon: {
+      fontSize: 20,
+    },
+    section: {
+      padding: SIZES.lg,
+      backgroundColor: palette.background,
+    },
+    sectionTitle: {
+      fontSize: SIZES.sm,
+      fontWeight: '600',
+      color: palette.subtext,
+      marginBottom: SIZES.md,
+    },
+    tabs: {
+      flexDirection: 'row',
+      borderBottomWidth: 1,
+      borderBottomColor: palette.border,
+      backgroundColor: palette.background,
+    },
+    tab: {
+      flex: 1,
+      paddingVertical: SIZES.lg,
+      alignItems: 'center',
+      flexDirection: 'row',
+      justifyContent: 'center',
+      gap: SIZES.sm,
+    },
+    tabActive: {
+      borderBottomWidth: 2,
+      borderBottomColor: palette.primary,
+    },
+    tabText: {
+      fontSize: SIZES.md,
+      fontWeight: '600',
+      color: palette.text,
+    },
+    badge: {
+      backgroundColor: palette.danger,
+      borderRadius: SIZES.radiusFull,
+      paddingHorizontal: SIZES.sm,
+      paddingVertical: 2,
+      minWidth: 20,
+      alignItems: 'center',
+    },
+    badgeText: {
+      color: palette.onPrimary,
+      fontSize: SIZES.xs,
+      fontWeight: '600',
+    },
+    friendItem: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: SIZES.lg,
+      borderBottomWidth: 1,
+      borderBottomColor: palette.border,
+      backgroundColor: palette.background,
+    },
+    friendInfo: {
+      flex: 1,
+      paddingRight: SIZES.sm,
+    },
+    friendName: {
+      fontSize: SIZES.md,
+      fontWeight: '600',
+      color: palette.text,
+    },
+    friendUsername: {
+      fontSize: SIZES.sm,
+      color: palette.primary,
+      marginTop: SIZES.xs,
+    },
+    pendingLabel: {
+      marginTop: SIZES.xs,
+      fontSize: SIZES.xs,
+      color: palette.subtext,
+      fontWeight: '600',
+    },
+    requestActions: {
+      flexDirection: 'row',
+      gap: SIZES.sm,
+    },
+    acceptButton: {
+      paddingHorizontal: SIZES.lg,
+      paddingVertical: SIZES.sm,
+      backgroundColor: COLORS.success,
+      borderRadius: SIZES.radiusLg,
+    },
+    acceptText: {
+      color: palette.onPrimary,
+      fontSize: SIZES.sm,
+      fontWeight: '600',
+    },
+    rejectButton: {
+      paddingHorizontal: SIZES.lg,
+      paddingVertical: SIZES.sm,
+      backgroundColor: palette.danger,
+      borderRadius: SIZES.radiusLg,
+    },
+    rejectText: {
+      color: palette.onPrimary,
+      fontSize: SIZES.sm,
+      fontWeight: '600',
+    },
+    friendActions: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SIZES.sm,
+    },
+    messageButton: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      backgroundColor: palette.primary,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    messageIcon: {
+      fontSize: 18,
+    },
+    removeButton: {
+      paddingHorizontal: SIZES.lg,
+      paddingVertical: SIZES.sm,
+      backgroundColor: palette.mutedSurface,
+      borderRadius: SIZES.radiusLg,
+      borderWidth: 1,
+      borderColor: palette.border,
+    },
+    removeText: {
+      color: palette.danger,
+      fontSize: SIZES.sm,
+      fontWeight: '600',
+    },
+    addButton: {
+      paddingHorizontal: SIZES.lg,
+      paddingVertical: SIZES.sm,
+      backgroundColor: palette.primary,
+      borderRadius: SIZES.radiusLg,
+    },
+    addText: {
+      color: palette.onPrimary,
+      fontSize: SIZES.sm,
+      fontWeight: '600',
+    },
+    emptyState: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: SIZES.xxl * 2,
+    },
+    emptyIcon: {
+      fontSize: 48,
+      marginBottom: SIZES.lg,
+    },
+    emptyTitle: {
+      fontSize: SIZES.lg,
+      fontWeight: '600',
+      color: palette.text,
+      marginBottom: SIZES.sm,
+    },
+    emptyText: {
+      fontSize: SIZES.md,
+      color: palette.subtext,
+      textAlign: 'center',
+      marginBottom: SIZES.sm,
+    },
+    emptyHint: {
+      fontSize: SIZES.sm,
+      color: palette.subtext,
+      textAlign: 'center',
+      opacity: 0.7,
+    },
+    button: {
+      backgroundColor: palette.primary,
+      borderRadius: SIZES.radiusLg,
+      paddingHorizontal: SIZES.xxl,
+      paddingVertical: SIZES.lg,
+    },
+    buttonText: {
+      color: palette.onPrimary,
+      fontSize: SIZES.md,
+      fontWeight: '600',
+    },
+  });
 
 export default FriendsScreen;

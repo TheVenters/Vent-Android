@@ -24,7 +24,7 @@ import {
 import { SIZES } from "../constants/theme";
 import { useAppTheme } from "../context/ThemeContext";
 
-const AccountScreen = ({ navigation }) => {
+const AccountScreen = ({ navigation, route }) => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [username, setUsername] = useState("");
@@ -38,8 +38,19 @@ const AccountScreen = ({ navigation }) => {
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [avatarUrl, setAvatarUrl] = useState(null);
+  const [myPosts, setMyPosts] = useState([]);
+  const [postsLoading, setPostsLoading] = useState(false);
+  const [postsError, setPostsError] = useState("");
+  const [viewedProfile, setViewedProfile] = useState(null);
   const { palette } = useAppTheme();
   const styles = createStyles(palette);
+  const profileUserId = String(route?.params?.profileUserId || "");
+  const isFriendProfileRoute = Boolean(route?.params?.fromFriends);
+  const isViewingOtherProfile = Boolean(
+    profileUserId &&
+      currentUser?.id &&
+      profileUserId !== currentUser.id,
+  );
 
   useEffect(() => {
     loadUser();
@@ -51,7 +62,11 @@ const AccountScreen = ({ navigation }) => {
         setCurrentUser(session.user);
       } else {
         setCurrentUser(null);
+        setViewedProfile(null);
         setAvatarUrl(null);
+        setMyPosts([]);
+        setPostsError("");
+        setPostsLoading(false);
         setResetStep(null);
         setResetEmail("");
         setOtpCode("");
@@ -65,38 +80,228 @@ const AccountScreen = ({ navigation }) => {
 
   useEffect(() => {
     if (!currentUser?.id) return;
-    loadProfile(currentUser.id);
-  }, [currentUser?.id]);
+    const targetUserId = profileUserId || currentUser.id;
+    loadProfile(targetUserId);
+    loadMyPosts(targetUserId);
+  }, [currentUser?.id, profileUserId]);
 
   const loadUser = async () => {
     const user = await getCurrentUser();
     setCurrentUser(user);
     if (user?.id) {
-      await loadProfile(user.id);
+      setAvatarUrl(user?.user_metadata?.avatar_url || null);
     } else {
       setAvatarUrl(null);
     }
   };
 
   const loadProfile = async (userId) => {
+    if (!userId) {
+      setViewedProfile(null);
+      setAvatarUrl(null);
+      return;
+    }
+
     try {
       const { data, error } = await supabase
         .from("profiles")
-        .select("avatar_url")
+        .select("id,username,display_name,avatar_url")
         .eq("id", userId)
         .maybeSingle();
       if (error) throw error;
-      setAvatarUrl(data?.avatar_url || null);
+
+      const isOwnProfile = Boolean(currentUser?.id && userId === currentUser.id);
+      const fallbackUsername = isOwnProfile
+        ? currentUser?.user_metadata?.username || null
+        : null;
+      const fallbackDisplayName = isOwnProfile
+        ? currentUser?.user_metadata?.display_name ||
+          currentUser?.user_metadata?.username ||
+          currentUser?.email ||
+          "User"
+        : "User";
+      const fallbackAvatar = isOwnProfile
+        ? currentUser?.user_metadata?.avatar_url || null
+        : null;
+
+      const normalizedProfile = {
+        id: userId,
+        username: data?.username || fallbackUsername,
+        display_name: data?.display_name || fallbackDisplayName,
+        avatar_url: data?.avatar_url || fallbackAvatar,
+      };
+
+      setViewedProfile(normalizedProfile);
+      if (isOwnProfile) {
+        setAvatarUrl(normalizedProfile.avatar_url || null);
+      }
     } catch (error) {
       const message = String(error?.message || "").toLowerCase();
       const isNetworkError =
         message.includes("network request failed") ||
         message.includes("fetch failed");
       if (!isNetworkError) {
-        console.error("Error loading profile avatar:", error);
+        console.error("Error loading profile:", error);
       }
-      setAvatarUrl(null);
+      const isOwnProfile = Boolean(currentUser?.id && userId === currentUser.id);
+      setViewedProfile({
+        id: userId,
+        username: isOwnProfile
+          ? currentUser?.user_metadata?.username || null
+          : null,
+        display_name: isOwnProfile
+          ? currentUser?.user_metadata?.display_name ||
+            currentUser?.user_metadata?.username ||
+            currentUser?.email ||
+            "User"
+          : "User",
+        avatar_url: isOwnProfile
+          ? currentUser?.user_metadata?.avatar_url || null
+          : null,
+      });
+      if (isOwnProfile) setAvatarUrl(currentUser?.user_metadata?.avatar_url || null);
     }
+  };
+
+  const loadMyPosts = async (userId) => {
+    if (!userId) {
+      setMyPosts([]);
+      setPostsError("");
+      return;
+    }
+
+    setPostsLoading(true);
+    setPostsError("");
+    try {
+      const queryPins = (selectClause) =>
+        supabase
+          .from("pins")
+          .select(selectClause)
+          .eq("user_id", userId)
+          .order("created_at", { ascending: false })
+          .limit(200);
+
+      let res = await queryPins(
+        "id,type,content,caption,layer,base_audience,created_at,lat,lng",
+      );
+      const missingBaseAudienceColumn =
+        String(res?.error?.code || "") === "42703" ||
+        String(res?.error?.message || "")
+          .toLowerCase()
+          .includes("base_audience");
+
+      if (missingBaseAudienceColumn) {
+        res = await queryPins("id,type,content,caption,layer,created_at,lat,lng");
+      }
+
+      if (res.error) throw res.error;
+      const basePosts = Array.isArray(res.data) ? res.data : [];
+      const pinIds = basePosts
+        .map((post) => String(post?.id || ""))
+        .filter(Boolean);
+
+      let layerLabelsByPinId = new Map();
+      if (pinIds.length > 0) {
+        const membershipsRes = await supabase
+          .from("pin_layer_memberships")
+          .select("pin_id,layer_id")
+          .in("pin_id", pinIds);
+
+        if (!membershipsRes.error) {
+          const layerIds = Array.from(
+            new Set(
+              (membershipsRes.data || [])
+                .map((row) => String(row?.layer_id || ""))
+                .filter(Boolean),
+            ),
+          );
+          let layerNameById = new Map();
+          if (layerIds.length > 0) {
+            const layersRes = await supabase
+              .from("layers")
+              .select("id,name")
+              .in("id", layerIds);
+            if (!layersRes.error) {
+              layerNameById = new Map(
+                (layersRes.data || []).map((layer) => [
+                  String(layer?.id || ""),
+                  String(layer?.name || ""),
+                ]),
+              );
+            }
+          }
+
+          const next = new Map();
+          (membershipsRes.data || []).forEach((row) => {
+            const pinId = String(row?.pin_id || "");
+            const layerId = String(row?.layer_id || "");
+            if (!pinId || !layerId) return;
+            const layerName = layerNameById.get(layerId);
+            if (!layerName) return;
+            const existing = next.get(pinId) || [];
+            if (!existing.includes(layerName)) existing.push(layerName);
+            next.set(pinId, existing);
+          });
+          layerLabelsByPinId = next;
+        }
+      }
+
+      const enrichedPosts = basePosts.map((post) => ({
+        ...post,
+        layer_labels: layerLabelsByPinId.get(String(post?.id || "")) || [],
+      }));
+      setMyPosts(enrichedPosts);
+    } catch (error) {
+      console.error("Error loading account posts:", error);
+      setMyPosts([]);
+      setPostsError("Failed to load your posts.");
+    } finally {
+      setPostsLoading(false);
+    }
+  };
+
+  const formatPostDate = (value) => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleString();
+  };
+
+  const getPostPreview = (post) => {
+    const content = String(post?.content || "").trim();
+    if (content) return content;
+
+    const caption = String(post?.caption || "").trim();
+    if (caption) return caption;
+
+    const type = String(post?.type || "").toLowerCase();
+    if (type === "photo" || type === "video" || type === "media") {
+      return `[${type} post]`;
+    }
+    return "[empty post]";
+  };
+
+  const getAudienceLabel = (value) => {
+    const audience = String(value || "public").trim().toLowerCase();
+    if (audience === "friends") return "Friends";
+    if (audience === "private") return "Private";
+    return "Public";
+  };
+
+  const getAudienceIcon = (value) => {
+    const audience = String(value || "public").trim().toLowerCase();
+    if (audience === "friends") return "👥";
+    if (audience === "private") return "🔒";
+    return "🌎";
+  };
+
+  const getPostLayerLabels = (post) => {
+    const explicitLabels = Array.isArray(post?.layer_labels)
+      ? post.layer_labels
+          .map((label) => String(label || "").trim())
+          .filter(Boolean)
+      : [];
+    if (explicitLabels.length > 0) return explicitLabels;
+    return [getAudienceLabel(post?.base_audience || post?.layer || "public")];
   };
 
   const handleSignIn = async () => {
@@ -358,82 +563,183 @@ const AccountScreen = ({ navigation }) => {
     <View style={styles.topBar}>
       <TouchableOpacity
         style={styles.backButton}
-        onPress={() => navigation.navigate("Map")}
+        onPress={() => {
+          if (isFriendProfileRoute && navigation.canGoBack()) {
+            navigation.goBack();
+            return;
+          }
+          navigation.navigate("Map");
+        }}
       >
-        <Text style={styles.backButtonText}>{"< Map"}</Text>
+        <Text style={styles.backButtonText}>
+          {isFriendProfileRoute ? "< Friends" : "< Map"}
+        </Text>
       </TouchableOpacity>
-      <TouchableOpacity
-        style={styles.settingsButton}
-        onPress={() => navigation.navigate("Settings")}
-      >
-        <Text style={styles.settingsButtonText}>Settings</Text>
-      </TouchableOpacity>
+      {!isFriendProfileRoute ? (
+        <TouchableOpacity
+          style={styles.settingsButton}
+          onPress={() => navigation.navigate("Settings")}
+        >
+          <Text style={styles.settingsButtonText}>Settings</Text>
+        </TouchableOpacity>
+      ) : (
+        <View style={styles.topBarSpacer} />
+      )}
     </View>
   );
 
   if (currentUser) {
+    const profileTargetUserId =
+      isViewingOtherProfile && profileUserId ? profileUserId : currentUser.id;
+    const profileName = isViewingOtherProfile
+      ? viewedProfile?.display_name ||
+        viewedProfile?.username ||
+        "User"
+      : currentUser.user_metadata?.display_name || "User";
+    const profileUsername = isViewingOtherProfile
+      ? viewedProfile?.username || null
+      : currentUser.user_metadata?.username || null;
+    const profileEmail = isViewingOtherProfile ? null : currentUser.email || null;
+    const profileAvatarUrl = isViewingOtherProfile
+      ? viewedProfile?.avatar_url || null
+      : avatarUrl;
+
     return (
       <View style={styles.container}>
         <TopBar />
-        <View style={styles.profileContainer}>
-          <View style={styles.logo}>
-            <Text style={styles.logoText}>Vent</Text>
-            <Text style={styles.tagline}>Share your world</Text>
+        <ScrollView contentContainerStyle={styles.profileScrollContent}>
+          <View style={styles.profileContainer}>
+            <View style={styles.logo}>
+              <Text style={styles.logoText}>Vent</Text>
+              <Text style={styles.tagline}>Share your world</Text>
+            </View>
+
+            <TouchableOpacity
+              style={styles.avatarWrap}
+              onPress={isViewingOtherProfile ? undefined : handlePickAvatar}
+              disabled={loading || isViewingOtherProfile}
+            >
+              {profileAvatarUrl ? (
+                <Image source={{ uri: profileAvatarUrl }} style={styles.avatarImage} />
+              ) : (
+                <Text style={styles.avatarInitial}>
+                  {String(
+                    profileUsername ||
+                      profileName ||
+                      profileEmail ||
+                      "U",
+                  )
+                    .trim()
+                    .charAt(0)
+                    .toUpperCase()}
+                </Text>
+              )}
+            </TouchableOpacity>
+            {!isViewingOtherProfile && (
+              <TouchableOpacity
+                style={styles.avatarButton}
+                onPress={handlePickAvatar}
+                disabled={loading}
+              >
+                <Text style={styles.avatarButtonText}>
+                  {loading ? "Saving..." : "Change Profile Image"}
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            <View style={styles.profileInfo}>
+              <Text style={styles.displayName}>{profileName}</Text>
+              {profileUsername && (
+                <Text style={styles.username}>@{profileUsername}</Text>
+              )}
+              {profileEmail ? <Text style={styles.email}>{profileEmail}</Text> : null}
+            </View>
+
+            {!isViewingOtherProfile && (
+              <TouchableOpacity
+                style={[styles.button, styles.signOutButton]}
+                onPress={handleSignOut}
+                disabled={loading}
+              >
+                <Text style={styles.buttonText}>
+                  {loading ? "Signing out..." : "Sign Out"}
+                </Text>
+              </TouchableOpacity>
+            )}
           </View>
 
           <TouchableOpacity
-            style={styles.avatarWrap}
-            onPress={handlePickAvatar}
-            disabled={loading}
+            style={styles.postsHeaderRow}
+            onPress={() => loadMyPosts(profileTargetUserId)}
+            disabled={postsLoading}
           >
-            {avatarUrl ? (
-              <Image source={{ uri: avatarUrl }} style={styles.avatarImage} />
+            <View>
+              <Text style={styles.postsHeader}>
+                {isViewingOtherProfile ? "Posts" : "My Posts"}
+              </Text>
+              <Text style={styles.postsSubheader}>
+                {myPosts.length} {myPosts.length === 1 ? "post" : "posts"}
+              </Text>
+            </View>
+            <View style={styles.postsRefreshButton}>
+              <Text style={styles.postsRefreshText}>
+                {postsLoading ? "Refreshing..." : "Refresh"}
+              </Text>
+            </View>
+          </TouchableOpacity>
+
+          <View style={styles.postsSection}>
+            {postsLoading ? (
+              <Text style={styles.postsStateText}>Loading your posts...</Text>
+            ) : postsError ? (
+              <Text style={styles.postsStateText}>{postsError}</Text>
+            ) : myPosts.length === 0 ? (
+              <Text style={styles.postsStateText}>You have not posted yet.</Text>
             ) : (
-              <Text style={styles.avatarInitial}>
-                {String(
-                  currentUser.user_metadata?.username ||
-                    currentUser.user_metadata?.display_name ||
-                    currentUser.email ||
-                    "U",
+              myPosts.map((post, index) => {
+                const audienceRaw = String(
+                  post?.base_audience || post?.layer || "public",
                 )
                   .trim()
-                  .charAt(0)
-                  .toUpperCase()}
-              </Text>
+                  .toLowerCase();
+                const audienceLabel = getAudienceLabel(audienceRaw);
+                const audienceIcon = getAudienceIcon(audienceRaw);
+                const postType = String(post?.type || "text").toUpperCase();
+                const layerLabels = getPostLayerLabels(post);
+                return (
+                  <View
+                    key={String(post?.id || `post-${index}`)}
+                    style={styles.postCard}
+                  >
+                    <View style={styles.postTopRow}>
+                      <View style={styles.postAudienceBadge}>
+                        <Text style={styles.postAudienceText}>
+                          {audienceIcon} {audienceLabel}
+                        </Text>
+                      </View>
+                      <Text style={styles.postDateText} numberOfLines={1}>
+                        {formatPostDate(post?.created_at)}
+                      </Text>
+                    </View>
+                    <Text style={styles.postPreview} numberOfLines={4}>
+                      {getPostPreview(post)}
+                    </Text>
+                    <View style={styles.postLayersWrap}>
+                      {layerLabels.map((label) => (
+                        <View key={`${post?.id}-${label}`} style={styles.postLayerChip}>
+                          <Text style={styles.postLayerChipText}>{label}</Text>
+                        </View>
+                      ))}
+                    </View>
+                    <View style={styles.postBottomRow}>
+                      <Text style={styles.postTypeText}>{postType}</Text>
+                    </View>
+                  </View>
+                );
+              })
             )}
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.avatarButton}
-            onPress={handlePickAvatar}
-            disabled={loading}
-          >
-            <Text style={styles.avatarButtonText}>
-              {loading ? "Saving..." : "Change Profile Image"}
-            </Text>
-          </TouchableOpacity>
-
-          <View style={styles.profileInfo}>
-            <Text style={styles.displayName}>
-              {currentUser.user_metadata?.display_name || "User"}
-            </Text>
-            {currentUser.user_metadata?.username && (
-              <Text style={styles.username}>
-                @{currentUser.user_metadata.username}
-              </Text>
-            )}
-            <Text style={styles.email}>{currentUser.email}</Text>
           </View>
-
-          <TouchableOpacity
-            style={[styles.button, styles.signOutButton]}
-            onPress={handleSignOut}
-            disabled={loading}
-          >
-            <Text style={styles.buttonText}>
-              {loading ? "Signing out..." : "Sign Out"}
-            </Text>
-          </TouchableOpacity>
-        </View>
+        </ScrollView>
       </View>
     );
   }
@@ -666,10 +972,13 @@ const createStyles = (palette) =>
       justifyContent: "center",
     },
     profileContainer: {
-      flex: 1,
-      justifyContent: "center",
+      paddingTop: SIZES.xl,
       alignItems: "center",
       padding: SIZES.xxl,
+      paddingBottom: SIZES.lg,
+    },
+    profileScrollContent: {
+      paddingBottom: SIZES.xxl,
     },
     logo: {
       alignItems: "center",
@@ -878,6 +1187,123 @@ const createStyles = (palette) =>
       fontSize: 13,
       fontWeight: "600",
       color: palette.text,
+    },
+    topBarSpacer: {
+      width: 70,
+      height: 1,
+    },
+    postsHeaderRow: {
+      marginHorizontal: SIZES.xxl,
+      marginTop: SIZES.sm,
+      marginBottom: SIZES.md,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+    },
+    postsHeader: {
+      fontSize: SIZES.lg,
+      fontWeight: "700",
+      color: palette.text,
+    },
+    postsSubheader: {
+      marginTop: 2,
+      color: palette.subtext,
+      fontSize: 12,
+      fontWeight: "500",
+    },
+    postsRefreshButton: {
+      paddingVertical: 8,
+      paddingHorizontal: 12,
+      borderRadius: SIZES.radius,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.surface,
+    },
+    postsRefreshText: {
+      fontSize: 12,
+      fontWeight: "600",
+      color: palette.primary,
+    },
+    postsSection: {
+      marginHorizontal: SIZES.xxl,
+      marginBottom: SIZES.xl,
+      gap: SIZES.sm,
+    },
+    postsStateText: {
+      color: palette.subtext,
+      fontSize: SIZES.sm,
+    },
+    postCard: {
+      borderWidth: 1,
+      borderColor: palette.border,
+      borderRadius: SIZES.radiusLg,
+      backgroundColor: palette.surface,
+      padding: SIZES.md + 2,
+      gap: SIZES.xs,
+    },
+    postTopRow: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 2,
+      gap: SIZES.sm,
+    },
+    postAudienceBadge: {
+      paddingVertical: 5,
+      paddingHorizontal: 9,
+      borderRadius: SIZES.radius,
+      backgroundColor: palette.mutedSurface,
+      borderWidth: 1,
+      borderColor: palette.border,
+    },
+    postAudienceText: {
+      color: palette.text,
+      fontSize: 12,
+      fontWeight: "600",
+    },
+    postDateText: {
+      color: palette.subtext,
+      fontSize: 12,
+      flexShrink: 1,
+      textAlign: "right",
+    },
+    postPreview: {
+      color: palette.text,
+      fontSize: 16,
+      fontWeight: "600",
+      lineHeight: 22,
+    },
+    postBottomRow: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginTop: 4,
+    },
+    postLayersWrap: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      marginTop: SIZES.xs,
+      marginBottom: 2,
+      gap: SIZES.xs,
+    },
+    postLayerChip: {
+      paddingVertical: 4,
+      paddingHorizontal: 8,
+      borderRadius: SIZES.radius,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.mutedSurface,
+    },
+    postLayerChipText: {
+      fontSize: 11,
+      color: palette.text,
+      fontWeight: "600",
+    },
+    postTypeText: {
+      color: palette.subtext,
+      fontSize: 12,
+      letterSpacing: 0.8,
+      fontWeight: "600",
     },
   });
 
