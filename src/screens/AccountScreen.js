@@ -44,6 +44,9 @@ const AccountScreen = ({ navigation, route }) => {
   const [myPosts, setMyPosts] = useState([]);
   const [postsLoading, setPostsLoading] = useState(false);
   const [postsError, setPostsError] = useState("");
+  const [joinedLayers, setJoinedLayers] = useState([]);
+  const [joinedLayersLoading, setJoinedLayersLoading] = useState(false);
+  const [joinedLayersError, setJoinedLayersError] = useState("");
   const [viewedProfile, setViewedProfile] = useState(null);
   const [selectedPost, setSelectedPost] = useState(null);
   const { palette } = useAppTheme();
@@ -71,6 +74,9 @@ const AccountScreen = ({ navigation, route }) => {
         setMyPosts([]);
         setPostsError("");
         setPostsLoading(false);
+        setJoinedLayers([]);
+        setJoinedLayersError("");
+        setJoinedLayersLoading(false);
         setResetStep(null);
         setResetEmail("");
         setOtpCode("");
@@ -87,6 +93,13 @@ const AccountScreen = ({ navigation, route }) => {
     const targetUserId = profileUserId || currentUser.id;
     loadProfile(targetUserId);
     loadMyPosts(targetUserId);
+    if (targetUserId === currentUser.id) {
+      loadJoinedLayers(currentUser.id);
+    } else {
+      setJoinedLayers([]);
+      setJoinedLayersError("");
+      setJoinedLayersLoading(false);
+    }
   }, [currentUser?.id, profileUserId]);
 
   const loadUser = async () => {
@@ -290,6 +303,137 @@ const AccountScreen = ({ navigation, route }) => {
       setPostsError("Failed to load your posts.");
     } finally {
       setPostsLoading(false);
+    }
+  };
+
+  const loadJoinedLayers = async (userId) => {
+    if (!userId) {
+      setJoinedLayers([]);
+      setJoinedLayersError("");
+      setJoinedLayersLoading(false);
+      return;
+    }
+
+    setJoinedLayersLoading(true);
+    setJoinedLayersError("");
+    try {
+      const membershipsRes = await supabase
+        .from("community_members")
+        .select("community_id,status")
+        .eq("user_id", userId);
+      if (membershipsRes.error) throw membershipsRes.error;
+
+      const activeCommunityIds = Array.from(
+        new Set(
+          (membershipsRes.data || [])
+            .filter((row) => {
+              const status = String(row?.status || "").trim().toLowerCase();
+              return status === "accepted" || status === "active";
+            })
+            .map((row) => String(row?.community_id || ""))
+            .filter(Boolean),
+        ),
+      );
+      if (activeCommunityIds.length === 0) {
+        setJoinedLayers([]);
+        return;
+      }
+
+      const linksRes = await supabase
+        .from("community_layers")
+        .select("community_id,layer_id,enabled,sort_order")
+        .in("community_id", activeCommunityIds)
+        .eq("enabled", true);
+      if (linksRes.error) throw linksRes.error;
+
+      const links = linksRes.data || [];
+      if (links.length === 0) {
+        setJoinedLayers([]);
+        return;
+      }
+
+      const layerIds = Array.from(
+        new Set(
+          links
+            .map((row) => String(row?.layer_id || ""))
+            .filter(Boolean),
+        ),
+      );
+      const communityIds = Array.from(
+        new Set(
+          links
+            .map((row) => String(row?.community_id || ""))
+            .filter(Boolean),
+        ),
+      );
+
+      const [layersRes, communitiesRes] = await Promise.all([
+        layerIds.length > 0
+          ? supabase.from("layers").select("id,name,kind,owner_type").in("id", layerIds)
+          : Promise.resolve({ data: [], error: null }),
+        communityIds.length > 0
+          ? supabase.from("communities").select("id,name,slug").in("id", communityIds)
+          : Promise.resolve({ data: [], error: null }),
+      ]);
+      if (layersRes.error) throw layersRes.error;
+      if (communitiesRes.error) throw communitiesRes.error;
+
+      const layerById = new Map(
+        (layersRes.data || []).map((layer) => [String(layer?.id || ""), layer]),
+      );
+      const communityById = new Map(
+        (communitiesRes.data || []).map((community) => [
+          String(community?.id || ""),
+          community,
+        ]),
+      );
+
+      const joinedByKey = new Map();
+      links.forEach((link) => {
+        const layerId = String(link?.layer_id || "");
+        const communityId = String(link?.community_id || "");
+        if (!layerId || !communityId) return;
+
+        const layer = layerById.get(layerId);
+        const community = communityById.get(communityId);
+        const key = `${communityId}:${layerId}`;
+        joinedByKey.set(key, {
+          id: key,
+          layerId,
+          communityId,
+          layerName: String(layer?.name || "Unnamed layer"),
+          layerKind: String(layer?.kind || ""),
+          ownerType: String(layer?.owner_type || ""),
+          communityName: String(community?.name || "Community"),
+          communitySlug: String(community?.slug || ""),
+          sortOrder: Number.isFinite(Number(link?.sort_order))
+            ? Number(link.sort_order)
+            : Number.MAX_SAFE_INTEGER,
+        });
+      });
+
+      const normalized = Array.from(joinedByKey.values()).sort((a, b) => {
+        const communityCmp = a.communityName.localeCompare(b.communityName);
+        if (communityCmp !== 0) return communityCmp;
+        if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
+        return a.layerName.localeCompare(b.layerName);
+      });
+      setJoinedLayers(normalized);
+    } catch (error) {
+      console.error("Error loading joined layers:", error);
+      setJoinedLayers([]);
+
+      const lowerMessage = String(error?.message || "").toLowerCase();
+      const isSchemaMissing =
+        String(error?.code || "") === "42P01" ||
+        lowerMessage.includes("does not exist");
+      setJoinedLayersError(
+        isSchemaMissing
+          ? "Joined layers are unavailable on this database."
+          : "Failed to load joined layers.",
+      );
+    } finally {
+      setJoinedLayersLoading(false);
     }
   };
 
@@ -709,6 +853,56 @@ const AccountScreen = ({ navigation, route }) => {
               </TouchableOpacity>
             )}
           </View>
+
+          {!isViewingOtherProfile && (
+            <>
+              <TouchableOpacity
+                style={styles.joinedLayersHeaderRow}
+                onPress={() => loadJoinedLayers(profileTargetUserId)}
+                disabled={joinedLayersLoading}
+              >
+                <View>
+                  <Text style={styles.joinedLayersHeader}>Joined Layers</Text>
+                  <Text style={styles.joinedLayersSubheader}>
+                    {joinedLayers.length}{" "}
+                    {joinedLayers.length === 1 ? "layer" : "layers"}
+                  </Text>
+                </View>
+                <View style={styles.postsRefreshButton}>
+                  <Text style={styles.postsRefreshText}>
+                    {joinedLayersLoading ? "Refreshing..." : "Refresh"}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+
+              <View style={styles.joinedLayersSection}>
+                {joinedLayersLoading ? (
+                  <Text style={styles.joinedLayersStateText}>
+                    Loading joined layers...
+                  </Text>
+                ) : joinedLayersError ? (
+                  <Text style={styles.joinedLayersStateText}>
+                    {joinedLayersError}
+                  </Text>
+                ) : joinedLayers.length === 0 ? (
+                  <Text style={styles.joinedLayersStateText}>
+                    You have not joined any community layers yet.
+                  </Text>
+                ) : (
+                  joinedLayers.map((layer) => (
+                    <View key={layer.id} style={styles.joinedLayerCard}>
+                      <Text style={styles.joinedLayerName} numberOfLines={1}>
+                        {layer.layerName}
+                      </Text>
+                      <Text style={styles.joinedLayerMeta} numberOfLines={1}>
+                        {layer.communityName}
+                      </Text>
+                    </View>
+                  ))
+                )}
+              </View>
+            </>
+          )}
 
           <TouchableOpacity
             style={styles.postsHeaderRow}
@@ -1308,6 +1502,53 @@ const createStyles = (palette) =>
     topBarSpacer: {
       width: 70,
       height: 1,
+    },
+    joinedLayersHeaderRow: {
+      marginHorizontal: SIZES.xxl,
+      marginTop: SIZES.sm,
+      marginBottom: SIZES.sm,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+    },
+    joinedLayersHeader: {
+      fontSize: SIZES.lg,
+      fontWeight: "700",
+      color: palette.text,
+    },
+    joinedLayersSubheader: {
+      marginTop: 2,
+      color: palette.subtext,
+      fontSize: 12,
+      fontWeight: "500",
+    },
+    joinedLayersSection: {
+      marginHorizontal: SIZES.xxl,
+      marginBottom: SIZES.lg,
+      gap: SIZES.xs,
+    },
+    joinedLayersStateText: {
+      color: palette.subtext,
+      fontSize: SIZES.sm,
+    },
+    joinedLayerCard: {
+      borderWidth: 1,
+      borderColor: palette.border,
+      borderRadius: SIZES.radius,
+      backgroundColor: palette.surface,
+      paddingVertical: SIZES.sm,
+      paddingHorizontal: SIZES.md,
+      gap: 2,
+    },
+    joinedLayerName: {
+      color: palette.text,
+      fontSize: 13,
+      fontWeight: "700",
+    },
+    joinedLayerMeta: {
+      color: palette.subtext,
+      fontSize: 12,
+      fontWeight: "500",
     },
     postsHeaderRow: {
       marginHorizontal: SIZES.xxl,

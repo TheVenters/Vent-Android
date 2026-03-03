@@ -67,7 +67,7 @@ const PostCreationForm = ({
   const communityAudienceLayers = useMemo(
     () =>
       availableLayers
-        .filter((layer) => layer.owner_type === "community" && layer.isEnabled)
+        .filter((layer) => layer.owner_type === "community")
         .sort((a, b) => (a.name || "").localeCompare(b.name || "")),
     [availableLayers],
   );
@@ -397,7 +397,7 @@ const PostCreationForm = ({
             <Text style={styles.sectionLabel}>Optional Community Layer</Text>
             {communityAudienceLayers.length === 0 ? (
               <Text style={styles.emptyStateText}>
-                You have no added community layers yet.
+                You have no joined community layers yet.
               </Text>
             ) : (
               <View style={styles.layerList}>

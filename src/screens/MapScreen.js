@@ -2729,7 +2729,7 @@ useEffect(() => {
       });
       const postableLayerIdSet = new Set(postableLayerRows.map((layer) => layer.id));
       const communityLayerRows = layers.filter(
-        (layer) => layer.owner_type === "community" && layer.isEnabled,
+        (layer) => layer.owner_type === "community",
       );
       const communityLayerIdSet = new Set(
         communityLayerRows.map((layer) => layer.id),
