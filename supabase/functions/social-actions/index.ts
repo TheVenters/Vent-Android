@@ -50,10 +50,31 @@ type SocialAction =
 const asString = (value: unknown) => String(value ?? "").trim();
 const MAX_COMMENT_LENGTH = 500;
 const BUG_SCREENSHOT_BUCKET = "bug-report-screenshots";
+const MEDIA_STORAGE_POINTER_SCHEME = "storage://";
+const DEFAULT_POST_MEDIA_SIGNED_URL_TTL_SEC = 60 * 60 * 24;
+const MAX_POST_MEDIA_SIGNED_URL_TTL_SEC = 60 * 60 * 24 * 7;
 
 const isUuid = (value: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
     .test(value);
+
+const parseStorageMediaPointer = (value: unknown) => {
+  const pointer = asString(value);
+  if (!pointer.toLowerCase().startsWith(MEDIA_STORAGE_POINTER_SCHEME)) return null;
+
+  const withoutScheme = pointer.slice(MEDIA_STORAGE_POINTER_SCHEME.length);
+  const slashIndex = withoutScheme.indexOf("/");
+  if (slashIndex <= 0 || slashIndex >= withoutScheme.length - 1) return null;
+
+  try {
+    const bucket = decodeURIComponent(withoutScheme.slice(0, slashIndex));
+    const path = decodeURIComponent(withoutScheme.slice(slashIndex + 1));
+    if (!bucket || !path) return null;
+    return { bucket, path };
+  } catch (_) {
+    return null;
+  }
+};
 
 const parseVote = (value: unknown): VoteValue | null => {
   const numeric = Number(value);
@@ -1160,6 +1181,10 @@ const handleListPins = async (
     ? Math.max(1, Math.min(5000, Math.floor(requestedLimit)))
     : 3000;
   const fetchLimit = Math.max(limit, Math.min(5000, limit * 4));
+  const requestedSignedUrlTtl = Number(payload.signedUrlTtlSec);
+  const signedUrlTtlSec = Number.isFinite(requestedSignedUrlTtl)
+    ? Math.max(60, Math.min(MAX_POST_MEDIA_SIGNED_URL_TTL_SEC, Math.floor(requestedSignedUrlTtl)))
+    : DEFAULT_POST_MEDIA_SIGNED_URL_TTL_SEC;
 
   const pinsRes = await adminClient
     .from("pins")
@@ -1191,10 +1216,44 @@ const handleListPins = async (
     })
     .slice(0, limit);
 
+  const mediaPointerByKey = new Map<string, { bucket: string; path: string }>();
+  pins.forEach((pin) => {
+    const pointer = parseStorageMediaPointer(pin?.media_url);
+    if (!pointer) return;
+    const key = `${pointer.bucket}::${pointer.path}`;
+    if (!mediaPointerByKey.has(key)) mediaPointerByKey.set(key, pointer);
+  });
+
+  const signedMediaUrlByKey = new Map<string, string>();
+  await Promise.all(
+    Array.from(mediaPointerByKey.entries()).map(async ([key, pointer]) => {
+      const signedRes = await adminClient.storage
+        .from(pointer.bucket)
+        .createSignedUrl(pointer.path, signedUrlTtlSec);
+      if (!signedRes.error && signedRes.data?.signedUrl) {
+        signedMediaUrlByKey.set(key, asString(signedRes.data.signedUrl));
+      }
+    }),
+  );
+
+  const hydratedPins = pins.map((pin) => {
+    const pointer = parseStorageMediaPointer(pin?.media_url);
+    if (!pointer) return pin;
+    const key = `${pointer.bucket}::${pointer.path}`;
+    const signedUrl = signedMediaUrlByKey.get(key);
+    if (!signedUrl) return pin;
+    return {
+      ...pin,
+      media_url: signedUrl,
+      media_storage_bucket: pointer.bucket,
+      media_storage_path: pointer.path,
+    };
+  });
+
   return jsonResponse(200, {
     success: true,
-    pins,
-    count: pins.length,
+    pins: hydratedPins,
+    count: hydratedPins.length,
     requestedCount: (pinsRes.data || []).length,
     visibleCount: visibleRows.length,
   });

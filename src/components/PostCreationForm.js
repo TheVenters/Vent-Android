@@ -67,7 +67,7 @@ const PostCreationForm = ({
   const communityAudienceLayers = useMemo(
     () =>
       availableLayers
-        .filter((layer) => layer.owner_type === "community" && layer.isEnabled)
+        .filter((layer) => layer.owner_type === "community")
         .sort((a, b) => (a.name || "").localeCompare(b.name || "")),
     [availableLayers],
   );
@@ -180,8 +180,20 @@ const PostCreationForm = ({
   const applyPickedMedia = (result, source) => {
     if (result.canceled || !result.assets?.[0]) return;
     const asset = result.assets[0];
-    setMediaUrl(asset.uri);
-    setMediaType(asset.type === "video" ? "video" : "photo");
+    const isVideo = asset.type === "video";
+    const normalizedMediaType = isVideo ? "video" : "photo";
+    let normalizedMediaUrl = asset.uri;
+
+    // Keep photos in-memory as data URIs so we always have a portable payload
+    // for upload, even if local temp file permissions change.
+    if (!isVideo && asset.base64) {
+      const mimeType =
+        String(asset.mimeType || "").trim() || "image/jpeg";
+      normalizedMediaUrl = `data:${mimeType};base64,${asset.base64}`;
+    }
+
+    setMediaUrl(normalizedMediaUrl);
+    setMediaType(normalizedMediaType);
     setMediaSource(source || null);
   };
 
@@ -201,6 +213,7 @@ const PostCreationForm = ({
         mediaTypes: ["images", "videos"],
         allowsEditing: false,
         quality: 0.8,
+        base64: true,
       });
       applyPickedMedia(result, MEDIA_SOURCE.LIBRARY);
     } catch (error) {
@@ -221,6 +234,7 @@ const PostCreationForm = ({
         mediaTypes: "images",
         allowsEditing: false,
         quality: 0.8,
+        base64: true,
       });
       applyPickedMedia(result, MEDIA_SOURCE.CAMERA);
     } catch (error) {
@@ -383,7 +397,7 @@ const PostCreationForm = ({
             <Text style={styles.sectionLabel}>Optional Community Layer</Text>
             {communityAudienceLayers.length === 0 ? (
               <Text style={styles.emptyStateText}>
-                You have no added community layers yet.
+                You have no joined community layers yet.
               </Text>
             ) : (
               <View style={styles.layerList}>
