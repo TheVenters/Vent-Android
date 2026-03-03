@@ -10,10 +10,13 @@ import {
   ScrollView,
   Alert,
   Image,
+  Modal,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import {
   supabase,
+  fetchVisiblePinsViaEdgeFunction,
+  getActiveSession,
   getCurrentUser,
   signIn,
   signUp,
@@ -42,6 +45,7 @@ const AccountScreen = ({ navigation, route }) => {
   const [postsLoading, setPostsLoading] = useState(false);
   const [postsError, setPostsError] = useState("");
   const [viewedProfile, setViewedProfile] = useState(null);
+  const [selectedPost, setSelectedPost] = useState(null);
   const { palette } = useAppTheme();
   const styles = createStyles(palette);
   const profileUserId = String(route?.params?.profileUserId || "");
@@ -173,29 +177,58 @@ const AccountScreen = ({ navigation, route }) => {
     setPostsLoading(true);
     setPostsError("");
     try {
-      const queryPins = (selectClause) =>
-        supabase
-          .from("pins")
-          .select(selectClause)
-          .eq("user_id", userId)
-          .order("created_at", { ascending: false })
-          .limit(200);
+      let basePosts = [];
+      let loadedViaEdge = false;
 
-      let res = await queryPins(
-        "id,type,content,caption,layer,base_audience,created_at,lat,lng",
-      );
-      const missingBaseAudienceColumn =
-        String(res?.error?.code || "") === "42703" ||
-        String(res?.error?.message || "")
-          .toLowerCase()
-          .includes("base_audience");
-
-      if (missingBaseAudienceColumn) {
-        res = await queryPins("id,type,content,caption,layer,created_at,lat,lng");
+      const session = await getActiveSession();
+      const accessToken = session?.access_token || null;
+      const refreshToken = session?.refresh_token || null;
+      const actorUserId = session?.user?.id || currentUser?.id || null;
+      if (accessToken && actorUserId) {
+        const edgeRes = await fetchVisiblePinsViaEdgeFunction(
+          accessToken,
+          refreshToken,
+          actorUserId,
+          5000,
+        );
+        if (!edgeRes.error && Array.isArray(edgeRes?.data?.pins)) {
+          basePosts = edgeRes.data.pins
+            .filter((post) => String(post?.user_id || "") === String(userId))
+            .slice(0, 200);
+          loadedViaEdge = true;
+        } else if (edgeRes.error) {
+          console.warn("Account posts edge fetch failed, using direct query fallback.");
+        }
       }
 
-      if (res.error) throw res.error;
-      const basePosts = Array.isArray(res.data) ? res.data : [];
+      if (!loadedViaEdge) {
+        const queryPins = (selectClause) =>
+          supabase
+            .from("pins")
+            .select(selectClause)
+            .eq("user_id", userId)
+            .order("created_at", { ascending: false })
+            .limit(200);
+
+        let res = await queryPins(
+          "id,type,content,caption,layer,base_audience,created_at,lat,lng,media_url,media_type",
+        );
+        const missingBaseAudienceColumn =
+          String(res?.error?.code || "") === "42703" ||
+          String(res?.error?.message || "")
+            .toLowerCase()
+            .includes("base_audience");
+
+        if (missingBaseAudienceColumn) {
+          res = await queryPins(
+            "id,type,content,caption,layer,created_at,lat,lng,media_url,media_type",
+          );
+        }
+
+        if (res.error) throw res.error;
+        basePosts = Array.isArray(res.data) ? res.data : [];
+      }
+
       const pinIds = basePosts
         .map((post) => String(post?.id || ""))
         .filter(Boolean);
@@ -302,6 +335,15 @@ const AccountScreen = ({ navigation, route }) => {
       : [];
     if (explicitLabels.length > 0) return explicitLabels;
     return [getAudienceLabel(post?.base_audience || post?.layer || "public")];
+  };
+
+  const openPostDetail = (post) => {
+    if (!post) return;
+    setSelectedPost(post);
+  };
+
+  const closePostDetail = () => {
+    setSelectedPost(null);
   };
 
   const handleSignIn = async () => {
@@ -707,9 +749,11 @@ const AccountScreen = ({ navigation, route }) => {
                 const postType = String(post?.type || "text").toUpperCase();
                 const layerLabels = getPostLayerLabels(post);
                 return (
-                  <View
+                  <TouchableOpacity
                     key={String(post?.id || `post-${index}`)}
                     style={styles.postCard}
+                    activeOpacity={0.85}
+                    onPress={() => openPostDetail(post)}
                   >
                     <View style={styles.postTopRow}>
                       <View style={styles.postAudienceBadge}>
@@ -733,13 +777,86 @@ const AccountScreen = ({ navigation, route }) => {
                     </View>
                     <View style={styles.postBottomRow}>
                       <Text style={styles.postTypeText}>{postType}</Text>
+                      <Text style={styles.postTapHint}>Tap to open</Text>
                     </View>
-                  </View>
+                  </TouchableOpacity>
                 );
               })
             )}
           </View>
         </ScrollView>
+        <Modal
+          visible={Boolean(selectedPost)}
+          transparent
+          animationType="slide"
+          onRequestClose={closePostDetail}
+        >
+          <View style={styles.postModalOverlay}>
+            <TouchableOpacity
+              style={styles.postModalBackdrop}
+              activeOpacity={1}
+              onPress={closePostDetail}
+            />
+            <View style={styles.postModalCard}>
+              <View style={styles.postModalHeader}>
+                <Text style={styles.postModalTitle}>Post</Text>
+                <TouchableOpacity
+                  style={styles.postModalCloseBtn}
+                  onPress={closePostDetail}
+                >
+                  <Text style={styles.postModalCloseText}>Close</Text>
+                </TouchableOpacity>
+              </View>
+
+              {selectedPost ? (
+                <ScrollView style={styles.postModalContent}>
+                  {selectedPost.media_url &&
+                  String(selectedPost.media_type || "").toLowerCase() !==
+                    "video" ? (
+                    <Image
+                      source={{ uri: selectedPost.media_url }}
+                      style={styles.postModalImage}
+                      resizeMode="cover"
+                    />
+                  ) : null}
+                  {selectedPost.media_url &&
+                  String(selectedPost.media_type || "").toLowerCase() ===
+                    "video" ? (
+                    <View style={styles.postModalVideoPlaceholder}>
+                      <Text style={styles.postModalVideoText}>
+                        Video post
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  <Text style={styles.postModalCaption}>
+                    {String(selectedPost.caption || "").trim() || "Untitled"}
+                  </Text>
+                  <Text style={styles.postModalBody}>
+                    {String(selectedPost.content || "").trim() ||
+                      "No text content"}
+                  </Text>
+
+                  <View style={styles.postModalMetaBlock}>
+                    <Text style={styles.postModalMetaText}>
+                      Audience:{" "}
+                      {getAudienceLabel(
+                        selectedPost.base_audience || selectedPost.layer,
+                      )}
+                    </Text>
+                    <Text style={styles.postModalMetaText}>
+                      Posted: {formatPostDate(selectedPost.created_at)}
+                    </Text>
+                    <Text style={styles.postModalMetaText}>
+                      Layers:{" "}
+                      {getPostLayerLabels(selectedPost).join(", ")}
+                    </Text>
+                  </View>
+                </ScrollView>
+              ) : null}
+            </View>
+          </View>
+        </Modal>
       </View>
     );
   }
@@ -1304,6 +1421,105 @@ const createStyles = (palette) =>
       fontSize: 12,
       letterSpacing: 0.8,
       fontWeight: "600",
+    },
+    postTapHint: {
+      color: palette.primary,
+      fontSize: 11,
+      fontWeight: "600",
+    },
+    postModalOverlay: {
+      flex: 1,
+      justifyContent: "flex-end",
+    },
+    postModalBackdrop: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: "rgba(0, 0, 0, 0.45)",
+    },
+    postModalCard: {
+      maxHeight: "84%",
+      backgroundColor: palette.surface,
+      borderTopLeftRadius: SIZES.radiusXl,
+      borderTopRightRadius: SIZES.radiusXl,
+      borderTopWidth: 1,
+      borderTopColor: palette.border,
+      overflow: "hidden",
+    },
+    postModalHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingHorizontal: SIZES.lg,
+      paddingVertical: SIZES.md,
+      borderBottomWidth: 1,
+      borderBottomColor: palette.border,
+    },
+    postModalTitle: {
+      color: palette.text,
+      fontSize: SIZES.lg,
+      fontWeight: "700",
+    },
+    postModalCloseBtn: {
+      paddingHorizontal: SIZES.md,
+      paddingVertical: SIZES.sm,
+      borderRadius: SIZES.radius,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.mutedSurface,
+    },
+    postModalCloseText: {
+      color: palette.text,
+      fontSize: 12,
+      fontWeight: "600",
+    },
+    postModalContent: {
+      paddingHorizontal: SIZES.lg,
+      paddingVertical: SIZES.md,
+    },
+    postModalImage: {
+      width: "100%",
+      height: 240,
+      borderRadius: SIZES.radiusLg,
+      marginBottom: SIZES.md,
+      backgroundColor: palette.mutedSurface,
+    },
+    postModalVideoPlaceholder: {
+      width: "100%",
+      height: 180,
+      borderRadius: SIZES.radiusLg,
+      marginBottom: SIZES.md,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.mutedSurface,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    postModalVideoText: {
+      color: palette.subtext,
+      fontSize: SIZES.md,
+      fontWeight: "600",
+    },
+    postModalCaption: {
+      color: palette.text,
+      fontSize: SIZES.lg,
+      fontWeight: "700",
+      marginBottom: SIZES.sm,
+    },
+    postModalBody: {
+      color: palette.text,
+      fontSize: SIZES.md,
+      lineHeight: 22,
+      marginBottom: SIZES.lg,
+    },
+    postModalMetaBlock: {
+      borderTopWidth: 1,
+      borderTopColor: palette.border,
+      paddingTop: SIZES.md,
+      gap: SIZES.xs,
+      paddingBottom: SIZES.xl,
+    },
+    postModalMetaText: {
+      color: palette.subtext,
+      fontSize: 13,
     },
   });
 

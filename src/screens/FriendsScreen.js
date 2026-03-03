@@ -9,6 +9,7 @@ import {
   Alert,
   RefreshControl,
   Platform,
+  Image,
 } from 'react-native';
 import {
   acceptFriendRequestViaEdgeFunction,
@@ -314,6 +315,21 @@ const FriendsScreen = ({ navigation }) => {
     });
   };
 
+  const renderProfileAvatar = (profile) => {
+    const avatarUrl = String(profile?.avatar_url || '').trim();
+    const seed =
+      String(profile?.username || '').trim() ||
+      String(profile?.display_name || '').trim() ||
+      'U';
+    const initial = seed.charAt(0).toUpperCase();
+
+    if (avatarUrl) {
+      return <Image source={{ uri: avatarUrl }} style={styles.friendAvatarImage} />;
+    }
+
+    return <Text style={styles.friendAvatarInitial}>{initial}</Text>;
+  };
+
   if (!currentUser) {
     return (
       <View style={styles.container}>
@@ -340,12 +356,17 @@ const FriendsScreen = ({ navigation }) => {
         style={styles.friendInfo}
         onPress={() => openFriendProfile(item.friend?.id)}
       >
-        <Text style={styles.friendName}>
-          {item.friend?.display_name || 'User'}
-        </Text>
-        {item.friend?.username && (
-          <Text style={styles.friendUsername}>@{item.friend.username}</Text>
-        )}
+        <View style={styles.friendInfoRow}>
+          <View style={styles.friendAvatar}>{renderProfileAvatar(item.friend)}</View>
+          <View style={styles.friendTextCol}>
+            <Text style={styles.friendName}>
+              {item.friend?.display_name || 'User'}
+            </Text>
+            {item.friend?.username && (
+              <Text style={styles.friendUsername}>@{item.friend.username}</Text>
+            )}
+          </View>
+        </View>
       </TouchableOpacity>
       <View style={styles.friendActions}>
         <TouchableOpacity
@@ -370,12 +391,19 @@ const FriendsScreen = ({ navigation }) => {
         style={styles.friendInfo}
         onPress={() => openFriendProfile(item.requester?.id)}
       >
-        <Text style={styles.friendName}>
-          {item.requester.display_name || 'User'}
-        </Text>
-        {item.requester.username && (
-          <Text style={styles.friendUsername}>@{item.requester.username}</Text>
-        )}
+        <View style={styles.friendInfoRow}>
+          <View style={styles.friendAvatar}>
+            {renderProfileAvatar(item.requester)}
+          </View>
+          <View style={styles.friendTextCol}>
+            <Text style={styles.friendName}>
+              {item.requester.display_name || 'User'}
+            </Text>
+            {item.requester.username && (
+              <Text style={styles.friendUsername}>@{item.requester.username}</Text>
+            )}
+          </View>
+        </View>
       </TouchableOpacity>
       <View style={styles.requestActions}>
         <TouchableOpacity
@@ -400,10 +428,15 @@ const FriendsScreen = ({ navigation }) => {
         style={styles.friendInfo}
         onPress={() => openFriendProfile(item.id)}
       >
-        <Text style={styles.friendName}>{item.display_name || 'User'}</Text>
-        {item.username && (
-          <Text style={styles.friendUsername}>@{item.username}</Text>
-        )}
+        <View style={styles.friendInfoRow}>
+          <View style={styles.friendAvatar}>{renderProfileAvatar(item)}</View>
+          <View style={styles.friendTextCol}>
+            <Text style={styles.friendName}>{item.display_name || 'User'}</Text>
+            {item.username && (
+              <Text style={styles.friendUsername}>@{item.username}</Text>
+            )}
+          </View>
+        </View>
       </TouchableOpacity>
       <TouchableOpacity
         style={styles.addButton}
@@ -420,13 +453,18 @@ const FriendsScreen = ({ navigation }) => {
         style={styles.friendInfo}
         onPress={() => openFriendProfile(item.friend?.id)}
       >
-        <Text style={styles.friendName}>
-          {item.friend?.display_name || 'User'}
-        </Text>
-        {item.friend?.username && (
-          <Text style={styles.friendUsername}>@{item.friend.username}</Text>
-        )}
-        <Text style={styles.pendingLabel}>Pending</Text>
+        <View style={styles.friendInfoRow}>
+          <View style={styles.friendAvatar}>{renderProfileAvatar(item.friend)}</View>
+          <View style={styles.friendTextCol}>
+            <Text style={styles.friendName}>
+              {item.friend?.display_name || 'User'}
+            </Text>
+            {item.friend?.username && (
+              <Text style={styles.friendUsername}>@{item.friend.username}</Text>
+            )}
+            <Text style={styles.pendingLabel}>Pending</Text>
+          </View>
+        </View>
       </TouchableOpacity>
       <TouchableOpacity
         style={styles.rejectButton}
@@ -689,6 +727,34 @@ const createStyles = (palette) =>
     friendInfo: {
       flex: 1,
       paddingRight: SIZES.sm,
+    },
+    friendInfoRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SIZES.sm,
+    },
+    friendTextCol: {
+      flex: 1,
+    },
+    friendAvatar: {
+      width: 42,
+      height: 42,
+      borderRadius: 21,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.mutedSurface,
+      alignItems: 'center',
+      justifyContent: 'center',
+      overflow: 'hidden',
+    },
+    friendAvatarImage: {
+      width: '100%',
+      height: '100%',
+    },
+    friendAvatarInitial: {
+      color: palette.primary,
+      fontSize: 16,
+      fontWeight: '700',
     },
     friendName: {
       fontSize: SIZES.md,

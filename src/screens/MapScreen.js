@@ -40,6 +40,7 @@ import {
   supabase,
   getCurrentUser,
   getActiveSession,
+  uploadPostMediaToStorage,
   votePinViaEdgeFunction,
   supabaseWithAccessToken,
 } from "../services/supabase";
@@ -2851,13 +2852,24 @@ useEffect(() => {
         };
       }
 
+      let persistedMediaUrl = postData.mediaUrl || null;
+      if (persistedMediaUrl) {
+        const uploadResult = await uploadPostMediaToStorage({
+          session,
+          userId: activeUserId,
+          mediaUrl: persistedMediaUrl,
+          mediaType: postData.mediaType,
+        });
+        persistedMediaUrl = uploadResult?.mediaPointer || null;
+      }
+
       const insertRows = [
         {
           user_id: activeUserId,
           type: postData.mediaUrl ? "media" : "text",
           content: postData.content,
           caption: postData.title,
-          media_url: postData.mediaUrl || null,
+          media_url: persistedMediaUrl,
           media_type: postData.mediaType,
           lat: storedLat,
           lng: storedLng,
@@ -2919,8 +2931,10 @@ useEffect(() => {
         layers.map((layer) => [layer.id, layer.layer_icon || null]),
       );
       const optimisticCreatedAt = new Date().toISOString();
+      const optimisticMediaUrl = postData.mediaUrl || persistedMediaUrl || null;
       const optimisticRows = insertRows.map((row, index) => ({
         ...row,
+        media_url: optimisticMediaUrl,
         id: `temp-${crossPostGroupId}-${index}`,
         created_at: optimisticCreatedAt,
         updated_at: optimisticCreatedAt,

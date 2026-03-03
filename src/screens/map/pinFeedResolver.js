@@ -126,6 +126,8 @@ export const resolvePinsForMap = async ({
   const membershipsByPinId = new Map();
   const hasUsableDbAuthContext = Boolean(resolvedRequestUserId);
   let visiblePinsFromEdge = null;
+  const visiblePinById = new Map();
+  let visiblePinsEdgeError = null;
 
   const systemLayerIdByKey = new Map();
   layers.forEach((layer) => {
@@ -143,6 +145,35 @@ export const resolvePinsForMap = async ({
     enabledFriendsLayerIds.length > 0
       ? enabledFriendsLayerIds
       : [systemLayerIdByKey.get("friends")].filter(Boolean);
+
+  if (accessToken) {
+    const visibleRes = await fetchVisiblePinsViaEdgeFunction(
+      accessToken,
+      refreshToken,
+      ownUserId,
+      5000,
+    );
+    if (!visibleRes?.error && Array.isArray(visibleRes?.data?.pins)) {
+      visiblePinsFromEdge = visibleRes.data.pins;
+      visiblePinsFromEdge.forEach((pin) => {
+        const pinId = String(pin?.id || "");
+        if (!pinId) return;
+        visiblePinById.set(pinId, pin);
+      });
+      logLayerTrace("resolvePinsForMap:edgeVisiblePins", {
+        count: visiblePinsFromEdge.length,
+      });
+    } else if (visibleRes?.error) {
+      visiblePinsEdgeError = visibleRes.error;
+      logLayerTrace("resolvePinsForMap:edgeVisiblePinsError", {
+        message: String(visibleRes.error?.message || visibleRes.error || ""),
+      });
+    }
+  }
+
+  if (!hasUsableDbAuthContext && accessToken && visiblePinsEdgeError) {
+    throw visiblePinsEdgeError;
+  }
 
   if (hasUsableDbAuthContext && enabledLayerIds.length > 0) {
     const membershipRes = await reader
@@ -166,19 +197,7 @@ export const resolvePinsForMap = async ({
       if (!existing.includes(layerId)) existing.push(layerId);
       membershipsByPinId.set(pinId, existing);
     });
-  } else if (accessToken) {
-    const visibleRes = await fetchVisiblePinsViaEdgeFunction(
-      accessToken,
-      refreshToken,
-      ownUserId,
-      5000,
-    );
-    if (visibleRes?.error) {
-      throw visibleRes.error;
-    }
-    visiblePinsFromEdge = Array.isArray(visibleRes?.data?.pins)
-      ? visibleRes.data.pins
-      : [];
+  } else if (Array.isArray(visiblePinsFromEdge)) {
     logLayerTrace("resolvePinsForMap:membershipRows", {
       count: visiblePinsFromEdge.length,
       source: "edge-visible-pins",
@@ -231,7 +250,11 @@ export const resolvePinsForMap = async ({
 
   if (includePublicAudience) {
     let publicPins = [];
-    if (hasUsableDbAuthContext || !accessToken) {
+    if (
+      hasUsableDbAuthContext ||
+      !accessToken ||
+      !Array.isArray(visiblePinsFromEdge)
+    ) {
       const visiblePublicPinsRes = await reader
         .from("pins")
         .select("*")
@@ -300,7 +323,11 @@ export const resolvePinsForMap = async ({
 
     if (acceptedFriendIds.length > 0) {
       let visibleFriendPins = [];
-      if (hasUsableDbAuthContext || !accessToken) {
+      if (
+        hasUsableDbAuthContext ||
+        !accessToken ||
+        !Array.isArray(visiblePinsFromEdge)
+      ) {
         const visibleFriendPinsRes = await reader
           .from("pins")
           .select("*")
@@ -337,6 +364,14 @@ export const resolvePinsForMap = async ({
         membershipsByPinId.set(pinId, existing);
       });
     }
+  }
+
+  if (visiblePinById.size > 0) {
+    pinById.forEach((pin, pinId) => {
+      const edgePin = visiblePinById.get(pinId);
+      if (!edgePin) return;
+      pinById.set(pinId, edgePin);
+    });
   }
 
   const pinsData = Array.from(pinById.values());
