@@ -13,6 +13,7 @@ import {
   Alert,
   Modal,
   ScrollView,
+  Platform,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect } from "@react-navigation/native";
@@ -30,6 +31,7 @@ import {
   deletePinCommentViaEdgeFunction,
   deletePinViaEdgeFunction,
   ensureUserPostingLayerViaEdgeFunction,
+  fetchFriendListsViaEdgeFunction,
   fetchMyCommunityMembershipsViaEdgeFunction,
   fetchMyLayerPrefsViaEdgeFunction,
   getPinVoteSummaryViaEdgeFunction,
@@ -39,6 +41,7 @@ import {
   supabase,
   getCurrentUser,
   getActiveSession,
+  uploadPostMediaToStorage,
   votePinViaEdgeFunction,
   supabaseWithAccessToken,
 } from "../services/supabase";
@@ -54,6 +57,9 @@ import ActionButtonCluster from "../components/ActionButtonCluster";
 import { useAppTheme } from "../context/ThemeContext";
 import { MAP_DARK_STYLE } from "../constants/mapDarkStyle";
 import {
+  formatLayerDisplayName,
+  getUserPostsLayerSlug,
+  isNamedUserPostsLayer,
   getPinLayerKeyFromLayer,
   resolveNextSelectedLayerId,
   sortLayers,
@@ -68,6 +74,7 @@ import {
 } from "./map/mapVisualEngine";
 import {
   buildFallbackLayers,
+  getEnabledAudienceKeysForMap,
   ensureCoreSystemLayers,
   getEnabledLayerIdsForMap,
   isUuid,
@@ -88,6 +95,11 @@ const formatUsernameForLayer = (user) => {
 
 const makeUserPostingLayerName = (user) =>
   `user-${formatUsernameForLayer(user)}-posts`;
+const normalizeLayerIdentityToken = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-");
 const DEFAULT_MAP_SIZE = { width: 390, height: 780 };
 const PIN_VOTE_PREFETCH_LIMIT = 6;
 const PIN_VOTE_PREFETCH_DELAY_MS = 180;
@@ -108,6 +120,18 @@ const PLANE_EDGE_INSERT_THRESHOLD_METERS = 24;
 const PLANE_CORNER_MERGE_THRESHOLD_METERS = 14;
 const PLANE_CORNER_MERGE_HOLD_MS = 550;
 const PLANE_RECT_DRAG_END_DEBOUNCE_MS = 140;
+
+const normalizeAudienceKeys = (audienceKeys) =>
+  Array.from(
+    new Set(
+      (Array.isArray(audienceKeys) ? audienceKeys : [])
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ).sort();
+
+const buildLayerRequestKey = (layerIds, audienceKeys) =>
+  `${toNormalizedLayerIdKey(layerIds)}::${normalizeAudienceKeys(audienceKeys).join("|")}`;
 
 const toRadians = (degrees) => (degrees * Math.PI) / 180;
 
@@ -642,6 +666,33 @@ const normalizePinComment = (comment) => {
   };
 };
 
+const toGuestPublicOnlyLayers = (layerRows) => {
+  const source = Array.isArray(layerRows) ? layerRows : [];
+  const publicSystemLayers = source.filter((layer) => {
+    const ownerType = layer?.owner_type || "system";
+    if (ownerType !== "system") return false;
+    return getPinLayerKeyFromLayer(layer) === "public";
+  });
+
+  const preferredPublicLayer =
+    publicSystemLayers.find(
+      (layer) => String(layer?.name || "").trim().toLowerCase() === "public",
+    ) || publicSystemLayers[0];
+
+  const fallbackPublicLayer = buildFallbackLayers(null)[0] || null;
+  const selected = preferredPublicLayer || fallbackPublicLayer;
+  if (!selected) return [];
+
+  return [
+    {
+      ...selected,
+      isEnabled: true,
+      enabled: true,
+      viewerCanManage: true,
+    },
+  ];
+};
+
 const collectCommentThreadIds = (comments, rootCommentId) => {
   const byParentId = new Map();
   (Array.isArray(comments) ? comments : []).forEach((comment) => {
@@ -670,6 +721,8 @@ const collectCommentThreadIds = (comments, rootCommentId) => {
 const MapScreen = ({ navigation, route }) => {
   const { isDark, palette } = useAppTheme();
   const styles = createStyles(palette);
+  const mapProvider = Platform.OS === "android" ? PROVIDER_GOOGLE : undefined;
+  const appleMapInterfaceStyle = isDark ? "dark" : "light";
 
   const [region, setRegion] = useState(DEFAULT_REGION);
   const [mapVisuals, setMapVisuals] = useState({ pins: [], clouds: [] });
@@ -760,10 +813,22 @@ const MapScreen = ({ navigation, route }) => {
   const pinLoadRequestSeqRef = useRef(0);
   const latestEnabledLayerKeyRef = useRef("");
   const allLoadedPostsRef = useRef([]);
+  const localFallbackEnabledByAudienceRef = useRef(new Map());
 
   useEffect(() => {
     allLoadedPostsRef.current = allLoadedPosts;
   }, [allLoadedPosts]);
+  useEffect(() => {
+    const nextFallbackState = new Map(localFallbackEnabledByAudienceRef.current);
+    (Array.isArray(layers) ? layers : []).forEach((layer) => {
+      if (isUuid(String(layer?.id || ""))) return;
+      if ((layer?.owner_type || "system") !== "system") return;
+      const key = getPinLayerKeyFromLayer(layer);
+      if (!["public", "friends"].includes(key)) return;
+      nextFallbackState.set(key, Boolean(layer?.isEnabled));
+    });
+    localFallbackEnabledByAudienceRef.current = nextFallbackState;
+  }, [layers]);
   const planeRectAnchorRef = useRef(null);
   const planeRectStopTimerRef = useRef(null);
   const planeMergeHoldTimerRef = useRef(null);
@@ -928,6 +993,10 @@ const MapScreen = ({ navigation, route }) => {
     null;
 
   const enabledPinLayerKeys = useMemo(() => getEnabledLayerIdsForMap(layers), [layers]);
+  const enabledAudienceKeys = useMemo(
+    () => getEnabledAudienceKeysForMap(layers),
+    [layers],
+  );
 
   const fetchAccessibleLayers = useCallback(
     async (userId, communityId) => {
@@ -962,6 +1031,12 @@ const MapScreen = ({ navigation, route }) => {
           )
             .trim()
             .toLowerCase() || null;
+        const resolvedDisplayName = String(
+          session?.user?.user_metadata?.display_name ||
+            currentUser?.user_metadata?.display_name ||
+            currentUser?.user_metadata?.username ||
+            "",
+        ).trim();
         const expectedUserLayerName = session?.user
           ? makeUserPostingLayerName(session.user).toLowerCase()
           : null;
@@ -971,6 +1046,92 @@ const MapScreen = ({ navigation, route }) => {
         const accessToken = session?.access_token || null;
         const refreshToken = session?.refresh_token || null;
         const actorUserId = session?.user?.id || resolvedUserId || null;
+        const friendLayerIdentityTokens = new Set(
+          [resolvedUserId, resolvedUsername]
+            .map((value) => normalizeLayerIdentityToken(value))
+            .filter(Boolean),
+        );
+
+        if (resolvedUserId && actorUserId) {
+          const authedReader = accessToken
+            ? supabaseWithAccessToken(accessToken)
+            : supabase;
+          let acceptedFriendIds = [];
+          let acceptedFriendUsernames = [];
+          let directFriendLookupFailed = false;
+          const acceptedFriendsRes = await authedReader
+            .from("friends")
+            .select("user_id,friend_id,status")
+            .or(`user_id.eq.${actorUserId},friend_id.eq.${actorUserId}`)
+            .in("status", ["accepted", "active"]);
+          if (acceptedFriendsRes.error) {
+            directFriendLookupFailed = true;
+            warnWithThrottle(
+              "layers-friends",
+              "Friend relationship lookup unavailable, trying edge fallback:",
+              formatErrorMessage(acceptedFriendsRes.error),
+            );
+          } else {
+            acceptedFriendIds = (acceptedFriendsRes.data || [])
+              .map((row) =>
+                row.user_id === actorUserId ? row.friend_id : row.user_id,
+              )
+              .filter(Boolean)
+              .filter((id) => id !== actorUserId);
+          }
+
+          if (directFriendLookupFailed && accessToken) {
+            const friendListsRes = await fetchFriendListsViaEdgeFunction(
+              accessToken,
+              refreshToken,
+              actorUserId,
+            );
+            if (!friendListsRes?.error) {
+              const acceptedFriends = Array.isArray(friendListsRes?.data?.friends)
+                ? friendListsRes.data.friends
+                : [];
+              acceptedFriendIds = acceptedFriends
+                .map((row) => row?.friend?.id || row?.friend_id || row?.user_id || null)
+                .filter(Boolean);
+              acceptedFriendUsernames = acceptedFriends
+                .map(
+                  (row) =>
+                    row?.friend?.username ||
+                    row?.username ||
+                    row?.friend_username ||
+                    null,
+                )
+                .filter(Boolean);
+            }
+          }
+
+          const uniqueFriendIds = Array.from(new Set(acceptedFriendIds));
+          uniqueFriendIds.forEach((id) =>
+            friendLayerIdentityTokens.add(normalizeLayerIdentityToken(id)),
+          );
+          acceptedFriendUsernames.forEach((username) =>
+            friendLayerIdentityTokens.add(
+              normalizeLayerIdentityToken(username),
+            ),
+          );
+
+          if (uniqueFriendIds.length > 0) {
+            const profilesRes = await authedReader
+              .from("profiles")
+              .select("id,username")
+              .in("id", uniqueFriendIds);
+            if (!profilesRes.error) {
+              (profilesRes.data || []).forEach((profile) => {
+                friendLayerIdentityTokens.add(
+                  normalizeLayerIdentityToken(profile?.id),
+                );
+                friendLayerIdentityTokens.add(
+                  normalizeLayerIdentityToken(profile?.username),
+                );
+              });
+            }
+          }
+        }
 
         const membershipsPromise = resolvedUserId && accessToken
           ? (async () => {
@@ -1183,6 +1344,7 @@ const MapScreen = ({ navigation, route }) => {
         const mappedLayers = rawLayers.map((layer) => {
           const ownerType = layer.owner_type || "system";
           const { baseKind, layerIcon } = parseLayerKindMetadata(layer.kind);
+          const lowerName = String(layer.name || "").toLowerCase();
           const prefRow = prefByLayerId.get(layer.id) || null;
           const hasPref = Boolean(prefRow);
           const prefHidden = Boolean(prefRow?.hidden);
@@ -1214,6 +1376,16 @@ const MapScreen = ({ navigation, route }) => {
           const viewerCanManage =
             ownerType !== "community" ||
             isLinkedToActiveCommunity;
+          const isOwnUserPostsLayer = Boolean(resolvedUserId) && (
+            (ownerType === "user" &&
+              layer.kind === "user_posts" &&
+              layer.owner_id === resolvedUserId) ||
+            (expectedUserLayerName && lowerName === expectedUserLayerName) ||
+            (expectedLegacyUserLayerName &&
+              lowerName === expectedLegacyUserLayerName) ||
+            (resolvedUsername &&
+              lowerName === `user-${resolvedUsername}-posts`)
+          );
 
           return {
             ...layer,
@@ -1221,7 +1393,11 @@ const MapScreen = ({ navigation, route }) => {
             raw_kind: layer.kind,
             layer_icon: layerIcon,
             owner_type: ownerType,
-            display_name: ownerType === "user" ? "My Posts" : layer.name,
+            display_name: formatLayerDisplayName(layer, {
+              currentUserId: resolvedUserId,
+              currentUsername: resolvedUsername,
+              currentDisplayName: resolvedDisplayName,
+            }),
             isEnabled,
             pref_hidden: prefHidden,
             pref_sort_order: prefSortOrder,
@@ -1229,12 +1405,20 @@ const MapScreen = ({ navigation, route }) => {
             sourceCommunityIds,
             isCommunityAccessible: isLinkedToActiveCommunity,
             viewerCanManage,
+            isOwnUserPostsLayer,
           };
         });
 
+        const friendScopedFilteredLayers = mappedLayers.filter((layer) => {
+          if (!isNamedUserPostsLayer(layer)) return true;
+          if (layer.isOwnUserPostsLayer) return true;
+          const slug = getUserPostsLayerSlug(layer);
+          return Boolean(slug) && friendLayerIdentityTokens.has(slug);
+        });
+
         logLayerTrace("refreshAccessibleLayers:mappedLayers", {
-          total: mappedLayers.length,
-          layers: mappedLayers.map((layer) => ({
+          total: friendScopedFilteredLayers.length,
+          layers: friendScopedFilteredLayers.map((layer) => ({
             id: layer.id,
             name: layer.display_name || layer.name,
             owner_type: layer.owner_type,
@@ -1248,7 +1432,7 @@ const MapScreen = ({ navigation, route }) => {
 
         const removedLayerIds = await readRemovedLayerIds(resolvedUserId);
 
-        const collectionScopedLayers = mappedLayers.filter((layer) => {
+        const collectionScopedLayers = friendScopedFilteredLayers.filter((layer) => {
           if (layer.owner_type !== "community") return true;
           if (forcedCommunityLayerIds.has(layer.id)) return true;
           if (removedLayerIds.has(layer.id)) return false;
@@ -1332,12 +1516,28 @@ const MapScreen = ({ navigation, route }) => {
           if (rankA !== rankB) return rankA - rankB;
           return 0;
         });
-        const nextLayers = effectiveCommunityId
+        const nextLayersBase = effectiveCommunityId
           ? nextLayersByPref.map((layer) => ({
               ...layer,
               isEnabled: forcedCommunityLayerIds.has(layer.id),
             }))
           : nextLayersByPref;
+        const nextLayersBaseForAudience = !effectiveCommunityId
+          ? nextLayersBase.map((layer) => {
+              if (isUuid(String(layer?.id || ""))) return layer;
+              if ((layer?.owner_type || "system") !== "system") return layer;
+              const key = getPinLayerKeyFromLayer(layer);
+              if (!["public", "friends"].includes(key)) return layer;
+              if (!localFallbackEnabledByAudienceRef.current.has(key)) return layer;
+              return {
+                ...layer,
+                isEnabled: Boolean(localFallbackEnabledByAudienceRef.current.get(key)),
+              };
+            })
+          : nextLayersBase;
+        const nextLayers = resolvedUserId
+          ? nextLayersBaseForAudience
+          : toGuestPublicOnlyLayers(nextLayersBaseForAudience);
 
         logLayerTrace("refreshAccessibleLayers:finalLayers", {
           total: nextLayers.length,
@@ -1546,6 +1746,14 @@ const MapScreen = ({ navigation, route }) => {
 
     const layerName = makeUserPostingLayerName(currentUser);
     const legacyLayerName = `user-${currentUser.id}-posts`;
+    const isRecoverableOwnershipConstraintError = (error) => {
+      const message = String(error?.message || "").toLowerCase();
+      return (
+        message.includes("layers_owner_consistency_check") ||
+        message.includes("layers_owner_shape_check") ||
+        message.includes("layers_owner_id_fkey")
+      );
+    };
 
     try {
       const session = await getActiveSession();
@@ -1570,7 +1778,10 @@ const MapScreen = ({ navigation, route }) => {
           }
         } else {
           const message = String(edgeResult.error?.message || "").toLowerCase();
-          if (!message.includes("unsupported action")) {
+          const shouldFallback =
+            message.includes("unsupported action") ||
+            isRecoverableOwnershipConstraintError(edgeResult.error);
+          if (!shouldFallback) {
             throw edgeResult.error;
           }
         }
@@ -1598,6 +1809,39 @@ const MapScreen = ({ navigation, route }) => {
         return existingOwnedRes.data.id;
       }
 
+      const existingByPreferredNameRes = await writer
+        .from("layers")
+        .select("id,name,owner_id")
+        .eq("owner_type", "user")
+        .eq("kind", "user_posts")
+        .eq("name", layerName)
+        .order("created_at", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (existingByPreferredNameRes.error) throw existingByPreferredNameRes.error;
+      if (existingByPreferredNameRes.data?.id) {
+        if (existingByPreferredNameRes.data.owner_id === actorUserId) {
+          setUserPostingLayerId(existingByPreferredNameRes.data.id);
+          return existingByPreferredNameRes.data.id;
+        }
+        if (!existingByPreferredNameRes.data.owner_id) {
+          const ownerClaimRes = await writer
+            .from("layers")
+            .update({ owner_id: actorUserId })
+            .eq("id", existingByPreferredNameRes.data.id);
+          if (
+            ownerClaimRes.error &&
+            !isRecoverableOwnershipConstraintError(ownerClaimRes.error)
+          ) {
+            throw ownerClaimRes.error;
+          }
+          if (!ownerClaimRes.error) {
+            setUserPostingLayerId(existingByPreferredNameRes.data.id);
+            return existingByPreferredNameRes.data.id;
+          }
+        }
+      }
+
       const legacyRes = await writer
         .from("layers")
         .select("id,name,owner_id")
@@ -1611,12 +1855,37 @@ const MapScreen = ({ navigation, route }) => {
           .from("layers")
           .update({ name: layerName, owner_id: actorUserId })
           .eq("id", legacyRes.data.id);
-        if (normalizeRes.error) throw normalizeRes.error;
-        setUserPostingLayerId(legacyRes.data.id);
-        return legacyRes.data.id;
+        if (!normalizeRes.error) {
+          setUserPostingLayerId(legacyRes.data.id);
+          return legacyRes.data.id;
+        }
+        if (!isRecoverableOwnershipConstraintError(normalizeRes.error)) {
+          throw normalizeRes.error;
+        }
       }
 
-      const createRes = await writer
+      const legacySystemRes = await writer
+        .from("layers")
+        .select("id,name")
+        .eq("owner_type", "system")
+        .eq("kind", "user_posts")
+        .in("name", [layerName, legacyLayerName])
+        .order("created_at", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (legacySystemRes.error) throw legacySystemRes.error;
+      if (legacySystemRes.data?.id) {
+        if (legacySystemRes.data.name !== layerName) {
+          await writer.from("layers").update({ name: layerName }).eq(
+            "id",
+            legacySystemRes.data.id,
+          );
+        }
+        setUserPostingLayerId(legacySystemRes.data.id);
+        return legacySystemRes.data.id;
+      }
+
+      let createRes = await writer
         .from("layers")
         .insert({
           kind: "user_posts",
@@ -1628,6 +1897,19 @@ const MapScreen = ({ navigation, route }) => {
         })
         .select("id")
         .single();
+      if (createRes.error && isRecoverableOwnershipConstraintError(createRes.error)) {
+        createRes = await writer
+          .from("layers")
+          .insert({
+            kind: "user_posts",
+            name: layerName,
+            enabled: true,
+            owner_type: "system",
+            is_public: false,
+          })
+          .select("id")
+          .single();
+      }
 
       if (createRes.error) throw createRes.error;
       setUserPostingLayerId(createRes.data.id);
@@ -1693,12 +1975,15 @@ const MapScreen = ({ navigation, route }) => {
   };
 
 useEffect(() => {
-  latestEnabledLayerKeyRef.current = toNormalizedLayerIdKey(enabledPinLayerKeys);
+  latestEnabledLayerKeyRef.current = buildLayerRequestKey(
+    enabledPinLayerKeys,
+    enabledAudienceKeys,
+  );
 
   // When layer IDs are unavailable (e.g., offline fallback layers like
   // `fallback-public` / `fallback-friends`), `enabledPinLayerKeys` will be empty
   // because it only contains UUID layer IDs.
-  if (enabledPinLayerKeys.length === 0) {
+  if (enabledPinLayerKeys.length === 0 && enabledAudienceKeys.length === 0) {
     // Invalidate any in-flight load so stale responses cannot repopulate pins.
     pinLoadRequestSeqRef.current += 1;
     const keepPins = shouldKeepPinsWhenNoUuidLayers(layers);
@@ -1713,10 +1998,10 @@ useEffect(() => {
     return undefined;
   }
 
-  loadPins(enabledPinLayerKeys);
+  loadPins(enabledPinLayerKeys, enabledAudienceKeys);
   const unsubscribe = subscribeToPins(enabledPinLayerKeys);
   return unsubscribe;
-}, [enabledPinLayerKeys, layers, restoreCachedPosts]);
+}, [enabledAudienceKeys, enabledPinLayerKeys, layers, restoreCachedPosts]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -1765,14 +2050,23 @@ useEffect(() => {
     }
   };
 
-  const loadPins = async (enabledLayerIdsInput) => {
+  const loadPins = async (
+    enabledLayerIdsInput,
+    enabledAudienceKeysInput = enabledAudienceKeys,
+  ) => {
     const requestSeq = ++pinLoadRequestSeqRef.current;
-    const requestLayerKey = toNormalizedLayerIdKey(enabledLayerIdsInput);
+    const requestLayerKey = buildLayerRequestKey(
+      enabledLayerIdsInput,
+      enabledAudienceKeysInput,
+    );
     const isStaleRequest = () =>
       requestSeq !== pinLoadRequestSeqRef.current ||
       requestLayerKey !== latestEnabledLayerKeyRef.current;
 
-    if (!enabledLayerIdsInput || enabledLayerIdsInput.length === 0) {
+    if (
+      (!enabledLayerIdsInput || enabledLayerIdsInput.length === 0) &&
+      (!enabledAudienceKeysInput || enabledAudienceKeysInput.length === 0)
+    ) {
       if (isStaleRequest()) return;
       if (shouldKeepPinsWhenNoUuidLayers(layers)) {
         restoreCachedPosts();
@@ -1827,12 +2121,14 @@ useEffect(() => {
           (enabledLayerIdsInput || []).filter((id) => isUuid(String(id || ""))),
         ),
       );
+      const normalizedAudienceKeys = normalizeAudienceKeys(enabledAudienceKeysInput);
       logLayerTrace("loadPins:enabledLayerIds", {
         requestSeq,
         readActorUserId,
         resolvedRequestUserId,
         hasAccessToken: Boolean(readAccessToken),
         enabledLayerIds,
+        enabledAudienceKeys: normalizedAudienceKeys,
         enabledLayers: layers
           .filter((layer) => enabledLayerIds.includes(layer.id))
           .map((layer) => ({
@@ -1842,7 +2138,7 @@ useEffect(() => {
             kind: layer.kind,
           })),
       });
-      if (enabledLayerIds.length === 0) {
+      if (enabledLayerIds.length === 0 && normalizedAudienceKeys.length === 0) {
         if (isStaleRequest()) return;
         if (shouldKeepPinsWhenNoUuidLayers(layers)) {
           restoreCachedPosts();
@@ -1858,8 +2154,8 @@ useEffect(() => {
         reader,
         layers,
         enabledLayerIds,
+        enabledAudienceKeys: normalizedAudienceKeys,
         ownUserId,
-        currentUser,
         accessToken: readAccessToken,
         refreshToken: readRefreshToken,
         resolvedRequestUserId,
@@ -1924,7 +2220,13 @@ useEffect(() => {
     const refreshedEnabledLayerIds = getEnabledLayerIdsForMap(
       sourceLayers,
     );
-    if (refreshedEnabledLayerIds.length === 0) {
+    const refreshedEnabledAudienceKeys = getEnabledAudienceKeysForMap(
+      sourceLayers,
+    );
+    if (
+      refreshedEnabledLayerIds.length === 0 &&
+      refreshedEnabledAudienceKeys.length === 0
+    ) {
       if (shouldKeepPinsWhenNoUuidLayers(sourceLayers)) {
         // Offline/fallback-only state.
         restoreCachedPosts();
@@ -1935,7 +2237,7 @@ useEffect(() => {
       }
       return;
     }
-    await loadPins(refreshedEnabledLayerIds);
+    await loadPins(refreshedEnabledLayerIds, refreshedEnabledAudienceKeys);
   }, [
     communityMapContext?.id,
     currentUser?.id,
@@ -2085,6 +2387,17 @@ useEffect(() => {
     setSelectedLayerId(nextSelected);
 
     try {
+      if (!isUuid(String(layerId || ""))) {
+        // Fallback system audiences (`fallback-public` / `fallback-friends`)
+        // are local-only toggles when canonical system UUID layers are absent.
+        const toggledLayer = optimisticLayers.find((layer) => layer.id === layerId);
+        const key = getPinLayerKeyFromLayer(toggledLayer);
+        if (["public", "friends"].includes(key)) {
+          localFallbackEnabledByAudienceRef.current.set(key, Boolean(nextEnabled));
+        }
+        return;
+      }
+
       const session = await getActiveSession();
       const accessToken = session?.access_token || null;
       const refreshToken = session?.refresh_token || null;
@@ -2550,16 +2863,6 @@ useEffect(() => {
     }
 
     const mediaSource = String(postData?.mediaSource || "").toLowerCase();
-    if (
-      mediaSource === "library" &&
-      postData.locationMode === "current"
-    ) {
-      Alert.alert(
-        "Choose On Map Required",
-        "Library media must be posted by choosing a location on the map.",
-      );
-      return;
-    }
 
     const rawDrawingCoords = Array.isArray(drawingCoords) ? drawingCoords : [];
     const finalizedDrawingCoords =
@@ -2662,7 +2965,7 @@ useEffect(() => {
       });
       const postableLayerIdSet = new Set(postableLayerRows.map((layer) => layer.id));
       const communityLayerRows = layers.filter(
-        (layer) => layer.owner_type === "community" && layer.isEnabled,
+        (layer) => layer.owner_type === "community",
       );
       const communityLayerIdSet = new Set(
         communityLayerRows.map((layer) => layer.id),
@@ -2785,13 +3088,24 @@ useEffect(() => {
         };
       }
 
+      let persistedMediaUrl = postData.mediaUrl || null;
+      if (persistedMediaUrl) {
+        const uploadResult = await uploadPostMediaToStorage({
+          session,
+          userId: activeUserId,
+          mediaUrl: persistedMediaUrl,
+          mediaType: postData.mediaType,
+        });
+        persistedMediaUrl = uploadResult?.mediaPointer || null;
+      }
+
       const insertRows = [
         {
           user_id: activeUserId,
           type: postData.mediaUrl ? "media" : "text",
           content: postData.content,
           caption: postData.title,
-          media_url: postData.mediaUrl || null,
+          media_url: persistedMediaUrl,
           media_type: postData.mediaType,
           lat: storedLat,
           lng: storedLng,
@@ -2801,7 +3115,8 @@ useEffect(() => {
           explicit_layer_id: resolvedExtraCommunityLayerId,
           author_name: activeUser?.user_metadata?.display_name || "Anonymous",
           author_username: activeUser?.user_metadata?.username || "",
-          posted_from_current_location: postData.locationMode === "current",
+          posted_from_current_location:
+            postData.locationMode === "current" && mediaSource !== "library",
           geometry,
         },
       ];
@@ -2852,8 +3167,10 @@ useEffect(() => {
         layers.map((layer) => [layer.id, layer.layer_icon || null]),
       );
       const optimisticCreatedAt = new Date().toISOString();
+      const optimisticMediaUrl = postData.mediaUrl || persistedMediaUrl || null;
       const optimisticRows = insertRows.map((row, index) => ({
         ...row,
+        media_url: optimisticMediaUrl,
         id: `temp-${crossPostGroupId}-${index}`,
         created_at: optimisticCreatedAt,
         updated_at: optimisticCreatedAt,
@@ -2867,7 +3184,10 @@ useEffect(() => {
         return [...optimisticRows, ...previous];
       });
 
-      if (Array.isArray(enabledPinLayerKeys) && enabledPinLayerKeys.length > 0) {
+      if (
+        (Array.isArray(enabledPinLayerKeys) && enabledPinLayerKeys.length > 0) ||
+        enabledAudienceKeys.length > 0
+      ) {
         loadPins(enabledPinLayerKeys);
       }
       if (
@@ -4056,7 +4376,7 @@ useEffect(() => {
       <MapView
         ref={mapRef}
         style={styles.map}
-        provider={PROVIDER_GOOGLE}
+        provider={mapProvider}
         initialRegion={region}
         onLayout={(event) => {
           const { width, height } = event.nativeEvent.layout || {};
@@ -4081,7 +4401,8 @@ useEffect(() => {
         onRegionChange={handleRegionChange}
         onRegionChangeComplete={handleRegionChangeComplete}
         mapType={mapType}
-        customMapStyle={isDark ? MAP_DARK_STYLE : []}
+        customMapStyle={mapProvider && isDark ? MAP_DARK_STYLE : undefined}
+        userInterfaceStyle={mapProvider ? undefined : appleMapInterfaceStyle}
         onPress={isPickingPostLocation ? handleMapPress : undefined}
         onLongPress={undefined}
         onPanDrag={

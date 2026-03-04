@@ -19,7 +19,7 @@ export const isUserPostingLayer = (layer) => {
 
 export const buildFallbackLayers = (userId) => {
   const asEnabled = Boolean(userId);
-  return [
+  const baseLayers = [
     {
       id: "fallback-public",
       name: "Public",
@@ -36,6 +36,14 @@ export const buildFallbackLayers = (userId) => {
       sourceCommunityIds: [],
       viewerCanManage: true,
     },
+  ];
+
+  if (!userId) {
+    return baseLayers;
+  }
+
+  return [
+    ...baseLayers,
     {
       id: "fallback-friends",
       name: "Friends",
@@ -90,6 +98,26 @@ export const getEnabledLayerIdsForMap = (layerRows) => {
     .map((layer) => layer.id);
 
   return Array.from(new Set(enabledLayerIds));
+};
+
+export const getEnabledAudienceKeysForMap = (layerRows) => {
+  const enabledAudienceKeys = new Set();
+
+  (Array.isArray(layerRows) ? layerRows : []).forEach((layer) => {
+    if (!layer?.isEnabled) return;
+    const canDriveMap =
+      layer?.viewerCanManage !== false || Boolean(layer?.isForcedEnabled);
+    if (!canDriveMap) return;
+
+    const ownerType = layer?.owner_type || "system";
+    if (ownerType !== "system") return;
+
+    const key = getPinLayerKeyFromLayer(layer);
+    if (!["public", "friends", "private"].includes(key)) return;
+    enabledAudienceKeys.add(key);
+  });
+
+  return Array.from(enabledAudienceKeys);
 };
 
 const getEnabledRenderableLayers = (layerRows) =>

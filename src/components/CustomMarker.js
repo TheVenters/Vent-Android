@@ -1,9 +1,9 @@
 import React, { forwardRef, memo, useEffect, useMemo, useState } from "react";
-import { View, Text, StyleSheet, Image } from "react-native";
+import { View, Text, StyleSheet, Image, Platform } from "react-native";
 import { Marker, Callout } from "react-native-maps";
 import { COLORS } from "../constants/theme";
 
-const CustomMarkerComponent = ({ pin, onPress }, ref) => {
+const CustomMarkerComponent = ({ pin, onPress, onMarkerPress }, ref) => {
   const [tracksViewChanges, setTracksViewChanges] = useState(
     Boolean(pin?.author_avatar_url),
   );
@@ -40,9 +40,15 @@ const CustomMarkerComponent = ({ pin, onPress }, ref) => {
         latitude: pin.lat,
         longitude: pin.lng,
       }}
+      title={pin.caption || "Untitled"}
+      description={(pin.author_name || "Anonymous").trim()}
+      tappable
+      onPress={() => onMarkerPress && onMarkerPress(pin)}
+      onSelect={() => onMarkerPress && onMarkerPress(pin)}
+      onCalloutPress={() => onPress && onPress(pin)}
       tracksViewChanges={tracksViewChanges}
     >
-      <View style={styles.markerWrap}>
+      <View collapsable={false} style={styles.markerWrap}>
         {pin.posted_from_current_location && (
           <View style={styles.locationFlareRing} />
         )}
@@ -66,19 +72,21 @@ const CustomMarkerComponent = ({ pin, onPress }, ref) => {
         </View>
         {pin.posted_from_current_location && (
           <View style={styles.locationFlareBadge}>
-            <Text style={styles.locationFlareBadgeText}>✦</Text>
+            <Text style={styles.locationFlareBadgeText}>âœ¦</Text>
           </View>
         )}
       </View>
-      <Callout onPress={() => onPress && onPress(pin)}>
-        <View style={styles.callout}>
-          <Text style={styles.calloutTitle}>{pin.caption || "Untitled"}</Text>
-          <Text style={styles.calloutMeta}>
-            {(pin.author_name || "Anonymous").trim()}
-          </Text>
-          <Text style={styles.calloutHint}>Tap to open post details</Text>
-        </View>
-      </Callout>
+      {Platform.OS !== "android" ? (
+        <Callout>
+          <View style={styles.callout}>
+            <Text style={styles.calloutTitle}>{pin.caption || "Untitled"}</Text>
+            <Text style={styles.calloutMeta}>
+              {(pin.author_name || "Anonymous").trim()}
+            </Text>
+            <Text style={styles.calloutHint}>Tap to open post details</Text>
+          </View>
+        </Callout>
+      ) : null}
     </Marker>
   );
 };
@@ -101,21 +109,22 @@ const areMarkerPropsEqual = (prevProps, nextProps) => {
 
 const styles = StyleSheet.create({
   markerWrap: {
-    width: 52,
-    height: 52,
+    width: Platform.OS === "android" ? 36 : 60,
+    height: Platform.OS === "android" ? 36 : 60,
     alignItems: "center",
     justifyContent: "center",
+    overflow: "visible",
   },
   locationFlareRing: {
     position: "absolute",
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    borderWidth: 2,
+    width: Platform.OS === "android" ? 34 : 40,
+    height: Platform.OS === "android" ? 34 : 40,
+    borderRadius: Platform.OS === "android" ? 17 : 20,
+    borderWidth: Platform.OS === "android" ? 1 : 2,
     borderColor: "rgba(255, 122, 89, 0.75)",
     backgroundColor: "rgba(255, 122, 89, 0.12)",
-    top: 2,
-    left: 2,
+    top: Platform.OS === "android" ? 1 : 10,
+    left: Platform.OS === "android" ? 1 : 10,
   },
   markerContainer: {
     width: 34,
@@ -146,11 +155,11 @@ const styles = StyleSheet.create({
   },
   locationFlareBadge: {
     position: "absolute",
-    top: 5,
-    right: 5,
-    width: 16,
-    height: 16,
-    borderRadius: 8,
+    top: Platform.OS === "android" ? 2 : 18,
+    right: Platform.OS === "android" ? 2 : 18,
+    width: Platform.OS === "android" ? 10 : 12,
+    height: Platform.OS === "android" ? 10 : 12,
+    borderRadius: Platform.OS === "android" ? 5 : 6,
     backgroundColor: "#FF7A59",
     alignItems: "center",
     justifyContent: "center",
@@ -159,9 +168,9 @@ const styles = StyleSheet.create({
   },
   locationFlareBadgeText: {
     color: COLORS.white,
-    fontSize: 9,
+    fontSize: Platform.OS === "android" ? 6 : 7,
     fontWeight: "700",
-    lineHeight: 10,
+    lineHeight: Platform.OS === "android" ? 7 : 8,
   },
   callout: {
     minWidth: 180,

@@ -337,6 +337,8 @@ const ActionButtonCluster = ({
     transform: [{ translateY: -keyboardOffset.value }],
   }));
   const menuItems = ["Communities", "Friends", "Account", "Layers", "Add"];
+  const isMenuInteractive = expanded && !showPostForm && !showLayersPanel;
+  const isArrowInteractive = !expanded && !showPostForm && !showLayersPanel;
 
   return (
     <View style={styles.overlay} pointerEvents="box-none">
@@ -349,11 +351,15 @@ const ActionButtonCluster = ({
       )}
 
       <Animated.View style={[styles.column, keyboardShiftStyle]}>
-        <Animated.View style={[styles.menuColumn, menuStyle]}>
+        <Animated.View
+          style={[styles.menuColumn, menuStyle]}
+          pointerEvents={isMenuInteractive ? "auto" : "none"}
+        >
           {menuItems.map((item) => (
             <TouchableOpacity
               key={item}
               style={styles.menuItem}
+              disabled={!isMenuInteractive}
               onPress={() => handleMenuPress(item)}
             >
               <Text style={styles.menuItemText}>{item}</Text>
@@ -361,9 +367,13 @@ const ActionButtonCluster = ({
           ))}
         </Animated.View>
 
-        <Animated.View style={arrowButtonStyle}>
+        <Animated.View
+          style={arrowButtonStyle}
+          pointerEvents={isArrowInteractive ? "auto" : "none"}
+        >
           <TouchableOpacity
             style={[styles.button, styles.arrowButton]}
+            disabled={!isArrowInteractive}
             onPress={goToNearestPin}
           >
             <Text style={styles.buttonText}>{"➜"}</Text>
@@ -371,7 +381,10 @@ const ActionButtonCluster = ({
         </Animated.View>
 
         <View style={styles.aRow}>
-          <Animated.View style={[styles.searchBar, searchBarStyle]}>
+          <Animated.View
+            style={[styles.searchBar, searchBarStyle]}
+            pointerEvents={expanded ? "auto" : "none"}
+          >
             <TextInput
               style={styles.searchInput}
               placeholder="Search..."
@@ -380,6 +393,7 @@ const ActionButtonCluster = ({
               onChangeText={setSearchQuery}
               onSubmitEditing={handleSearchSubmit}
               returnKeyType="search"
+              editable={expanded}
             />
           </Animated.View>
 

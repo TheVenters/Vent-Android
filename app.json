@@ -35,9 +35,13 @@
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.CAMERA",
         "android.permission.READ_EXTERNAL_STORAGE",
-        "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.RECORD_AUDIO"
-      ]
+      ],
+        "config": {
+          "googleMaps": {
+            "apiKey": "AIzaSyBKcze8d6C31L5GxPVh7aNj2xjFSC67t08"
+    }
+  }
     },
     "web": {
       "favicon": "./assets/favicon.png",
@@ -50,8 +54,9 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "089b98c9-494a-4924-a719-133cbe8e04c2"
+        "projectId": "d6ecfe59-c8d3-4cb4-ab6f-651894db38c6"
       }
-    }
+    },
+    "owner": "jackmoran111998"
   }
 }
