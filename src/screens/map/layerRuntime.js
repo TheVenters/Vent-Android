@@ -19,7 +19,7 @@ export const isUserPostingLayer = (layer) => {
 
 export const buildFallbackLayers = (userId) => {
   const asEnabled = Boolean(userId);
-  return [
+  const baseLayers = [
     {
       id: "fallback-public",
       name: "Public",
@@ -36,6 +36,14 @@ export const buildFallbackLayers = (userId) => {
       sourceCommunityIds: [],
       viewerCanManage: true,
     },
+  ];
+
+  if (!userId) {
+    return baseLayers;
+  }
+
+  return [
+    ...baseLayers,
     {
       id: "fallback-friends",
       name: "Friends",

@@ -26,6 +26,7 @@ import {
 } from "../services/supabase";
 import { SIZES } from "../constants/theme";
 import { useAppTheme } from "../context/ThemeContext";
+import { getBrandAssetsForTheme } from "../constants/brandAssets";
 
 const AccountScreen = ({ navigation, route }) => {
   const [email, setEmail] = useState("");
@@ -49,7 +50,8 @@ const AccountScreen = ({ navigation, route }) => {
   const [joinedLayersError, setJoinedLayersError] = useState("");
   const [viewedProfile, setViewedProfile] = useState(null);
   const [selectedPost, setSelectedPost] = useState(null);
-  const { palette } = useAppTheme();
+  const { palette, isDark } = useAppTheme();
+  const brandAssets = getBrandAssetsForTheme(isDark);
   const styles = createStyles(palette);
   const profileUserId = String(route?.params?.profileUserId || "");
   const isFriendProfileRoute = Boolean(route?.params?.fromFriends);
@@ -745,13 +747,22 @@ const AccountScreen = ({ navigation, route }) => {
     }
   };
 
-  const TopBar = () => (
+  const renderTopBar = () => (
     <View style={styles.topBar}>
       <TouchableOpacity
         style={styles.backButton}
         onPress={() => {
-          if (isFriendProfileRoute && navigation.canGoBack()) {
-            navigation.goBack();
+          if (isFriendProfileRoute) {
+            if (navigation.canGoBack()) {
+              navigation.goBack();
+              return;
+            }
+            const parent = navigation.getParent?.();
+            if (parent?.navigate) {
+              parent.navigate("Friends");
+              return;
+            }
+            navigation.navigate("Friends");
             return;
           }
           navigation.navigate("Map");
@@ -774,6 +785,13 @@ const AccountScreen = ({ navigation, route }) => {
     </View>
   );
 
+  const renderBrandHeader = () => (
+    <View style={styles.logo}>
+      <Image source={brandAssets.logo} style={styles.logoImage} resizeMode="contain" />
+      <Text style={styles.tagline}>Share your world</Text>
+    </View>
+  );
+
   if (currentUser) {
     const profileTargetUserId =
       isViewingOtherProfile && profileUserId ? profileUserId : currentUser.id;
@@ -792,13 +810,10 @@ const AccountScreen = ({ navigation, route }) => {
 
     return (
       <View style={styles.container}>
-        <TopBar />
+        {renderTopBar()}
         <ScrollView contentContainerStyle={styles.profileScrollContent}>
           <View style={styles.profileContainer}>
-            <View style={styles.logo}>
-              <Text style={styles.logoText}>Vent</Text>
-              <Text style={styles.tagline}>Share your world</Text>
-            </View>
+            {renderBrandHeader()}
 
             <TouchableOpacity
               style={styles.avatarWrap}
@@ -1060,12 +1075,9 @@ const AccountScreen = ({ navigation, route }) => {
       behavior={Platform.OS === "ios" ? "padding" : "height"}
       style={styles.container}
     >
-      <TopBar />
+      {renderTopBar()}
       <ScrollView contentContainerStyle={styles.scrollContent}>
-        <View style={styles.logo}>
-          <Text style={styles.logoText}>Vent</Text>
-          <Text style={styles.tagline}>Share your world</Text>
-        </View>
+        {renderBrandHeader()}
 
         {resetStep === "email" ? (
           <View style={styles.form}>
@@ -1227,6 +1239,7 @@ const AccountScreen = ({ navigation, route }) => {
               <TouchableOpacity
                 style={styles.forgotPasswordButton}
                 onPress={handleForgotPassword}
+                activeOpacity={0.85}
               >
                 <Text style={styles.forgotPasswordText}>
                   Forgot Password?
@@ -1258,7 +1271,11 @@ const AccountScreen = ({ navigation, route }) => {
                   ? "Already have an account? "
                   : "Don't have an account? "}
               </Text>
-              <TouchableOpacity onPress={toggleMode}>
+              <TouchableOpacity
+                style={styles.footerLinkButton}
+                onPress={toggleMode}
+                activeOpacity={0.85}
+              >
                 <Text style={styles.footerLink}>
                   {isSignUp ? "Sign In" : "Sign Up"}
                 </Text>
@@ -1295,10 +1312,9 @@ const createStyles = (palette) =>
       alignItems: "center",
       marginBottom: SIZES.xxl * 2,
     },
-    logoText: {
-      fontSize: 48,
-      fontWeight: "700",
-      color: palette.primary,
+    logoImage: {
+      width: 120,
+      height: 120,
       marginBottom: SIZES.sm,
     },
     tagline: {
@@ -1347,12 +1363,21 @@ const createStyles = (palette) =>
     },
     forgotPasswordButton: {
       alignItems: "center",
+      justifyContent: "center",
+      alignSelf: "center",
+      minWidth: 220,
+      borderRadius: SIZES.radiusLg,
+      borderWidth: 1,
+      borderColor: palette.primary,
+      backgroundColor: palette.mutedSurface,
+      paddingVertical: SIZES.md,
+      paddingHorizontal: SIZES.xl,
       marginTop: SIZES.md,
       marginBottom: SIZES.sm,
     },
     forgotPasswordText: {
       color: palette.primary,
-      fontSize: SIZES.sm,
+      fontSize: SIZES.md,
       fontWeight: "600",
     },
     cancelButton: {
@@ -1403,16 +1428,28 @@ const createStyles = (palette) =>
       fontSize: 24,
     },
     footer: {
-      flexDirection: "row",
+      alignItems: "center",
       justifyContent: "center",
+      gap: SIZES.sm,
     },
     footerText: {
       color: palette.subtext,
       fontSize: SIZES.sm,
     },
+    footerLinkButton: {
+      minWidth: 180,
+      alignItems: "center",
+      justifyContent: "center",
+      borderRadius: SIZES.radiusLg,
+      borderWidth: 1,
+      borderColor: palette.primary,
+      backgroundColor: palette.mutedSurface,
+      paddingVertical: SIZES.md,
+      paddingHorizontal: SIZES.xl,
+    },
     footerLink: {
       color: palette.primary,
-      fontSize: SIZES.sm,
+      fontSize: SIZES.md,
       fontWeight: "600",
     },
     profileInfo: {

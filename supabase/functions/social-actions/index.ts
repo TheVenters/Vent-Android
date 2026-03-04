@@ -1611,6 +1611,14 @@ const handleEnsureUserPostingLayer = async (
   const legacyName = asString(payload.legacyName);
   const kind = asString(payload.kind) || "user_posts";
   const fallbackName = preferredName || legacyName || `user-${actorId}-posts`;
+  const isRecoverableOwnerConstraintError = (error: unknown) => {
+    const message = asString((error as { message?: unknown })?.message).toLowerCase();
+    return (
+      message.includes("layers_owner_consistency_check") ||
+      message.includes("layers_owner_shape_check") ||
+      message.includes("layers_owner_id_fkey")
+    );
+  };
 
   const ownedRes = await adminClient
     .from("layers")
@@ -1641,6 +1649,41 @@ const handleEnsureUserPostingLayer = async (
     return jsonResponse(200, { success: true, layer: ownedLayer });
   }
 
+  if (preferredName) {
+    const preferredRes = await adminClient
+      .from("layers")
+      .select("id,name,kind,owner_type,owner_id,enabled,is_public,created_at")
+      .eq("owner_type", "user")
+      .eq("kind", kind)
+      .eq("name", preferredName)
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (preferredRes.error) {
+      return jsonResponse(400, { error: preferredRes.error.message });
+    }
+    if (preferredRes.data?.id) {
+      const preferredOwnerId = asString(preferredRes.data.owner_id);
+      if (preferredOwnerId === actorId) {
+        return jsonResponse(200, { success: true, layer: preferredRes.data });
+      }
+      if (!preferredOwnerId) {
+        const claimPreferredRes = await adminClient
+          .from("layers")
+          .update({ owner_id: actorId })
+          .eq("id", preferredRes.data.id)
+          .select("id,name,kind,owner_type,owner_id,enabled,is_public")
+          .single();
+        if (claimPreferredRes.error && !isRecoverableOwnerConstraintError(claimPreferredRes.error)) {
+          return jsonResponse(400, { error: claimPreferredRes.error.message });
+        }
+        if (!claimPreferredRes.error) {
+          return jsonResponse(200, { success: true, layer: claimPreferredRes.data });
+        }
+      }
+    }
+  }
+
   if (legacyName) {
     const legacyRes = await adminClient
       .from("layers")
@@ -1668,14 +1711,43 @@ const handleEnsureUserPostingLayer = async (
         .eq("id", reusableLegacyLayer.id)
         .select("id,name,kind,owner_type,owner_id,enabled,is_public")
         .single();
-      if (claimRes.error) {
+      if (claimRes.error && !isRecoverableOwnerConstraintError(claimRes.error)) {
         return jsonResponse(400, { error: claimRes.error.message });
       }
-      return jsonResponse(200, { success: true, layer: claimRes.data });
+      if (!claimRes.error) {
+        return jsonResponse(200, { success: true, layer: claimRes.data });
+      }
     }
   }
 
-  const createRes = await adminClient
+  const systemRes = await adminClient
+    .from("layers")
+    .select("id,name,kind,owner_type,owner_id,enabled,is_public,created_at")
+    .eq("owner_type", "system")
+    .eq("kind", kind)
+    .in("name", Array.from(new Set([preferredName, legacyName, fallbackName].filter(Boolean))))
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (systemRes.error) {
+    return jsonResponse(400, { error: systemRes.error.message });
+  }
+  if (systemRes.data?.id) {
+    if (preferredName && systemRes.data.name !== preferredName) {
+      const renameSystemRes = await adminClient
+        .from("layers")
+        .update({ name: preferredName })
+        .eq("id", systemRes.data.id)
+        .select("id,name,kind,owner_type,owner_id,enabled,is_public")
+        .single();
+      if (!renameSystemRes.error) {
+        return jsonResponse(200, { success: true, layer: renameSystemRes.data });
+      }
+    }
+    return jsonResponse(200, { success: true, layer: systemRes.data });
+  }
+
+  let createRes = await adminClient
     .from("layers")
     .insert({
       kind,
@@ -1687,6 +1759,19 @@ const handleEnsureUserPostingLayer = async (
     })
     .select("id,name,kind,owner_type,owner_id,enabled,is_public")
     .single();
+  if (createRes.error && isRecoverableOwnerConstraintError(createRes.error)) {
+    createRes = await adminClient
+      .from("layers")
+      .insert({
+        kind,
+        name: fallbackName,
+        enabled: true,
+        owner_type: "system",
+        is_public: false,
+      })
+      .select("id,name,kind,owner_type,owner_id,enabled,is_public")
+      .single();
+  }
   if (createRes.error) {
     return jsonResponse(400, { error: createRes.error.message });
   }

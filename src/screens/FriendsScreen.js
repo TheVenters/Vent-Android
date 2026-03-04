@@ -333,6 +333,15 @@ const FriendsScreen = ({ navigation }) => {
   if (!currentUser) {
     return (
       <View style={styles.container}>
+        <View style={styles.header}>
+          <TouchableOpacity
+            style={styles.backButton}
+            onPress={() => navigation.navigate('Map')}
+          >
+            <Text style={styles.backButtonText}>{'< Map'}</Text>
+          </TouchableOpacity>
+          <Text style={styles.title}>Friends</Text>
+        </View>
         <View style={styles.emptyState}>
           <Text style={styles.emptyIcon}>🔒</Text>
           <Text style={styles.emptyTitle}>Sign in to connect</Text>
@@ -341,7 +350,12 @@ const FriendsScreen = ({ navigation }) => {
           </Text>
           <TouchableOpacity
             style={styles.button}
-            onPress={() => navigation.navigate('Account')}
+            onPress={() =>
+              navigation.navigate('Account', {
+                screen: 'AccountHome',
+                params: { fromFriends: true },
+              })
+            }
           >
             <Text style={styles.buttonText}>Sign In</Text>
           </TouchableOpacity>
