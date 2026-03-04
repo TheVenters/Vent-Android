@@ -5,6 +5,7 @@ import {
   TouchableOpacity,
   Text,
   TextInput,
+  Image,
   Platform,
   Keyboard,
   Dimensions,
@@ -20,6 +21,7 @@ import { ACTION_BUTTON } from "../constants/theme";
 import PostCreationForm from "./PostCreationForm";
 import LayersControlPanel from "./LayersControlPanel";
 import { useAppTheme } from "../context/ThemeContext";
+import { getBrandAssetsForTheme } from "../constants/brandAssets";
 
 const ActionButtonCluster = ({
   navigation,
@@ -72,13 +74,14 @@ const ActionButtonCluster = ({
     [toRadians],
   );
 
-  const { palette } = useAppTheme();
+  const { palette, isDark } = useAppTheme();
+  const brandAssets = useMemo(() => getBrandAssetsForTheme(isDark), [isDark]);
   const styles = createStyles(palette);
   const [expanded, setExpanded] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [showPostForm, setShowPostForm] = useState(false);
   const [showLayersPanel, setShowLayersPanel] = useState(false);
-  const nextNearestPinIndexRef = useRef(0);
+  const lastArrowTargetIdRef = useRef(null);
 
   const expandProgress = useSharedValue(0);
   const keyboardOffset = useSharedValue(0);
@@ -145,10 +148,10 @@ const ActionButtonCluster = ({
 
   const nearestPinTargets = useMemo(() => {
     const sourcePins =
-      Array.isArray(allPins) && allPins.length > 0
-        ? allPins
-        : Array.isArray(pins)
-          ? pins
+      Array.isArray(pins) && pins.length > 0
+        ? pins
+        : Array.isArray(allPins)
+          ? allPins
           : [];
     const validPins = sourcePins.filter((pin) => {
       const lat = Number(pin?.lat);
@@ -182,23 +185,19 @@ const ActionButtonCluster = ({
     return sorted;
   }, [allPins, pins, userLocation, distanceMeters]);
 
-  const nearestPinTargetsKey = useMemo(
-    () => nearestPinTargets.map((pin) => String(pin?.id || "")).join("|"),
-    [nearestPinTargets],
-  );
-
-  useEffect(() => {
-    nextNearestPinIndexRef.current = 0;
-  }, [nearestPinTargetsKey]);
-
   const goToNearestPin = useCallback(() => {
     if (!nearestPinTargets.length) return;
+    const lastTargetId = lastArrowTargetIdRef.current;
+    const currentIndex = nearestPinTargets.findIndex(
+      (pin) => String(pin?.id || "") === String(lastTargetId || ""),
+    );
     const nextIndex =
-      nextNearestPinIndexRef.current % Math.max(1, nearestPinTargets.length);
+      currentIndex >= 0
+        ? (currentIndex + 1) % nearestPinTargets.length
+        : 0;
     const targetPin = nearestPinTargets[nextIndex];
-    nextNearestPinIndexRef.current =
-      (nextIndex + 1) % Math.max(1, nearestPinTargets.length);
     if (!targetPin) return;
+    lastArrowTargetIdRef.current = String(targetPin?.id || "");
 
     if (mapRef?.current) {
       mapRef.current.animateToRegion(
@@ -336,7 +335,31 @@ const ActionButtonCluster = ({
   const keyboardShiftStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: -keyboardOffset.value }],
   }));
-  const menuItems = ["Communities", "Friends", "Account", "Layers", "Add"];
+  const menuItems = useMemo(
+    () => [
+      {
+        key: "Communities",
+        icon: brandAssets.menu.communities,
+      },
+      {
+        key: "Friends",
+        icon: brandAssets.menu.friends,
+      },
+      {
+        key: "Account",
+        icon: brandAssets.menu.account,
+      },
+      {
+        key: "Layers",
+        icon: brandAssets.menu.layers,
+      },
+      {
+        key: "Add",
+        icon: brandAssets.menu.add,
+      },
+    ],
+    [brandAssets],
+  );
 
   return (
     <View style={styles.overlay} pointerEvents="box-none">
@@ -352,11 +375,13 @@ const ActionButtonCluster = ({
         <Animated.View style={[styles.menuColumn, menuStyle]}>
           {menuItems.map((item) => (
             <TouchableOpacity
-              key={item}
+              key={item.key}
               style={styles.menuItem}
-              onPress={() => handleMenuPress(item)}
+              onPress={() => handleMenuPress(item.key)}
+              accessibilityRole="button"
+              accessibilityLabel={item.key}
             >
-              <Text style={styles.menuItemText}>{item}</Text>
+              <Image source={item.icon} style={styles.menuItemIcon} resizeMode="contain" />
             </TouchableOpacity>
           ))}
         </Animated.View>
@@ -387,7 +412,7 @@ const ActionButtonCluster = ({
             style={[styles.button, styles.aButton]}
             onPress={toggleExpand}
           >
-            <Text style={styles.aButtonText}>Vent</Text>
+            <Image source={brandAssets.logo} style={styles.aButtonLogo} resizeMode="contain" />
           </TouchableOpacity>
         </View>
       </Animated.View>
@@ -461,17 +486,18 @@ const createStyles = (palette) =>
       elevation: 0,
     },
     aButton: {
-      backgroundColor: palette.primary,
+      backgroundColor: palette.surface,
+      borderWidth: 1,
+      borderColor: palette.border,
     },
     buttonText: {
       fontSize: 22,
       fontWeight: "700",
       color: palette.text,
     },
-    aButtonText: {
-      fontSize: 18,
-      fontWeight: "700",
-      color: palette.onPrimary,
+    aButtonLogo: {
+      width: 34,
+      height: 34,
     },
     searchBar: {
       height: ACTION_BUTTON.SIZE,
@@ -492,28 +518,28 @@ const createStyles = (palette) =>
     },
     menuColumn: {
       alignItems: "flex-end",
-      marginBottom: 2,
+      marginBottom: 4,
       zIndex: 1000,
       elevation: 1000,
     },
     menuItem: {
       backgroundColor: palette.surface,
-      width: 120,
+      width: ACTION_BUTTON.SIZE,
+      height: ACTION_BUTTON.SIZE,
       borderRadius: ACTION_BUTTON.SIZE / 2,
-      paddingVertical: 12,
-      marginBottom: 2,
+      marginBottom: 8,
       shadowColor: "#000",
       shadowOffset: { width: 0, height: 2 },
       shadowOpacity: 0.15,
       shadowRadius: 6,
       elevation: 1000,
       alignItems: "center",
+      justifyContent: "center",
       zIndex: 1000,
     },
-    menuItemText: {
-      fontSize: 14,
-      fontWeight: "600",
-      color: palette.text,
+    menuItemIcon: {
+      width: 70,
+      height: 70,
     },
   });
 

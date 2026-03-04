@@ -1,6 +1,8 @@
-import { getPinLayerKeyFromLayer } from "../../utils/layers";
+import {
+  getPinLayerKeyFromLayer,
+  isNamedUserPostsLayer,
+} from "../../utils/layers";
 import { hasValidCoordinate } from "./mapVisualEngine";
-import { isUserPostingLayer } from "./layerRuntime";
 import {
   fetchFriendListsViaEdgeFunction,
   fetchMyPinsViaEdgeFunction,
@@ -21,6 +23,24 @@ const normalizeAudienceValue = (value) =>
   String(value || "")
     .trim()
     .toLowerCase();
+
+const USER_POSTS_LAYER_NAME_REGEX = /^user-(.+)-posts$/i;
+const normalizeIdentityToken = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-");
+const extractUserPostsLayerSlug = (layer) => {
+  const match = String(layer?.name || "").trim().match(USER_POSTS_LAYER_NAME_REGEX);
+  return match ? normalizeIdentityToken(match[1]) : "";
+};
+const doesFriendScopedLayerMatchPinAuthor = (layer, pin) => {
+  const layerSlug = extractUserPostsLayerSlug(layer);
+  if (!layerSlug) return false;
+  const pinUserId = normalizeIdentityToken(pin?.user_id);
+  const pinUsername = normalizeIdentityToken(pin?.author_username);
+  return (pinUserId && pinUserId === layerSlug) || (pinUsername && pinUsername === layerSlug);
+};
 
 const loadMyPins = async (reader, userId, accessToken = null, refreshToken = null) => {
   if (!userId) return [];
@@ -110,12 +130,22 @@ export const resolvePinsForMap = async ({
     })),
   });
 
-  const enabledUserPostingLayerIds = enabledLayerIds.filter((layerId) =>
-    isUserPostingLayer(layerById.get(layerId)),
-  );
+  const enabledOwnUserPostingLayerIds = enabledLayerIds.filter((layerId) => {
+    const layerMeta = layerById.get(layerId);
+    if (!layerMeta) return false;
+    if (layerMeta?.isOwnUserPostsLayer) return true;
+    return (layerMeta?.owner_type || "system") === "user";
+  });
+  const enabledFriendScopedLayerIds = enabledLayerIds.filter((layerId) => {
+    const layerMeta = layerById.get(layerId);
+    if (!layerMeta) return false;
+    if (!isNamedUserPostsLayer(layerMeta)) return false;
+    return !layerMeta?.isOwnUserPostsLayer;
+  });
 
   logLayerTrace("resolvePinsForMap:enabledBuckets", {
-    enabledUserPostingLayerIds,
+    enabledOwnUserPostingLayerIds,
+    enabledFriendScopedLayerIds,
     enabledPublicLayerIds,
     enabledFriendsLayerIds,
     includePublicAudience,
@@ -175,6 +205,44 @@ export const resolvePinsForMap = async ({
     throw visiblePinsEdgeError;
   }
 
+  let acceptedFriendIds = [];
+  let acceptedFriendIdSet = new Set();
+  if (ownUserId && (includeFriendsAudience || enabledFriendScopedLayerIds.length > 0)) {
+    try {
+      const acceptedFriendsRes = await reader
+        .from("friends")
+        .select("user_id,friend_id,status")
+        .or(`user_id.eq.${ownUserId},friend_id.eq.${ownUserId}`)
+        .in("status", ["accepted", "active"]);
+      if (acceptedFriendsRes.error) throw acceptedFriendsRes.error;
+      acceptedFriendIds = Array.from(
+        new Set(
+          (acceptedFriendsRes.data || [])
+            .map((row) => (row.user_id === ownUserId ? row.friend_id : row.user_id))
+            .filter(Boolean)
+            .filter((id) => id !== ownUserId),
+        ),
+      );
+    } catch (error) {
+      if (!accessToken) throw error;
+      const friendListsRes = await fetchFriendListsViaEdgeFunction(
+        accessToken,
+        refreshToken,
+        ownUserId,
+      );
+      if (friendListsRes?.error) throw friendListsRes.error;
+      acceptedFriendIds = Array.from(
+        new Set(
+          (friendListsRes?.data?.friends || [])
+            .map((row) => row?.friend?.id || row?.friend_id || row?.user_id || null)
+            .filter(Boolean)
+            .filter((id) => id !== ownUserId),
+        ),
+      );
+    }
+    acceptedFriendIdSet = new Set(acceptedFriendIds);
+  }
+
   if (hasUsableDbAuthContext && enabledLayerIds.length > 0) {
     const membershipRes = await reader
       .from("pin_layer_memberships")
@@ -229,7 +297,7 @@ export const resolvePinsForMap = async ({
     });
   }
 
-  if (ownUserId && enabledUserPostingLayerIds.length > 0) {
+  if (ownUserId && enabledOwnUserPostingLayerIds.length > 0) {
     const ownPins = await loadMyPins(reader, ownUserId, accessToken, refreshToken);
     logLayerTrace("resolvePinsForMap:myPosts", {
       ownUserId,
@@ -241,7 +309,7 @@ export const resolvePinsForMap = async ({
       if (!pinId) return;
       pinById.set(pinId, pin);
       const existing = membershipsByPinId.get(pinId) || [];
-      enabledUserPostingLayerIds.forEach((layerId) => {
+      enabledOwnUserPostingLayerIds.forEach((layerId) => {
         if (!existing.includes(layerId)) existing.push(layerId);
       });
       membershipsByPinId.set(pinId, existing);
@@ -287,40 +355,6 @@ export const resolvePinsForMap = async ({
   }
 
   if (includeFriendsAudience && ownUserId) {
-    let acceptedFriendIds = [];
-    try {
-      const acceptedFriendsRes = await reader
-        .from("friends")
-        .select("user_id,friend_id,status")
-        .or(`user_id.eq.${ownUserId},friend_id.eq.${ownUserId}`)
-        .in("status", ["accepted", "active"]);
-      if (acceptedFriendsRes.error) throw acceptedFriendsRes.error;
-      acceptedFriendIds = Array.from(
-        new Set(
-          (acceptedFriendsRes.data || [])
-            .map((row) => (row.user_id === ownUserId ? row.friend_id : row.user_id))
-            .filter(Boolean)
-            .filter((id) => id !== ownUserId),
-        ),
-      );
-    } catch (error) {
-      if (!accessToken) throw error;
-      const friendListsRes = await fetchFriendListsViaEdgeFunction(
-        accessToken,
-        refreshToken,
-        ownUserId,
-      );
-      if (friendListsRes?.error) throw friendListsRes.error;
-      acceptedFriendIds = Array.from(
-        new Set(
-          (friendListsRes?.data?.friends || [])
-            .map((row) => row?.friend?.id || row?.friend_id || row?.user_id || null)
-            .filter(Boolean)
-            .filter((id) => id !== ownUserId),
-        ),
-      );
-    }
-
     if (acceptedFriendIds.length > 0) {
       let visibleFriendPins = [];
       if (
@@ -358,7 +392,16 @@ export const resolvePinsForMap = async ({
         if (!pinId) return;
         pinById.set(pinId, pin);
         const existing = membershipsByPinId.get(pinId) || [];
-        friendsMembershipLayerIds.forEach((layerId) => {
+        const genericFriendsLayerIds = friendsMembershipLayerIds.filter(
+          (layerId) => !isNamedUserPostsLayer(layerById.get(layerId)),
+        );
+        genericFriendsLayerIds.forEach((layerId) => {
+          if (!existing.includes(layerId)) existing.push(layerId);
+        });
+        enabledFriendScopedLayerIds.forEach((layerId) => {
+          const layerMeta = layerById.get(layerId);
+          if (!layerMeta) return;
+          if (!doesFriendScopedLayerMatchPinAuthor(layerMeta, pin)) return;
           if (!existing.includes(layerId)) existing.push(layerId);
         });
         membershipsByPinId.set(pinId, existing);
@@ -382,6 +425,8 @@ export const resolvePinsForMap = async ({
   const pickTopLayerId = (pin, candidateLayerIds) => {
     const uniqueCandidateIds = Array.from(new Set(candidateLayerIds || []));
     if (uniqueCandidateIds.length === 0) return null;
+    const pinOwnerId = String(pin?.user_id || "");
+    const pinAudience = normalizeAudienceValue(pin?.base_audience || pin?.layer);
 
     const sorted = [...uniqueCandidateIds].sort((a, b) => {
       const rankA = layerOrderIndex.has(a)
@@ -395,9 +440,28 @@ export const resolvePinsForMap = async ({
 
     const validSorted = sorted.filter((layerId) => {
       const layerMeta = layerById.get(layerId) || null;
-      const pinOwnerId = String(pin?.user_id || "");
-      if (!isUserPostingLayer(layerMeta)) return true;
-      return pinOwnerId && ownUserId && pinOwnerId === String(ownUserId);
+      if (!layerMeta) return false;
+      const pinKey = getPinLayerKeyFromLayer(layerMeta);
+      const layerOwnerType = layerMeta?.owner_type || "system";
+
+      if (
+        layerMeta?.isOwnUserPostsLayer ||
+        layerOwnerType === "user"
+      ) {
+        return pinOwnerId && ownUserId && pinOwnerId === String(ownUserId);
+      }
+
+      if (pinKey === "friends") {
+        const isOwn = pinOwnerId && ownUserId && pinOwnerId === String(ownUserId);
+        const isFriend = pinOwnerId && acceptedFriendIdSet.has(pinOwnerId);
+        if (!isOwn && !isFriend) return false;
+        if (!(pinAudience === "public" || pinAudience === "friends")) return false;
+        if (isNamedUserPostsLayer(layerMeta)) {
+          return doesFriendScopedLayerMatchPinAuthor(layerMeta, pin);
+        }
+      }
+
+      return true;
     });
 
     return validSorted[0] || null;
