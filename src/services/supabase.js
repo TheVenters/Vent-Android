@@ -14,8 +14,70 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
 const SUPABASE_CLIENT_VERSION = 'v3-auth-fetch';
 const NETWORK_RETRY_ATTEMPTS = 3;
 const NETWORK_RETRY_BASE_DELAY_MS = 180;
+const DEBUG_SUPABASE_NETWORK = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.EXPO_PUBLIC_DEBUG_SUPABASE_NETWORK || '').toLowerCase(),
+);
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const NON_OK_BODY_LOG_LIMIT = 320;
+
+const getHeaderValue = (headers, key) => {
+  if (!headers) return '';
+  const target = String(key || '').toLowerCase();
+
+  if (typeof headers.get === 'function') {
+    return String(headers.get(key) || '');
+  }
+
+  if (Array.isArray(headers)) {
+    const match = headers.find(
+      (entry) =>
+        Array.isArray(entry) &&
+        String(entry[0] || '').toLowerCase() === target,
+    );
+    return String(match?.[1] || '');
+  }
+
+  if (typeof headers === 'object') {
+    const direct = headers[key];
+    if (direct != null) return String(direct);
+
+    const foundKey = Object.keys(headers).find(
+      (name) => String(name || '').toLowerCase() === target,
+    );
+    if (foundKey) return String(headers[foundKey] || '');
+  }
+
+  return '';
+};
+
+const getRequestMeta = (input, init) => {
+  const url = typeof input === 'string' ? input : String(input?.url || '');
+  let host = '';
+  let path = '';
+  try {
+    const parsed = new URL(url);
+    host = parsed.host || '';
+    path = parsed.pathname || '';
+  } catch (_) {}
+
+  const method = String(init?.method || 'GET').toUpperCase();
+  const authHeader =
+    getHeaderValue(init?.headers, 'authorization') ||
+    getHeaderValue(init?.headers, 'Authorization');
+  const bodyLength =
+    typeof init?.body === 'string' ? init.body.length : undefined;
+
+  return {
+    method,
+    host,
+    path,
+    platform: Platform.OS,
+    hasAuthHeader: Boolean(authHeader),
+    authHeaderLength: authHeader ? authHeader.length : 0,
+    bodyLength,
+  };
+};
 
 const isRetryableNetworkError = (error) => {
   const message = String(
@@ -33,10 +95,26 @@ const isRetryableNetworkError = (error) => {
 
 const resilientFetch = async (input, init) => {
   let lastError = null;
+  const requestMeta = getRequestMeta(input, init);
 
   for (let attempt = 1; attempt <= NETWORK_RETRY_ATTEMPTS; attempt += 1) {
     try {
       const response = await globalThis.fetch(input, init);
+      if (DEBUG_SUPABASE_NETWORK && !response?.ok) {
+        let bodySnippet = '';
+        try {
+          const cloned = response.clone();
+          const raw = await cloned.text();
+          bodySnippet = String(raw || '').slice(0, NON_OK_BODY_LOG_LIMIT);
+        } catch (_) {}
+        console.warn('Supabase fetch non-OK response', {
+          ...requestMeta,
+          attempt,
+          status: response?.status,
+          statusText: response?.statusText || '',
+          bodySnippet,
+        });
+      }
       if (
         response?.status >= 500 &&
         response?.status <= 599 &&
@@ -48,6 +126,11 @@ const resilientFetch = async (input, init) => {
       return response;
     } catch (error) {
       lastError = error;
+      console.warn('Supabase fetch network failure', {
+        ...requestMeta,
+        attempt,
+        message: String(error?.message || error || 'Network request failed'),
+      });
       if (!isRetryableNetworkError(error) || attempt >= NETWORK_RETRY_ATTEMPTS) {
         throw error;
       }
@@ -56,6 +139,11 @@ const resilientFetch = async (input, init) => {
   }
 
   if (isRetryableNetworkError(lastError)) {
+    console.warn('Supabase fetch fallback response', {
+      ...requestMeta,
+      message: String(lastError?.message || 'Network request failed'),
+      retries: NETWORK_RETRY_ATTEMPTS,
+    });
     return new Response(
       JSON.stringify({
         error: 'Network request failed',

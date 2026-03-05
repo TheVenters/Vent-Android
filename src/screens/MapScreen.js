@@ -1787,80 +1787,22 @@ const MapScreen = ({ navigation, route }) => {
         }
       }
 
-      const existingOwnedRes = await writer
+      const existingUserLayerRes = await writer
         .from("layers")
-        .select("id,name,owner_id")
+        .select("id,name")
         .eq("owner_type", "user")
         .eq("kind", "user_posts")
-        .eq("owner_id", actorUserId)
+        .in("name", [layerName, legacyLayerName])
         .order("created_at", { ascending: true })
-        .maybeSingle();
-
-      if (existingOwnedRes.error) throw existingOwnedRes.error;
-      if (existingOwnedRes.data?.id) {
-        if (existingOwnedRes.data.name !== layerName) {
-          const { error: renameError } = await writer
-            .from("layers")
-            .update({ name: layerName })
-            .eq("id", existingOwnedRes.data.id);
-          if (renameError) throw renameError;
-        }
-        setUserPostingLayerId(existingOwnedRes.data.id);
-        return existingOwnedRes.data.id;
-      }
-
-      const existingByPreferredNameRes = await writer
-        .from("layers")
-        .select("id,name,owner_id")
-        .eq("owner_type", "user")
-        .eq("kind", "user_posts")
-        .eq("name", layerName)
-        .order("created_at", { ascending: true })
-        .limit(1)
-        .maybeSingle();
-      if (existingByPreferredNameRes.error) throw existingByPreferredNameRes.error;
-      if (existingByPreferredNameRes.data?.id) {
-        if (existingByPreferredNameRes.data.owner_id === actorUserId) {
-          setUserPostingLayerId(existingByPreferredNameRes.data.id);
-          return existingByPreferredNameRes.data.id;
-        }
-        if (!existingByPreferredNameRes.data.owner_id) {
-          const ownerClaimRes = await writer
-            .from("layers")
-            .update({ owner_id: actorUserId })
-            .eq("id", existingByPreferredNameRes.data.id);
-          if (
-            ownerClaimRes.error &&
-            !isRecoverableOwnershipConstraintError(ownerClaimRes.error)
-          ) {
-            throw ownerClaimRes.error;
-          }
-          if (!ownerClaimRes.error) {
-            setUserPostingLayerId(existingByPreferredNameRes.data.id);
-            return existingByPreferredNameRes.data.id;
-          }
-        }
-      }
-
-      const legacyRes = await writer
-        .from("layers")
-        .select("id,name,owner_id")
-        .eq("owner_type", "user")
-        .eq("kind", "user_posts")
-        .eq("name", legacyLayerName)
-        .maybeSingle();
-      if (legacyRes.error) throw legacyRes.error;
-      if (legacyRes.data?.id) {
-        const normalizeRes = await writer
-          .from("layers")
-          .update({ name: layerName, owner_id: actorUserId })
-          .eq("id", legacyRes.data.id);
-        if (!normalizeRes.error) {
-          setUserPostingLayerId(legacyRes.data.id);
-          return legacyRes.data.id;
-        }
-        if (!isRecoverableOwnershipConstraintError(normalizeRes.error)) {
-          throw normalizeRes.error;
+        .limit(10);
+      if (existingUserLayerRes.error) throw existingUserLayerRes.error;
+      if (Array.isArray(existingUserLayerRes.data) && existingUserLayerRes.data.length > 0) {
+        const preferred =
+          existingUserLayerRes.data.find((layer) => layer?.name === layerName) ||
+          existingUserLayerRes.data[0];
+        if (preferred?.id) {
+          setUserPostingLayerId(preferred.id);
+          return preferred.id;
         }
       }
 
@@ -1892,7 +1834,8 @@ const MapScreen = ({ navigation, route }) => {
           name: layerName,
           enabled: true,
           owner_type: "user",
-          owner_id: actorUserId,
+          // DB currently enforces non-community owner_id as NULL.
+          owner_id: null,
           is_public: false,
         })
         .select("id")

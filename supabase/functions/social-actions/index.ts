@@ -1552,67 +1552,30 @@ const handleEnsureUserPostingLayer = async (
   const legacyName = asString(payload.legacyName);
   const kind = asString(payload.kind) || "user_posts";
   const fallbackName = preferredName || legacyName || `user-${actorId}-posts`;
+  const candidateNames = Array.from(
+    new Set([preferredName, legacyName, fallbackName].filter(Boolean)),
+  );
 
-  const ownedRes = await adminClient
-    .from("layers")
-    .select("id,name,kind,owner_type,owner_id,enabled,is_public,created_at")
-    .eq("owner_type", "user")
-    .eq("kind", kind)
-    .eq("owner_id", actorId)
-    .order("created_at", { ascending: true })
-    .limit(5);
-  if (ownedRes.error) {
-    return jsonResponse(400, { error: ownedRes.error.message });
-  }
-
-  const ownedLayer = (ownedRes.data || [])[0] || null;
-  if (ownedLayer) {
-    if (preferredName && ownedLayer.name !== preferredName) {
-      const renameRes = await adminClient
-        .from("layers")
-        .update({ name: preferredName })
-        .eq("id", ownedLayer.id)
-        .select("id,name,kind,owner_type,owner_id,enabled,is_public")
-        .single();
-      if (renameRes.error) {
-        return jsonResponse(400, { error: renameRes.error.message });
-      }
-      return jsonResponse(200, { success: true, layer: renameRes.data });
-    }
-    return jsonResponse(200, { success: true, layer: ownedLayer });
-  }
-
-  if (legacyName) {
-    const legacyRes = await adminClient
+  if (candidateNames.length > 0) {
+    const existingRes = await adminClient
       .from("layers")
-      .select("id,name,kind,owner_type,owner_id,enabled,is_public")
+      .select("id,name,kind,owner_type,owner_id,enabled,is_public,created_at")
       .eq("owner_type", "user")
       .eq("kind", kind)
-      .eq("name", legacyName)
-      .limit(5);
-    if (legacyRes.error) {
-      return jsonResponse(400, { error: legacyRes.error.message });
+      .in("name", candidateNames)
+      .order("created_at", { ascending: true })
+      .limit(10);
+    if (existingRes.error) {
+      return jsonResponse(400, { error: existingRes.error.message });
     }
-    const reusableLegacyLayer = (legacyRes.data || []).find((layer) => {
-      const ownerId = asString(layer?.owner_id);
-      return !ownerId || ownerId === actorId;
-    });
-    if (reusableLegacyLayer?.id) {
-      const claimRes = await adminClient
-        .from("layers")
-        .update({
-          owner_id: actorId,
-          name: preferredName || legacyName,
-          enabled: true,
-          is_public: false,
-        })
-        .eq("id", reusableLegacyLayer.id)
-        .select("id,name,kind,owner_type,owner_id,enabled,is_public")
-        .single();
-      if (claimRes.error) {
-        return jsonResponse(400, { error: claimRes.error.message });
-      }
-      return jsonResponse(200, { success: true, layer: claimRes.data });
+
+    const existingRows = existingRes.data || [];
+    const preferredMatch = preferredName
+      ? existingRows.find((row) => asString(row?.name) === preferredName)
+      : null;
+    const chosen = preferredMatch || existingRows[0] || null;
+    if (chosen?.id) {
+      return jsonResponse(200, { success: true, layer: chosen });
     }
   }
 
@@ -1623,7 +1586,8 @@ const handleEnsureUserPostingLayer = async (
       name: fallbackName,
       enabled: true,
       owner_type: "user",
-      owner_id: actorId,
+      // Current DB constraints expect non-community owner_id to be NULL.
+      owner_id: null,
       is_public: false,
     })
     .select("id,name,kind,owner_type,owner_id,enabled,is_public")
