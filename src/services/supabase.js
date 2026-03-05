@@ -513,6 +513,267 @@ const socialAction = async (action, payload, accessToken, refreshToken = null) =
   return result;
 };
 
+const STORAGE_MEDIA_SCHEME = 'storage://';
+const POST_MEDIA_BUCKET_ENV_KEY = 'EXPO_PUBLIC_POST_MEDIA_BUCKET';
+const DEFAULT_POST_MEDIA_BUCKET_CANDIDATES = [
+  process.env[POST_MEDIA_BUCKET_ENV_KEY],
+  'post-images',
+]
+  .map((value) => String(value || '').trim())
+  .filter(Boolean);
+const POST_MEDIA_SIGNED_URL_TTL_SEC = 60 * 60 * 24;
+
+const dedupeStrings = (values) =>
+  Array.from(new Set((Array.isArray(values) ? values : []).filter(Boolean)));
+
+const decodeBase64ToArrayBuffer = (base64) => {
+  const normalized = String(base64 || '')
+    .replace(/\s+/g, '')
+    .replace(/-/g, '+')
+    .replace(/_/g, '/');
+  const padded =
+    normalized + '='.repeat((4 - (normalized.length % 4 || 4)) % 4);
+  const binaryString =
+    typeof globalThis.atob === 'function'
+      ? globalThis.atob(padded)
+      : typeof globalThis.Buffer?.from === 'function'
+        ? globalThis.Buffer.from(padded, 'base64').toString('binary')
+        : null;
+  if (!binaryString) {
+    throw new Error('Base64 decode is unavailable on this platform.');
+  }
+
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i += 1) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes.buffer;
+};
+
+const inferMediaExtension = (mediaUrl, mediaType) => {
+  const normalizedType = String(mediaType || '').toLowerCase();
+  const normalizedUrl = String(mediaUrl || '');
+  const dataMimeMatch = normalizedUrl.match(/^data:([^;,]+)[;,]/i);
+  const mime = (dataMimeMatch?.[1] || '').toLowerCase();
+
+  if (normalizedType === 'video') return 'mp4';
+  if (mime.includes('png')) return 'png';
+  if (mime.includes('webp')) return 'webp';
+  if (mime.includes('heic')) return 'heic';
+  if (mime.includes('heif')) return 'heif';
+  if (mime.includes('gif')) return 'gif';
+  if (mime.includes('jpg') || mime.includes('jpeg')) return 'jpg';
+
+  const bareUrl = normalizedUrl.split('?')[0].split('#')[0];
+  const ext = bareUrl.includes('.') ? bareUrl.split('.').pop() : '';
+  const normalizedExt = String(ext || '').toLowerCase();
+  if (['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'gif', 'mp4', 'mov'].includes(normalizedExt)) {
+    if (normalizedExt === 'jpeg') return 'jpg';
+    if (normalizedExt === 'mov') return 'mp4';
+    return normalizedExt;
+  }
+  return normalizedType === 'video' ? 'mp4' : 'jpg';
+};
+
+const inferMediaContentType = (extension, mediaType) => {
+  const ext = String(extension || '').toLowerCase();
+  if (ext === 'png') return 'image/png';
+  if (ext === 'webp') return 'image/webp';
+  if (ext === 'heic') return 'image/heic';
+  if (ext === 'heif') return 'image/heif';
+  if (ext === 'gif') return 'image/gif';
+  if (ext === 'mp4') return 'video/mp4';
+  return String(mediaType || '').toLowerCase() === 'video'
+    ? 'video/mp4'
+    : 'image/jpeg';
+};
+
+const readMediaAsArrayBuffer = async (mediaUrl) => {
+  const uri = String(mediaUrl || '').trim();
+  if (!uri) throw new Error('mediaUrl is required.');
+
+  const dataUriMatch = uri.match(/^data:[^;]+;base64,(.+)$/i);
+  if (dataUriMatch?.[1]) {
+    return decodeBase64ToArrayBuffer(dataUriMatch[1]);
+  }
+
+  const response = await fetch(uri);
+  if (!response?.ok) {
+    throw new Error(`Failed to read local media (${response?.status || 'unknown'}).`);
+  }
+  const payload = await response.arrayBuffer();
+  if (!payload || Number(payload.byteLength || 0) <= 0) {
+    throw new Error('Selected media was empty.');
+  }
+  return payload;
+};
+
+export const getPostMediaBucketCandidates = () =>
+  dedupeStrings(DEFAULT_POST_MEDIA_BUCKET_CANDIDATES);
+
+export const isStorageMediaPointer = (value) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .startsWith(STORAGE_MEDIA_SCHEME);
+
+export const parseStorageMediaPointer = (value) => {
+  const pointer = String(value || '').trim();
+  if (!isStorageMediaPointer(pointer)) return null;
+
+  const withoutScheme = pointer.slice(STORAGE_MEDIA_SCHEME.length);
+  const slashIndex = withoutScheme.indexOf('/');
+  if (slashIndex <= 0 || slashIndex >= withoutScheme.length - 1) return null;
+
+  try {
+    const bucket = decodeURIComponent(withoutScheme.slice(0, slashIndex));
+    const path = decodeURIComponent(withoutScheme.slice(slashIndex + 1));
+    if (!bucket || !path) return null;
+    return { bucket, path };
+  } catch (_) {
+    return null;
+  }
+};
+
+export const toStorageMediaPointer = (bucket, path) => {
+  const normalizedBucket = String(bucket || '').trim();
+  const normalizedPath = String(path || '').trim();
+  if (!normalizedBucket || !normalizedPath) return null;
+  return `${STORAGE_MEDIA_SCHEME}${encodeURIComponent(normalizedBucket)}/${encodeURIComponent(normalizedPath)}`;
+};
+
+const isMissingBucketError = (error) => {
+  const message = String(error?.message || '').toLowerCase();
+  return message.includes('bucket') && message.includes('not found');
+};
+
+export const uploadPostMediaToStorage = async ({
+  session,
+  userId,
+  mediaUrl,
+  mediaType,
+}) => {
+  const normalizedMediaUrl = String(mediaUrl || '').trim();
+  if (!normalizedMediaUrl) {
+    return {
+      mediaPointer: null,
+      bucketId: null,
+      path: null,
+    };
+  }
+
+  if (isStorageMediaPointer(normalizedMediaUrl)) {
+    const parsed = parseStorageMediaPointer(normalizedMediaUrl);
+    return {
+      mediaPointer: normalizedMediaUrl,
+      bucketId: parsed?.bucket || null,
+      path: parsed?.path || null,
+    };
+  }
+
+  const accessToken = session?.access_token || null;
+  const actorId = String(userId || '').trim();
+  if (!accessToken || !actorId) {
+    throw new Error('Cannot upload media without an authenticated session.');
+  }
+
+  const extension = inferMediaExtension(normalizedMediaUrl, mediaType);
+  const contentType = inferMediaContentType(extension, mediaType);
+  const payload = await readMediaAsArrayBuffer(normalizedMediaUrl);
+  const fileName = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${extension}`;
+  const path = `${actorId}/${fileName}`;
+  const storageClient = supabaseWithAccessToken(accessToken);
+  const bucketCandidates = getPostMediaBucketCandidates();
+  if (bucketCandidates.length === 0) {
+    throw new Error(
+      'No post-media storage bucket configured. Set EXPO_PUBLIC_POST_MEDIA_BUCKET.',
+    );
+  }
+
+  let lastError = null;
+  for (const bucketId of bucketCandidates) {
+    const uploadRes = await storageClient.storage.from(bucketId).upload(path, payload, {
+      contentType,
+      upsert: false,
+    });
+    if (!uploadRes.error) {
+      return {
+        mediaPointer: toStorageMediaPointer(bucketId, path),
+        bucketId,
+        path,
+      };
+    }
+    if (isMissingBucketError(uploadRes.error)) {
+      lastError = uploadRes.error;
+      continue;
+    }
+    throw uploadRes.error;
+  }
+
+  throw (
+    lastError ||
+    new Error(
+      `Unable to upload media. None of the configured buckets exist (${bucketCandidates.join(', ')}).`,
+    )
+  );
+};
+
+export const hydratePinsWithSignedMediaUrls = async (
+  pins,
+  session,
+  ttlSec = POST_MEDIA_SIGNED_URL_TTL_SEC,
+) => {
+  const rows = Array.isArray(pins) ? pins : [];
+  if (rows.length === 0) return [];
+
+  const accessToken = session?.access_token || null;
+  if (!accessToken) return rows;
+
+  const clampedTtl = Number.isFinite(Number(ttlSec))
+    ? Math.max(60, Math.min(60 * 60 * 24 * 7, Math.floor(Number(ttlSec))))
+    : POST_MEDIA_SIGNED_URL_TTL_SEC;
+  const storageClient = supabaseWithAccessToken(accessToken);
+  const keyByPointer = new Map();
+  rows.forEach((pin) => {
+    const pointer = String(pin?.media_url || '').trim();
+    const parsed = parseStorageMediaPointer(pointer);
+    if (!parsed) return;
+    const key = `${parsed.bucket}::${parsed.path}`;
+    if (!keyByPointer.has(key)) {
+      keyByPointer.set(key, parsed);
+    }
+  });
+
+  if (keyByPointer.size === 0) return rows;
+
+  const signedUrlByKey = new Map();
+  await Promise.all(
+    Array.from(keyByPointer.entries()).map(async ([key, parsed]) => {
+      const signedRes = await storageClient.storage
+        .from(parsed.bucket)
+        .createSignedUrl(parsed.path, clampedTtl);
+      if (!signedRes.error && signedRes.data?.signedUrl) {
+        signedUrlByKey.set(key, signedRes.data.signedUrl);
+      }
+    }),
+  );
+
+  return rows.map((pin) => {
+    const pointer = String(pin?.media_url || '').trim();
+    const parsed = parseStorageMediaPointer(pointer);
+    if (!parsed) return pin;
+    const key = `${parsed.bucket}::${parsed.path}`;
+    const signedUrl = signedUrlByKey.get(key);
+    if (!signedUrl) return pin;
+    return {
+      ...pin,
+      media_url: signedUrl,
+      media_storage_bucket: parsed.bucket,
+      media_storage_path: parsed.path,
+    };
+  });
+};
+
 export const votePinViaEdgeFunction = async (
   pinId,
   vote,

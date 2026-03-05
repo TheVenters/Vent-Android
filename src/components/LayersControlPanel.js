@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import {
   Modal,
   StyleSheet,
@@ -11,7 +11,11 @@ import {
 } from "react-native";
 import { SIZES } from "../constants/theme";
 import { useAppTheme } from "../context/ThemeContext";
-import { getPinLayerKeyFromLayer } from "../utils/layers";
+import {
+  formatLayerDisplayName,
+  getPinLayerKeyFromLayer,
+  isNamedUserPostsLayer,
+} from "../utils/layers";
 
 const OWNER_LABELS = {
   system: "System",
@@ -44,6 +48,7 @@ const LayersControlPanel = ({
   visible,
   onClose,
   layers,
+  sectionMode = "all",
   selectedLayerId,
   isLoading,
   onSelectLayer,
@@ -58,6 +63,173 @@ const LayersControlPanel = ({
   const manageableLayers = Array.isArray(layers)
     ? layers.filter((layer) => layer?.viewerCanManage !== false)
     : [];
+  const isFriendSpecificLayer = (layer) => {
+    const pinKey = getPinLayerKeyFromLayer(layer);
+    if (pinKey !== "friends") return false;
+    if (!isNamedUserPostsLayer(layer)) return false;
+    return !layer?.isOwnUserPostsLayer;
+  };
+  const myCollectionLayers = manageableLayers.filter(
+    (layer) => !isFriendSpecificLayer(layer),
+  );
+  const friendLayers = manageableLayers.filter((layer) =>
+    isFriendSpecificLayer(layer),
+  );
+  const isFriendsSystemLayer = (layer) => {
+    const pinKey = getPinLayerKeyFromLayer(layer);
+    return pinKey === "friends" && !isNamedUserPostsLayer(layer);
+  };
+  const [showFriendLayersList, setShowFriendLayersList] = useState(false);
+  const showFriendsOnly = sectionMode === "friends";
+  const panelTitle = showFriendsOnly ? "Friends Layers" : "Layers";
+
+  useEffect(() => {
+    if (!visible) {
+      setShowFriendLayersList(false);
+      return;
+    }
+    const selectedIsFriendSpecific = friendLayers.some(
+      (layer) => layer.id === selectedLayerId,
+    );
+    if (selectedIsFriendSpecific) {
+      setShowFriendLayersList(true);
+    }
+  }, [friendLayers, selectedLayerId, visible]);
+
+  const renderLayerRows = (layerRows) =>
+    layerRows.map((layer) => {
+      const badge = getBadgeStyles(layer.owner_type, palette);
+      const isSelected = selectedLayerId === layer.id;
+      const isFriendsRootLayer = isFriendsSystemLayer(layer);
+      const pinLayerKey = getPinLayerKeyFromLayer(layer);
+      const globalIndex = manageableLayers.findIndex(
+        (candidate) => candidate.id === layer.id,
+      );
+      const isFirst = globalIndex <= 0;
+      const isLast = globalIndex >= manageableLayers.length - 1;
+
+      return (
+        <TouchableOpacity
+          key={layer.id}
+          style={[
+            styles.layerRow,
+            isSelected && styles.layerRowSelected,
+            !layer.isEnabled && styles.layerRowMuted,
+          ]}
+          onPress={() => {
+            if (!layer.isEnabled) {
+              onToggleLayer(layer.id, true, {
+                selectAfterToggle: true,
+              });
+              return;
+            }
+            onSelectLayer(layer.id);
+            if (isFriendsRootLayer && !showFriendsOnly) {
+              setShowFriendLayersList((previous) => !previous);
+              return;
+            }
+            if (onOpenLayerPosts) {
+              onOpenLayerPosts(layer);
+            }
+          }}
+          activeOpacity={0.9}
+        >
+          <View style={styles.rowLeft}>
+            <Text style={styles.layerName}>
+              {formatLayerDisplayName(layer)}
+            </Text>
+            <View style={styles.rowMeta}>
+              <View
+                style={[
+                  styles.ownerBadge,
+                  { backgroundColor: badge.backgroundColor },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.ownerBadgeText,
+                    { color: badge.color },
+                  ]}
+                >
+                  {OWNER_LABELS[layer.owner_type] || "System"}
+                </Text>
+              </View>
+
+              {layer.ownerCommunityName ? (
+                <Text style={styles.communityText}>
+                  {layer.ownerCommunityName}
+                </Text>
+              ) : null}
+              <Text style={styles.pinKeyText}>
+                Posts as {pinLayerKey}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.rowRight}>
+            {layer.owner_type === "community" &&
+            !layer.isForcedEnabled ? (
+              <TouchableOpacity
+                style={styles.removeBtn}
+                onPress={(event) => {
+                  event?.stopPropagation?.();
+                  onRemoveLayer && onRemoveLayer(layer);
+                }}
+              >
+                <Text style={styles.removeBtnText}>Remove</Text>
+              </TouchableOpacity>
+            ) : null}
+            <View style={styles.reorderButtons}>
+              <TouchableOpacity
+                style={[
+                  styles.reorderBtn,
+                  isFirst && styles.reorderBtnDisabled,
+                ]}
+                disabled={isFirst}
+                onPress={(event) => {
+                  event?.stopPropagation?.();
+                  onMoveLayer && onMoveLayer(layer.id, -1);
+                }}
+              >
+                <Text style={styles.reorderBtnText}>↑</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.reorderBtn,
+                  isLast && styles.reorderBtnDisabled,
+                ]}
+                disabled={isLast}
+                onPress={(event) => {
+                  event?.stopPropagation?.();
+                  onMoveLayer && onMoveLayer(layer.id, 1);
+                }}
+              >
+                <Text style={styles.reorderBtnText}>↓</Text>
+              </TouchableOpacity>
+            </View>
+            {layer.isForcedEnabled ? (
+              <Text style={styles.selectedPill}>Pinned</Text>
+            ) : null}
+            {isSelected && layer.isEnabled && !layer.isForcedEnabled ? (
+              <Text style={styles.selectedPill}>Selected</Text>
+            ) : null}
+
+            <Switch
+              value={layer.isEnabled}
+              disabled={Boolean(layer.isForcedEnabled)}
+              trackColor={{
+                false: palette.border,
+                true: palette.primary,
+              }}
+              thumbColor={palette.onPrimary}
+              onValueChange={(nextValue) =>
+                onToggleLayer(layer.id, nextValue)
+              }
+            />
+          </View>
+        </TouchableOpacity>
+      );
+    });
 
   return (
     <Modal
@@ -77,7 +249,7 @@ const LayersControlPanel = ({
           <View style={styles.handle} />
 
           <View style={styles.headerRow}>
-            <Text style={styles.title}>Layers</Text>
+            <Text style={styles.title}>{panelTitle}</Text>
             <View style={styles.headerActions}>
               <TouchableOpacity style={styles.actionBtn} onPress={onRefresh}>
                 <Text style={styles.actionBtnText}>Refresh</Text>
@@ -99,137 +271,35 @@ const LayersControlPanel = ({
               contentContainerStyle={styles.bodyContent}
               showsVerticalScrollIndicator={false}
             >
-              <Text style={styles.sectionTitle}>My Layer Collection</Text>
-              {manageableLayers.length === 0 ? (
-                <Text style={styles.emptyText}>
-                  No layers available to manage right now. Join a community to
-                  manage its layers.
-                </Text>
+              {showFriendsOnly ? (
+                <>
+                  <Text style={styles.sectionTitle}>Friends Tab Layers</Text>
+                  {friendLayers.length === 0 ? (
+                    <Text style={styles.emptyText}>
+                      No friend-specific layers are available right now.
+                    </Text>
+                  ) : (
+                    renderLayerRows(friendLayers)
+                  )}
+                </>
               ) : (
-                manageableLayers.map((layer, index) => {
-                  const badge = getBadgeStyles(layer.owner_type, palette);
-                  const isSelected = selectedLayerId === layer.id;
-                  const pinLayerKey = getPinLayerKeyFromLayer(layer);
-
-                  return (
-                    <TouchableOpacity
-                      key={layer.id}
-                      style={[
-                        styles.layerRow,
-                        isSelected && styles.layerRowSelected,
-                        !layer.isEnabled && styles.layerRowMuted,
-                      ]}
-                      onPress={() => {
-                        if (!layer.isEnabled) {
-                          onToggleLayer(layer.id, true, {
-                            selectAfterToggle: true,
-                          });
-                          return;
-                        }
-                        onSelectLayer(layer.id);
-                        if (onOpenLayerPosts) {
-                          onOpenLayerPosts(layer);
-                        }
-                      }}
-                      activeOpacity={0.9}
-                    >
-                      <View style={styles.rowLeft}>
-                        <Text style={styles.layerName}>
-                          {layer.display_name || layer.name}
-                        </Text>
-                        <View style={styles.rowMeta}>
-                          <View
-                            style={[
-                              styles.ownerBadge,
-                              { backgroundColor: badge.backgroundColor },
-                            ]}
-                          >
-                            <Text
-                              style={[
-                                styles.ownerBadgeText,
-                                { color: badge.color },
-                              ]}
-                            >
-                              {OWNER_LABELS[layer.owner_type] || "System"}
-                            </Text>
-                          </View>
-
-                          {layer.ownerCommunityName ? (
-                            <Text style={styles.communityText}>
-                              {layer.ownerCommunityName}
-                            </Text>
-                          ) : null}
-                          <Text style={styles.pinKeyText}>
-                            Posts as {pinLayerKey}
-                          </Text>
-                        </View>
-                      </View>
-
-                      <View style={styles.rowRight}>
-                        {layer.owner_type === "community" &&
-                        !layer.isForcedEnabled ? (
-                          <TouchableOpacity
-                            style={styles.removeBtn}
-                            onPress={(event) => {
-                              event?.stopPropagation?.();
-                              onRemoveLayer && onRemoveLayer(layer);
-                            }}
-                          >
-                            <Text style={styles.removeBtnText}>Remove</Text>
-                          </TouchableOpacity>
-                        ) : null}
-                        <View style={styles.reorderButtons}>
-                          <TouchableOpacity
-                            style={[
-                              styles.reorderBtn,
-                              index === 0 && styles.reorderBtnDisabled,
-                            ]}
-                            disabled={index === 0}
-                            onPress={(event) => {
-                              event?.stopPropagation?.();
-                              onMoveLayer && onMoveLayer(layer.id, -1);
-                            }}
-                          >
-                            <Text style={styles.reorderBtnText}>↑</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity
-                            style={[
-                              styles.reorderBtn,
-                              index === manageableLayers.length - 1 &&
-                                styles.reorderBtnDisabled,
-                            ]}
-                            disabled={index === manageableLayers.length - 1}
-                            onPress={(event) => {
-                              event?.stopPropagation?.();
-                              onMoveLayer && onMoveLayer(layer.id, 1);
-                            }}
-                          >
-                            <Text style={styles.reorderBtnText}>↓</Text>
-                          </TouchableOpacity>
-                        </View>
-                        {layer.isForcedEnabled ? (
-                          <Text style={styles.selectedPill}>Pinned</Text>
-                        ) : null}
-                        {isSelected && layer.isEnabled && !layer.isForcedEnabled ? (
-                          <Text style={styles.selectedPill}>Selected</Text>
-                        ) : null}
-
-                        <Switch
-                          value={layer.isEnabled}
-                          disabled={Boolean(layer.isForcedEnabled)}
-                          trackColor={{
-                            false: palette.border,
-                            true: palette.primary,
-                          }}
-                          thumbColor={palette.onPrimary}
-                          onValueChange={(nextValue) =>
-                            onToggleLayer(layer.id, nextValue)
-                          }
-                        />
-                      </View>
-                    </TouchableOpacity>
-                  );
-                })
+                <>
+                  <Text style={styles.sectionTitle}>My Layer Collection</Text>
+                  {myCollectionLayers.length === 0 ? (
+                    <Text style={styles.emptyText}>
+                      No layers available to manage right now. Join a community to
+                      manage its layers.
+                    </Text>
+                  ) : (
+                    renderLayerRows(myCollectionLayers)
+                  )}
+                  {friendLayers.length > 0 && showFriendLayersList ? (
+                    <>
+                      <Text style={styles.sectionTitle}>Friends Tab Layers</Text>
+                      {renderLayerRows(friendLayers)}
+                    </>
+                  ) : null}
+                </>
               )}
             </ScrollView>
           )}

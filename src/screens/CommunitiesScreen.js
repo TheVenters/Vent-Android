@@ -140,6 +140,10 @@ const CommunitiesScreen = ({ navigation }) => {
   const selectedCommunity = communities.find(
     (community) => community.id === selectedCommunityId,
   );
+  const communitiesById = useMemo(
+    () => new Map((communities || []).map((community) => [community.id, community])),
+    [communities],
+  );
 
   const filteredCommunities = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -265,6 +269,17 @@ const CommunitiesScreen = ({ navigation }) => {
       (membershipsRes.data || []).forEach((row) => {
         membershipMap[row.community_id] = normalizeMembershipRow(row);
       });
+      if (userId) {
+        (communitiesRes.data || []).forEach((community) => {
+          if (community.lead_admin_user_id !== userId) return;
+          if (membershipMap[community.id]) return;
+          membershipMap[community.id] = normalizeMembershipRow({
+            community_id: community.id,
+            role: "admin",
+            status: "accepted",
+          });
+        });
+      }
 
       setCommunities(communitiesRes.data || []);
       setLayerCountByCommunity(counts);
@@ -561,9 +576,18 @@ const CommunitiesScreen = ({ navigation }) => {
         setCommunityOwner(owner);
         setCommunityModerators(moderators);
         setCommunityMembers(enrichedMembers);
+        const fallbackOwnerMembership =
+          userId && explicitLeadAdminUserId && userId === explicitLeadAdminUserId
+            ? normalizeMembershipRow({
+                community_id: communityId,
+                role: "admin",
+                status: "accepted",
+              })
+            : null;
         setDetailMembership(
           normalizeMembershipRow(membershipRes.data) ||
             membershipsByCommunity[communityId] ||
+            fallbackOwnerMembership ||
             null,
         );
       } catch (error) {
@@ -598,7 +622,23 @@ const CommunitiesScreen = ({ navigation }) => {
     loadCommunityDetail(selectedCommunityId, currentUser?.id);
   }, [selectedCommunityId, currentUser?.id, loadCommunityDetail]);
 
-  const getJoinStatus = (communityId) => {
+  const getJoinStatus = (communityOrId) => {
+    const communityId =
+      typeof communityOrId === "string" ? communityOrId : communityOrId?.id;
+    if (!communityId) return "Join";
+
+    const community =
+      typeof communityOrId === "object" && communityOrId
+        ? communityOrId
+        : communitiesById.get(communityId);
+    if (
+      currentUser?.id &&
+      community?.lead_admin_user_id &&
+      community.lead_admin_user_id === currentUser.id
+    ) {
+      return "Joined";
+    }
+
     const membership = membershipsByCommunity[communityId];
     if (!membership) return "Join";
     if (membership.status === "accepted") return "Joined";
@@ -610,6 +650,26 @@ const CommunitiesScreen = ({ navigation }) => {
     if (!currentUser?.id) {
       Alert.alert("Sign In Required", "Please sign in to join communities.");
       navigation.navigate("Account");
+      return;
+    }
+
+    const community = communitiesById.get(communityId);
+    if (
+      community?.lead_admin_user_id &&
+      community.lead_admin_user_id === currentUser.id
+    ) {
+      const ownerMembership = normalizeMembershipRow({
+        community_id: communityId,
+        role: "admin",
+        status: "accepted",
+      });
+      setMembershipsByCommunity((prev) => ({
+        ...prev,
+        [communityId]: ownerMembership,
+      }));
+      if (selectedCommunityId === communityId) {
+        setDetailMembership(ownerMembership);
+      }
       return;
     }
 
@@ -1561,7 +1621,7 @@ const CommunitiesScreen = ({ navigation }) => {
   );
 
   if (selectedCommunity) {
-    const joinStatus = getJoinStatus(selectedCommunity.id);
+    const joinStatus = getJoinStatus(selectedCommunity);
     const canUseCommunityChat =
       isPlatformAdmin || detailMembership?.status === "accepted";
 
@@ -1917,7 +1977,7 @@ const CommunitiesScreen = ({ navigation }) => {
           <Text style={styles.emptyText}>No communities found.</Text>
         ) : (
           filteredCommunities.map((community) => {
-            const joinStatus = getJoinStatus(community.id);
+            const joinStatus = getJoinStatus(community);
             const isJoined = joinStatus === "Joined";
             const isPending = joinStatus === "Pending";
             const canLeave = isJoined || isPending;

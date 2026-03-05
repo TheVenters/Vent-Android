@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useColorScheme } from 'react-native';
 import { COLORS } from '../constants/theme';
 
 const THEME_STORAGE_KEY = 'vent_theme_mode';
@@ -31,14 +32,15 @@ const DARK_PALETTE = {
 const ThemeContext = createContext(null);
 
 export const ThemeProvider = ({ children }) => {
-  const [themeMode, setThemeMode] = useState('light');
+  const deviceScheme = useColorScheme();
+  const [themeMode, setThemeMode] = useState('system');
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
     const loadTheme = async () => {
       try {
         const stored = await AsyncStorage.getItem(THEME_STORAGE_KEY);
-        if (stored === 'dark' || stored === 'light') {
+        if (stored === 'dark' || stored === 'light' || stored === 'system') {
           setThemeMode(stored);
         }
       } catch (error) {
@@ -52,7 +54,8 @@ export const ThemeProvider = ({ children }) => {
   }, []);
 
   const setMode = async (mode) => {
-    const nextMode = mode === 'dark' ? 'dark' : 'light';
+    const nextMode =
+      mode === 'dark' || mode === 'light' || mode === 'system' ? mode : 'system';
     setThemeMode(nextMode);
     try {
       await AsyncStorage.setItem(THEME_STORAGE_KEY, nextMode);
@@ -62,15 +65,17 @@ export const ThemeProvider = ({ children }) => {
   };
 
   const value = useMemo(() => {
-    const isDark = themeMode === 'dark';
+    const resolvedTheme = themeMode === 'system' ? deviceScheme || 'light' : themeMode;
+    const isDark = resolvedTheme === 'dark';
     return {
       ready,
       themeMode,
+      resolvedTheme,
       isDark,
       palette: isDark ? DARK_PALETTE : LIGHT_PALETTE,
       setThemeMode: setMode,
     };
-  }, [ready, themeMode]);
+  }, [ready, themeMode, deviceScheme]);
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 };

@@ -60,6 +60,14 @@ const SettingsScreen = ({ navigation }) => {
 
         <View style={styles.optionRow}>
           <TouchableOpacity
+            style={[styles.optionButton, themeMode === 'system' && styles.optionButtonActive]}
+            onPress={() => setThemeMode('system')}
+          >
+            <Text style={[styles.optionText, themeMode === 'system' && styles.optionTextActive]}>
+              Use Device
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
             style={[styles.optionButton, themeMode === 'light' && styles.optionButtonActive]}
             onPress={() => setThemeMode('light')}
           >
@@ -146,6 +154,7 @@ const createStyles = (palette) =>
     },
     optionRow: {
       flexDirection: 'row',
+      flexWrap: 'wrap',
       gap: 10,
     },
     optionButton: {
