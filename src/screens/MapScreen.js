@@ -767,6 +767,7 @@ const MapScreen = ({ navigation, route }) => {
   const [selectedPinLayers, setSelectedPinLayers] = useState([]);
   const [allLoadedPosts, setAllLoadedPosts] = useState([]);
   const [arrowFocusedPinId, setArrowFocusedPinId] = useState(null);
+  const [shapePreviewPinId, setShapePreviewPinId] = useState(null);
   const [cloudPostsModalVisible, setCloudPostsModalVisible] = useState(false);
   const [selectedCloud, setSelectedCloud] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -3473,6 +3474,7 @@ useEffect(() => {
   };
 
   const handlePinPress = (pin) => {
+    setShapePreviewPinId(null);
     selectedPinIdRef.current = pin.id;
     setSelectedPin(pin);
     const cached = pinVoteSummaryCacheRef.current.get(pin.id);
@@ -3667,6 +3669,24 @@ useEffect(() => {
       }, 420);
     },
     [showArrowPinCallout],
+  );
+
+  const handleShapePinPress = useCallback(
+    (pin) => {
+      const pinId = String(pin?.id || "");
+      if (!pinId) return;
+
+      // First tap previews via callout; second tap opens detail modal.
+      if (shapePreviewPinId === pinId) {
+        setShapePreviewPinId(null);
+        handlePinPress(pin);
+        return;
+      }
+
+      setShapePreviewPinId(pinId);
+      handleArrowPinFocus(pin);
+    },
+    [shapePreviewPinId, handleArrowPinFocus, handlePinPress],
   );
 
   const handleVotePin = async (vote) => {
@@ -4400,7 +4420,7 @@ useEffect(() => {
               strokeColor={COLORS.primary}
               strokeWidth={3}
               tappable
-              onPress={() => handlePinPress(shape.pin)}
+              onPress={() => handleShapePinPress(shape.pin)}
             />
           ) : (
             <Polygon
@@ -4410,7 +4430,7 @@ useEffect(() => {
               fillColor="rgba(102, 126, 234, 0.2)"
               strokeWidth={2}
               tappable
-              onPress={() => handlePinPress(shape.pin)}
+              onPress={() => handleShapePinPress(shape.pin)}
             />
           ),
         )}
@@ -4781,6 +4801,7 @@ useEffect(() => {
         onAddComment={handleAddPinComment}
         onDeleteComment={handleDeletePinComment}
         onClose={() => {
+          setShapePreviewPinId(null);
           selectedPinIdRef.current = null;
           setShowDetailModal(false);
           setSelectedPin(null);
