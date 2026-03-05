@@ -479,6 +479,17 @@ export const resetPasswordWithOtp = async (email, token, newPassword) => {
 };
 
 const socialAction = async (action, payload, accessToken, refreshToken = null) => {
+  if (DEBUG_SUPABASE_NETWORK) {
+    console.warn('Supabase socialAction request', {
+      action,
+      hasAccessToken: Boolean(accessToken),
+      accessTokenLength: accessToken ? String(accessToken).length : 0,
+      hasRefreshToken: Boolean(refreshToken),
+      refreshTokenLength: refreshToken ? String(refreshToken).length : 0,
+      actorUserId: String(payload?.actorUserId || ''),
+      hasActorUserId: Boolean(payload?.actorUserId),
+    });
+  }
   const result = await invokeEdgeFunction(SOCIAL_ACTIONS_FUNCTION_PATH, {
     action,
     accessToken,

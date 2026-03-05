@@ -1579,21 +1579,42 @@ const handleEnsureUserPostingLayer = async (
     }
   }
 
-  const createRes = await adminClient
-    .from("layers")
-    .insert({
-      kind,
-      name: fallbackName,
-      enabled: true,
-      owner_type: "user",
-      // Current DB constraints expect non-community owner_id to be NULL.
-      owner_id: null,
-      is_public: false,
-    })
-    .select("id,name,kind,owner_type,owner_id,enabled,is_public")
-    .single();
-  if (createRes.error) {
-    return jsonResponse(400, { error: createRes.error.message });
+  const createAttempts = [
+    { owner_id: actorId },
+    { owner_id: null as string | null },
+  ];
+  let createRes: { data: unknown; error: { message: string } | null } | null = null;
+  let lastCreateError: { message: string } | null = null;
+  const attemptErrors: string[] = [];
+  for (const attempt of createAttempts) {
+    const attemptRes = await adminClient
+      .from("layers")
+      .insert({
+        kind,
+        name: fallbackName,
+        enabled: true,
+        owner_type: "user",
+        owner_id: attempt.owner_id,
+        is_public: false,
+      })
+      .select("id,name,kind,owner_type,owner_id,enabled,is_public")
+      .single();
+    if (!attemptRes.error) {
+      createRes = attemptRes as typeof createRes;
+      break;
+    }
+    lastCreateError = attemptRes.error;
+    attemptErrors.push(
+      `owner_id=${attempt.owner_id === null ? "<NULL>" : "<ACTOR_ID>"}: ${attemptRes.error.message}`,
+    );
+  }
+  if (!createRes || createRes.error) {
+    return jsonResponse(400, {
+      error:
+        attemptErrors.join(" | ") ||
+        lastCreateError?.message ||
+        "Failed to create user posting layer.",
+    });
   }
 
   return jsonResponse(200, {

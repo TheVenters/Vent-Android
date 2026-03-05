@@ -1588,8 +1588,9 @@ const MapScreen = ({ navigation, route }) => {
         if (transient) {
           activateNetworkBackoff();
           warnWithThrottle(
-            "network-unavailable",
+            "network-unavailable:layers-load",
             "Network temporarily unavailable. Showing cached/offline data where possible.",
+            `source=layers-load error=${formatErrorMessage(error)}`,
           );
           return applyFallbackLayers(userId || currentUser?.id || null);
         }
@@ -1672,8 +1673,9 @@ const MapScreen = ({ navigation, route }) => {
         if (isTransientNetworkError(error)) {
           activateNetworkBackoff();
           warnWithThrottle(
-            "network-unavailable",
+            "network-unavailable:admin-status",
             "Network temporarily unavailable. Showing cached/offline data where possible.",
+            `source=admin-status error=${formatErrorMessage(error)}`,
           );
           return;
         }
@@ -1834,12 +1836,25 @@ const MapScreen = ({ navigation, route }) => {
           name: layerName,
           enabled: true,
           owner_type: "user",
-          // DB currently enforces non-community owner_id as NULL.
-          owner_id: null,
+          owner_id: actorUserId,
           is_public: false,
         })
         .select("id")
         .single();
+      if (createRes.error) {
+        createRes = await writer
+          .from("layers")
+          .insert({
+            kind: "user_posts",
+            name: layerName,
+            enabled: true,
+            owner_type: "user",
+            owner_id: null,
+            is_public: false,
+          })
+          .select("id")
+          .single();
+      }
       if (createRes.error && isRecoverableOwnershipConstraintError(createRes.error)) {
         createRes = await writer
           .from("layers")
@@ -1861,8 +1876,9 @@ const MapScreen = ({ navigation, route }) => {
       if (isTransientNetworkError(error)) {
         activateNetworkBackoff();
         warnWithThrottle(
-          "network-unavailable",
+          "network-unavailable:ensure-user-layer",
           "Network temporarily unavailable. Showing cached/offline data where possible.",
+          `source=ensure-user-layer error=${formatErrorMessage(error)}`,
         );
         return userPostingLayerId || null;
       }
@@ -2139,8 +2155,9 @@ useEffect(() => {
       if (isTransientNetworkError(error)) {
         activateNetworkBackoff();
         warnWithThrottle(
-          "network-unavailable",
+          "network-unavailable:pins-load",
           "Network temporarily unavailable. Showing cached/offline data where possible.",
+          `source=pins-load error=${formatErrorMessage(error)}`,
         );
         restoreCachedPosts();
         return;
