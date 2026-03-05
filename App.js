@@ -30,6 +30,7 @@ function FriendsStack() {
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="FriendsList" component={FriendsScreen} />
       <Stack.Screen name="Chat" component={ChatScreen} />
+      <Stack.Screen name="FriendProfile" component={AccountScreen} />
     </Stack.Navigator>
   );
 }

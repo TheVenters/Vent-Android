@@ -2,10 +2,10 @@
   "expo": {
     "name": "Vent",
     "slug": "ventapp-rn",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "icon": "./assets/icons/app-icon.png",
+    "userInterfaceStyle": "automatic",
     "splash": {
       "image": "./assets/splash.png",
       "resizeMode": "contain",
@@ -15,7 +15,12 @@
       "**/*"
     ],
     "ios": {
+      "icon": {
+        "light": "./assets/icons/app-icon-light.png",
+        "dark": "./assets/icons/app-icon-dark.png"
+      },
       "supportsTablet": true,
+      "buildNumber": "1",
       "bundleIdentifier": "com.ventapp.rn",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "This app uses your location to show nearby posts and help you share your experiences.",
@@ -25,8 +30,9 @@
       }
     },
     "android": {
+      "icon": "./assets/icons/app-icon.png",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
+        "foregroundImage": "./assets/icons/app-icon.png",
         "backgroundColor": "#ffffff"
       },
       "package": "com.ventapp.rn",
@@ -44,7 +50,7 @@
   }
     },
     "web": {
-      "favicon": "./assets/favicon.png",
+      "favicon": "./assets/icons/app-icon.png",
       "bundler": "metro"
     },
     "plugins": [

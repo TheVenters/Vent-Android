@@ -58,6 +58,9 @@ case "$cmd" in
     docker exec "${db_container}" psql -U postgres -d postgres -c 'select 1' >/dev/null
     echo "ok: database reachable"
     ;;
+  pull-schema)
+    "${WORKDIR}/scripts/pull-live-schema.sh" "$@"
+    ;;
   *)
     cat <<'HELP'
 Usage: ./supabase.sh <command>
@@ -68,6 +71,7 @@ Commands:
   status  Show local Supabase endpoints/keys
   reset   Wipe local DB and re-apply migrations (DESTRUCTIVE)
   smoke   Verify DB is reachable (pg_isready + select 1)
+  pull-schema  Pull linked remote public schema into repo snapshots
 HELP
     exit 2
     ;;
