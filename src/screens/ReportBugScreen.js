@@ -10,9 +10,11 @@ import {
   TextInput,
   TouchableOpacity,
   View,
+  StatusBar as RNStatusBar,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import Constants from 'expo-constants';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppTheme } from '../context/ThemeContext';
 import { getCurrentUser } from '../services/supabase';
 import { getCurrentTelemetryScreen, submitBugReport } from '../services/telemetry';
@@ -32,7 +34,12 @@ const formatErrorMessage = (error) => {
 
 const ReportBugScreen = ({ navigation, route }) => {
   const { palette } = useAppTheme();
-  const styles = createStyles(palette);
+  const insets = useSafeAreaInsets();
+  const topInset = Math.max(
+    insets.top || 0,
+    Platform.OS === 'android' ? RNStatusBar.currentHeight || 0 : 0,
+  );
+  const styles = createStyles(palette, topInset);
   const [description, setDescription] = useState('');
   const [screenshot, setScreenshot] = useState(null);
   const [submitting, setSubmitting] = useState(false);
@@ -227,7 +234,7 @@ const ReportBugScreen = ({ navigation, route }) => {
   );
 };
 
-const createStyles = (palette) =>
+const createStyles = (palette, topInset = 0) =>
   StyleSheet.create({
     container: {
       flex: 1,
@@ -235,7 +242,7 @@ const createStyles = (palette) =>
     },
     topBar: {
       paddingHorizontal: 20,
-      paddingTop: 56,
+      paddingTop: Math.max(topInset + 10, 56),
       paddingBottom: 8,
     },
     backText: {

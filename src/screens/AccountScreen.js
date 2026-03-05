@@ -11,7 +11,9 @@ import {
   Alert,
   Image,
   Modal,
+  StatusBar as RNStatusBar,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as ImagePicker from "expo-image-picker";
 import {
   supabase,
@@ -51,8 +53,13 @@ const AccountScreen = ({ navigation, route }) => {
   const [viewedProfile, setViewedProfile] = useState(null);
   const [selectedPost, setSelectedPost] = useState(null);
   const { palette, isDark } = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const topInset = Math.max(
+    insets.top || 0,
+    Platform.OS === "android" ? RNStatusBar.currentHeight || 0 : 0,
+  );
   const brandAssets = getBrandAssetsForTheme(isDark);
-  const styles = createStyles(palette);
+  const styles = createStyles(palette, topInset);
   const profileUserId = String(route?.params?.profileUserId || "");
   const isFriendProfileRoute = Boolean(route?.params?.fromFriends);
   const isViewingOtherProfile = Boolean(
@@ -1288,7 +1295,7 @@ const AccountScreen = ({ navigation, route }) => {
   );
 };
 
-const createStyles = (palette) =>
+const createStyles = (palette, topInset = 0) =>
   StyleSheet.create({
     container: {
       flex: 1,
@@ -1507,7 +1514,10 @@ const createStyles = (palette) =>
       color: palette.subtext,
     },
     topBar: {
-      paddingTop: Platform.OS === "ios" ? 50 : 20,
+      paddingTop:
+        Platform.OS === "ios"
+          ? Math.max(topInset + SIZES.sm, 50)
+          : Math.max(topInset + SIZES.sm, 44),
       paddingHorizontal: SIZES.lg,
       paddingBottom: SIZES.sm,
       flexDirection: "row",

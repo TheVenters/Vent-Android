@@ -7,9 +7,11 @@ import {
   TextInput,
   Image,
   Platform,
+  StatusBar as RNStatusBar,
   Keyboard,
   Dimensions,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -75,6 +77,7 @@ const ActionButtonCluster = ({
   );
 
   const { palette, isDark } = useAppTheme();
+  const insets = useSafeAreaInsets();
   const brandAssets = useMemo(() => getBrandAssetsForTheme(isDark), [isDark]);
   const styles = createStyles(palette);
   const [expanded, setExpanded] = useState(false);
@@ -362,9 +365,21 @@ const ActionButtonCluster = ({
   );
   const isMenuInteractive = expanded && !showPostForm && !showLayersPanel;
   const isArrowInteractive = !expanded && !showPostForm && !showLayersPanel;
+  const overlayInsetStyle = useMemo(
+    () => ({
+      paddingTop:
+        ACTION_BUTTON.MARGIN +
+        Math.max(
+          Number(insets.top || 0),
+          Platform.OS === "android" ? Number(RNStatusBar.currentHeight || 0) : 0,
+        ),
+      paddingBottom: ACTION_BUTTON.MARGIN + (insets.bottom || 0),
+    }),
+    [insets.bottom, insets.top],
+  );
 
   return (
-    <View style={styles.overlay} pointerEvents="box-none">
+    <View style={[styles.overlay, overlayInsetStyle]} pointerEvents="box-none">
       {expanded && (
         <TouchableOpacity
           style={StyleSheet.absoluteFillObject}

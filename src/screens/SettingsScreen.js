@@ -1,13 +1,19 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Platform, StatusBar as RNStatusBar } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppTheme } from '../context/ThemeContext';
 import { getCurrentUser, supabase } from '../services/supabase';
 
 const SettingsScreen = ({ navigation }) => {
   const { themeMode, setThemeMode, palette } = useAppTheme();
   const [isAdmin, setIsAdmin] = useState(false);
+  const insets = useSafeAreaInsets();
+  const topInset = Math.max(
+    insets.top || 0,
+    Platform.OS === 'android' ? RNStatusBar.currentHeight || 0 : 0,
+  );
 
-  const styles = createStyles(palette);
+  const styles = createStyles(palette, topInset);
 
   useEffect(() => {
     let active = true;
@@ -118,7 +124,7 @@ const SettingsScreen = ({ navigation }) => {
   );
 };
 
-const createStyles = (palette) =>
+const createStyles = (palette, topInset = 0) =>
   StyleSheet.create({
     container: {
       flex: 1,
@@ -126,7 +132,7 @@ const createStyles = (palette) =>
     },
     topBar: {
       paddingHorizontal: 20,
-      paddingTop: 56,
+      paddingTop: Math.max(topInset + 10, 56),
       paddingBottom: 8,
     },
     backText: {

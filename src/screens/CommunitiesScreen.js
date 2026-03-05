@@ -5,6 +5,7 @@ import {
   StyleSheet,
   TouchableOpacity,
   Platform,
+  StatusBar as RNStatusBar,
   TextInput,
   ScrollView,
   Pressable,
@@ -14,6 +15,7 @@ import {
   KeyboardAvoidingView,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SIZES } from "../constants/theme";
 import { useAppTheme } from "../context/ThemeContext";
 import {
@@ -98,7 +100,12 @@ const normalizeMembershipRow = (row) => {
 
 const CommunitiesScreen = ({ navigation }) => {
   const { palette, isDark } = useAppTheme();
-  const styles = createStyles(palette, isDark);
+  const insets = useSafeAreaInsets();
+  const topInset = Math.max(
+    insets.top || 0,
+    Platform.OS === "android" ? RNStatusBar.currentHeight || 0 : 0,
+  );
+  const styles = createStyles(palette, isDark, topInset);
 
   const [currentUser, setCurrentUser] = useState(null);
   const [communities, setCommunities] = useState([]);
@@ -2045,14 +2052,17 @@ const CommunitiesScreen = ({ navigation }) => {
   );
 };
 
-const createStyles = (palette, isDark) =>
+const createStyles = (palette, isDark, topInset = 0) =>
   StyleSheet.create({
     container: {
       flex: 1,
       backgroundColor: palette.background,
     },
     header: {
-      paddingTop: Platform.OS === "ios" ? 50 : 20,
+      paddingTop:
+        Platform.OS === "ios"
+          ? Math.max(topInset + SIZES.sm, 50)
+          : Math.max(topInset + SIZES.sm, 44),
       paddingHorizontal: SIZES.xl,
       paddingBottom: SIZES.lg,
       borderBottomWidth: 1,

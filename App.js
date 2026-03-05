@@ -1,9 +1,13 @@
 import React, { useEffect, useRef } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { NavigationContainer, DefaultTheme as NavLightTheme, DarkTheme as NavDarkTheme } from '@react-navigation/native';
+import {
+  NavigationContainer,
+  DefaultTheme as NavLightTheme,
+  DarkTheme as NavDarkTheme,
+} from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createStackNavigator } from '@react-navigation/stack';
-import { Text } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import MapScreen from './src/screens/MapScreen';
 import AccountScreen from './src/screens/AccountScreen';
@@ -24,7 +28,6 @@ import {
 const Tab = createBottomTabNavigator();
 const Stack = createStackNavigator();
 
-// Stack navigator for Friends tab (includes Chat)
 function FriendsStack() {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
@@ -112,7 +115,11 @@ function AppNavigator() {
       onReady={syncCurrentRoute}
       onStateChange={syncCurrentRoute}
     >
-      <StatusBar style={isDark ? 'light' : 'dark'} />
+      <StatusBar
+        style={isDark ? 'light' : 'dark'}
+        translucent
+        backgroundColor="transparent"
+      />
       <Tab.Navigator
         screenOptions={{
           tabBarActiveTintColor: COLORS.primary,
@@ -121,31 +128,10 @@ function AppNavigator() {
           tabBarStyle: { display: 'none' },
         }}
       >
-        <Tab.Screen
-          name="Map"
-          component={MapScreen}
-          options={{
-            tabBarIcon: ({ color }) => <Text style={{ fontSize: 24 }}>🗺️</Text>,
-          }}
-        />
-        <Tab.Screen
-          name="Communities"
-          component={CommunitiesStack}
-        />
-        <Tab.Screen
-          name="Friends"
-          component={FriendsStack}
-          options={{
-            tabBarIcon: ({ color }) => <Text style={{ fontSize: 24 }}>🤝</Text>,
-          }}
-        />
-        <Tab.Screen
-          name="Account"
-          component={AccountStack}
-          options={{
-            tabBarIcon: ({ color }) => <Text style={{ fontSize: 24 }}>👤</Text>,
-          }}
-        />
+        <Tab.Screen name="Map" component={MapScreen} />
+        <Tab.Screen name="Communities" component={CommunitiesStack} />
+        <Tab.Screen name="Friends" component={FriendsStack} />
+        <Tab.Screen name="Account" component={AccountStack} />
       </Tab.Navigator>
     </NavigationContainer>
   );
@@ -153,8 +139,10 @@ function AppNavigator() {
 
 export default function App() {
   return (
-    <ThemeProvider>
-      <AppNavigator />
-    </ThemeProvider>
+    <SafeAreaProvider>
+      <ThemeProvider>
+        <AppNavigator />
+      </ThemeProvider>
+    </SafeAreaProvider>
   );
 }

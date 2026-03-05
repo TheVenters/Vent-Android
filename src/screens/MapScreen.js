@@ -14,9 +14,11 @@ import {
   Modal,
   ScrollView,
   Platform,
+  StatusBar as RNStatusBar,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect } from "@react-navigation/native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import MapView, {
   Polyline,
   Polygon,
@@ -720,7 +722,12 @@ const collectCommentThreadIds = (comments, rootCommentId) => {
 
 const MapScreen = ({ navigation, route }) => {
   const { isDark, palette } = useAppTheme();
-  const styles = createStyles(palette);
+  const insets = useSafeAreaInsets();
+  const topInset = Math.max(
+    Number(insets?.top || 0),
+    Platform.OS === "android" ? Number(RNStatusBar.currentHeight || 0) : 0,
+  );
+  const styles = createStyles(palette, { ...insets, top: topInset });
   const mapProvider = Platform.OS === "android" ? PROVIDER_GOOGLE : undefined;
   const appleMapInterfaceStyle = isDark ? "dark" : "light";
 
@@ -4791,7 +4798,7 @@ useEffect(() => {
   );
 };
 
-const createStyles = (palette) =>
+const createStyles = (palette, insets = { top: 0, bottom: 0 }) =>
   StyleSheet.create({
     container: {
       flex: 1,
@@ -4802,7 +4809,7 @@ const createStyles = (palette) =>
     },
     communityMapBanner: {
       position: "absolute",
-      top: 52,
+      top: (insets?.top || 0) + 12,
       right: 16,
       flexDirection: "row",
       alignItems: "center",
@@ -4841,7 +4848,7 @@ const createStyles = (palette) =>
     },
     drawingBar: {
       position: "absolute",
-      top: 120,
+      top: (insets?.top || 0) + 80,
       left: 20,
       right: 20,
       flexDirection: "row",

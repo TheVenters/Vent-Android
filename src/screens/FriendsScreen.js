@@ -10,7 +10,9 @@ import {
   RefreshControl,
   Platform,
   Image,
+  StatusBar as RNStatusBar,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   acceptFriendRequestViaEdgeFunction,
   fetchFriendListsViaEdgeFunction,
@@ -26,7 +28,12 @@ import { useAppTheme } from '../context/ThemeContext';
 
 const FriendsScreen = ({ navigation }) => {
   const { palette, isDark } = useAppTheme();
-  const styles = createStyles(palette);
+  const insets = useSafeAreaInsets();
+  const topInset = Math.max(
+    insets.top || 0,
+    Platform.OS === 'android' ? RNStatusBar.currentHeight || 0 : 0,
+  );
+  const styles = createStyles(palette, topInset);
   const [currentUser, setCurrentUser] = useState(null);
   const [friends, setFriends] = useState([]);
   const [requests, setRequests] = useState([]);
@@ -627,14 +634,17 @@ const FriendsScreen = ({ navigation }) => {
   );
 };
 
-const createStyles = (palette) =>
+const createStyles = (palette, topInset = 0) =>
   StyleSheet.create({
     container: {
       flex: 1,
       backgroundColor: palette.background,
     },
     header: {
-      paddingTop: Platform.OS === 'ios' ? 50 : 20,
+      paddingTop:
+        Platform.OS === 'ios'
+          ? Math.max(topInset + SIZES.sm, 50)
+          : Math.max(topInset + SIZES.sm, 44),
       paddingHorizontal: SIZES.xl,
       paddingBottom: SIZES.lg,
       borderBottomWidth: 1,

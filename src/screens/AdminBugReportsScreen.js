@@ -5,11 +5,14 @@ import {
   FlatList,
   Image,
   Linking,
+  Platform,
   StyleSheet,
+  StatusBar as RNStatusBar,
   Text,
   TouchableOpacity,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppTheme } from '../context/ThemeContext';
 import {
   getActiveSession,
@@ -43,7 +46,12 @@ const toPrettyDate = (value) => {
 
 const AdminBugReportsScreen = ({ navigation }) => {
   const { palette } = useAppTheme();
-  const styles = createStyles(palette);
+  const insets = useSafeAreaInsets();
+  const topInset = Math.max(
+    insets.top || 0,
+    Platform.OS === 'android' ? RNStatusBar.currentHeight || 0 : 0,
+  );
+  const styles = createStyles(palette, topInset);
   const [reports, setReports] = useState([]);
   const [nextBefore, setNextBefore] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -223,7 +231,7 @@ const AdminBugReportsScreen = ({ navigation }) => {
   );
 };
 
-const createStyles = (palette) =>
+const createStyles = (palette, topInset = 0) =>
   StyleSheet.create({
     container: {
       flex: 1,
@@ -231,7 +239,7 @@ const createStyles = (palette) =>
     },
     topBar: {
       paddingHorizontal: 20,
-      paddingTop: 56,
+      paddingTop: Math.max(topInset + 10, 56),
       paddingBottom: 8,
       flexDirection: 'row',
       justifyContent: 'space-between',
