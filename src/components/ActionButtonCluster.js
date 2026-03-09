@@ -23,6 +23,10 @@ import LayersControlPanel from "./LayersControlPanel";
 import { useAppTheme } from "../context/ThemeContext";
 import { getBrandAssetsForTheme } from "../constants/brandAssets";
 
+const HOLD_DRAG_OPEN_THRESHOLD = 34;
+const HOLD_RECORD_DELAY_MS = 700;
+const HOLD_LONG_PRESS_DELAY_MS = 180;
+
 const ActionButtonCluster = ({
   navigation,
   mapRef,
@@ -41,6 +45,7 @@ const ActionButtonCluster = ({
   userLocation,
   onSearch,
   onArrowPinFocus,
+  onPrepareOverlay,
 }) => {
   const toRadians = useCallback((degrees) => (degrees * Math.PI) / 180, []);
   const distanceMeters = useCallback(
@@ -81,7 +86,18 @@ const ActionButtonCluster = ({
   const [searchQuery, setSearchQuery] = useState("");
   const [showPostForm, setShowPostForm] = useState(false);
   const [showLayersPanel, setShowLayersPanel] = useState(false);
+  const [holdRecordStartToken, setHoldRecordStartToken] = useState(0);
+  const [holdRecordStopToken, setHoldRecordStopToken] = useState(0);
   const lastArrowTargetIdRef = useRef(null);
+  const suppressActionPressRef = useRef(false);
+  const holdGestureRef = useRef({
+    isPressing: false,
+    isLongPress: false,
+    startPageY: 0,
+    cameraOpened: false,
+    recordStarted: false,
+    recordTimer: null,
+  });
 
   const expandProgress = useSharedValue(0);
   const keyboardOffset = useSharedValue(0);
@@ -217,6 +233,7 @@ const ActionButtonCluster = ({
 
   const handleMenuPress = useCallback(
     (item) => {
+      onPrepareOverlay?.();
       switch (item) {
         case "Communities":
           navigation.navigate("Communities");
@@ -240,7 +257,7 @@ const ActionButtonCluster = ({
           break;
       }
     },
-    [navigation, collapse],
+    [collapse, navigation, onPrepareOverlay],
   );
 
   const handleSearchSubmit = useCallback(() => {
@@ -263,6 +280,99 @@ const ActionButtonCluster = ({
     [onPostSubmit],
   );
 
+  const clearHoldRecordTimer = useCallback(() => {
+    const timer = holdGestureRef.current.recordTimer;
+    if (timer) {
+      clearTimeout(timer);
+    }
+    holdGestureRef.current.recordTimer = null;
+  }, []);
+
+  useEffect(() => () => clearHoldRecordTimer(), [clearHoldRecordTimer]);
+
+  const scheduleHoldRecording = useCallback(() => {
+    clearHoldRecordTimer();
+    holdGestureRef.current.recordTimer = setTimeout(() => {
+      const gesture = holdGestureRef.current;
+      gesture.recordTimer = null;
+      if (!gesture.isPressing || !gesture.cameraOpened || gesture.recordStarted) return;
+      gesture.recordStarted = true;
+      setHoldRecordStartToken((value) => value + 1);
+    }, HOLD_RECORD_DELAY_MS);
+  }, [clearHoldRecordTimer]);
+
+  const openCameraFromHold = useCallback(() => {
+    const gesture = holdGestureRef.current;
+    if (gesture.cameraOpened) return;
+    gesture.cameraOpened = true;
+    onPrepareOverlay?.();
+    suppressActionPressRef.current = true;
+    setShowLayersPanel(false);
+    setShowPostForm(true);
+    collapse();
+    scheduleHoldRecording();
+  }, [collapse, onPrepareOverlay, scheduleHoldRecording]);
+
+  const handleActionPressIn = useCallback(
+    (event) => {
+      clearHoldRecordTimer();
+      holdGestureRef.current = {
+        isPressing: true,
+        isLongPress: false,
+        startPageY: Number(event?.nativeEvent?.pageY || 0),
+        cameraOpened: false,
+        recordStarted: false,
+        recordTimer: null,
+      };
+    },
+    [clearHoldRecordTimer],
+  );
+
+  const handleActionLongPress = useCallback(() => {
+    if (!holdGestureRef.current.isPressing) return;
+    holdGestureRef.current.isLongPress = true;
+  }, []);
+
+  const handleActionTouchMove = useCallback(
+    (event) => {
+      const gesture = holdGestureRef.current;
+      if (!gesture.isPressing || !gesture.isLongPress || gesture.cameraOpened) return;
+      const currentY = Number(event?.nativeEvent?.pageY || 0);
+      const deltaY = currentY - Number(gesture.startPageY || 0);
+      if (deltaY >= HOLD_DRAG_OPEN_THRESHOLD) {
+        openCameraFromHold();
+      }
+    },
+    [openCameraFromHold],
+  );
+
+  const handleActionPressOut = useCallback(() => {
+    const gesture = holdGestureRef.current;
+    clearHoldRecordTimer();
+    if (gesture.cameraOpened || gesture.isLongPress) {
+      suppressActionPressRef.current = true;
+    }
+    if (gesture.recordStarted) {
+      setHoldRecordStopToken((value) => value + 1);
+    }
+    holdGestureRef.current = {
+      isPressing: false,
+      isLongPress: false,
+      startPageY: 0,
+      cameraOpened: false,
+      recordStarted: false,
+      recordTimer: null,
+    };
+  }, [clearHoldRecordTimer]);
+
+  const handleActionPress = useCallback(() => {
+    if (suppressActionPressRef.current) {
+      suppressActionPressRef.current = false;
+      return;
+    }
+    toggleExpand();
+  }, [toggleExpand]);
+
   const screenWidth = Dimensions.get("window").width;
   const searchBarMaxWidth =
     screenWidth - ACTION_BUTTON.MARGIN * 2 - ACTION_BUTTON.SIZE - ACTION_BUTTON.GAP;
@@ -283,40 +393,6 @@ const ActionButtonCluster = ({
     return { width, opacity, overflow: "hidden" };
   });
 
-  const arrowButtonStyle = useAnimatedStyle(() => {
-    const opacity = interpolate(
-      expandProgress.value,
-      [0, 0.5, 1],
-      [1, 0, 0],
-      Extrapolation.CLAMP,
-    );
-    const scale = interpolate(
-      expandProgress.value,
-      [0, 0.5, 1],
-      [1, 0.5, 0.5],
-      Extrapolation.CLAMP,
-    );
-    const height = interpolate(
-      expandProgress.value,
-      [0, 1],
-      [ACTION_BUTTON.SIZE + 2, 0],
-      Extrapolation.CLAMP,
-    );
-    const marginBottom = interpolate(
-      expandProgress.value,
-      [0, 1],
-      [2, 0],
-      Extrapolation.CLAMP,
-    );
-    return {
-      opacity,
-      transform: [{ scale }],
-      height,
-      marginBottom,
-      overflow: "hidden",
-    };
-  });
-
   const menuStyle = useAnimatedStyle(() => {
     const translateY = interpolate(
       expandProgress.value,
@@ -332,6 +408,39 @@ const ActionButtonCluster = ({
     );
     return { transform: [{ translateY }], opacity };
   });
+
+  const bottomArrowIconStyle = useAnimatedStyle(() => {
+    const opacity = interpolate(
+      expandProgress.value,
+      [0, 0.45, 1],
+      [1, 0, 0],
+      Extrapolation.CLAMP,
+    );
+    const scale = interpolate(
+      expandProgress.value,
+      [0, 0.45, 1],
+      [1, 0.72, 0.72],
+      Extrapolation.CLAMP,
+    );
+    return { opacity, transform: [{ scale }] };
+  });
+
+  const bottomAddIconStyle = useAnimatedStyle(() => {
+    const opacity = interpolate(
+      expandProgress.value,
+      [0, 0.45, 1],
+      [0, 0, 1],
+      Extrapolation.CLAMP,
+    );
+    const scale = interpolate(
+      expandProgress.value,
+      [0, 0.45, 1],
+      [0.72, 0.72, 1],
+      Extrapolation.CLAMP,
+    );
+    return { opacity, transform: [{ scale }] };
+  });
+
   const keyboardShiftStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: -keyboardOffset.value }],
   }));
@@ -352,10 +461,6 @@ const ActionButtonCluster = ({
       {
         key: "Layers",
         icon: brandAssets.menu.layers,
-      },
-      {
-        key: "Add",
-        icon: brandAssets.menu.add,
       },
     ],
     [brandAssets],
@@ -386,14 +491,20 @@ const ActionButtonCluster = ({
           ))}
         </Animated.View>
 
-        <Animated.View style={arrowButtonStyle}>
+        <View style={styles.topToggleWrap}>
           <TouchableOpacity
             style={[styles.button, styles.arrowButton]}
-            onPress={goToNearestPin}
+            onPress={handleActionPress}
+            onPressIn={handleActionPressIn}
+            onLongPress={handleActionLongPress}
+            onTouchMove={handleActionTouchMove}
+            onResponderMove={handleActionTouchMove}
+            onPressOut={handleActionPressOut}
+            delayLongPress={HOLD_LONG_PRESS_DELAY_MS}
           >
-            <Text style={styles.buttonText}>{"➜"}</Text>
+            <Image source={brandAssets.logo} style={styles.aButtonLogo} resizeMode="contain" />
           </TouchableOpacity>
-        </Animated.View>
+        </View>
 
         <View style={styles.aRow}>
           <Animated.View style={[styles.searchBar, searchBarStyle]}>
@@ -410,9 +521,28 @@ const ActionButtonCluster = ({
 
           <TouchableOpacity
             style={[styles.button, styles.aButton]}
-            onPress={toggleExpand}
+            onPress={() => {
+              if (expanded) {
+                handleMenuPress("Add");
+                return;
+              }
+              goToNearestPin();
+            }}
           >
-            <Image source={brandAssets.logo} style={styles.aButtonLogo} resizeMode="contain" />
+            <View style={styles.toggleIconWrap}>
+              <Animated.Text style={[styles.buttonText, bottomArrowIconStyle]}>
+                {"➜"}
+              </Animated.Text>
+              <Animated.View
+                style={[styles.toggleIconAbsolute, bottomAddIconStyle]}
+              >
+                <Image
+                  source={brandAssets.menu.add}
+                  style={styles.bottomAddIcon}
+                  resizeMode="contain"
+                />
+              </Animated.View>
+            </View>
           </TouchableOpacity>
         </View>
       </Animated.View>
@@ -440,6 +570,8 @@ const ActionButtonCluster = ({
         layers={layers}
         selectedLayerId={selectedLayerId}
         userLocation={userLocation}
+        holdRecordStartToken={holdRecordStartToken}
+        holdRecordStopToken={holdRecordStopToken}
       />
     </View>
   );
@@ -464,6 +596,9 @@ const createStyles = (palette) =>
     aRow: {
       flexDirection: "row",
       alignItems: "center",
+    },
+    topToggleWrap: {
+      marginBottom: 8,
     },
     button: {
       width: ACTION_BUTTON.SIZE,
@@ -494,6 +629,19 @@ const createStyles = (palette) =>
       fontSize: 22,
       fontWeight: "700",
       color: palette.text,
+    },
+    toggleIconWrap: {
+      width: 34,
+      height: 34,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    toggleIconAbsolute: {
+      position: "absolute",
+    },
+    bottomAddIcon: {
+      width: 42,
+      height: 42,
     },
     aButtonLogo: {
       width: 34,

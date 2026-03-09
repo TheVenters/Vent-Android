@@ -8,6 +8,11 @@ import {
   fetchMyPinsViaEdgeFunction,
   fetchVisiblePinsViaEdgeFunction,
 } from "../../services/supabase";
+import {
+  MY_POSTS_AUDIENCE_ORDER,
+  getMyPostsAudienceFilterKey,
+  isMyPostsAudienceVirtualLayer,
+} from "./layerRuntime";
 
 const LAYER_TRACE_ENABLED = false;
 const logLayerTrace = (label, payload = null) => {
@@ -95,17 +100,37 @@ export const resolvePinsForMap = async ({
   );
   const includePublicAudience = enabledAudienceKeySet.has("public");
   const includeFriendsAudience = enabledAudienceKeySet.has("friends");
+  const includeMyPostsAudienceByKey = new Map(
+    MY_POSTS_AUDIENCE_ORDER.map((audienceKey) => [
+      audienceKey,
+      enabledAudienceKeySet.has(getMyPostsAudienceFilterKey(audienceKey)),
+    ]),
+  );
+  const includeAnyMyPostsAudience = Array.from(
+    includeMyPostsAudienceByKey.values(),
+  ).some(Boolean);
 
   const enabledSystemLayerIdsByAudience = new Map([
     ["public", []],
     ["friends", []],
     ["private", []],
   ]);
+  const enabledMyPostsVirtualLayerIdsByAudience = new Map(
+    MY_POSTS_AUDIENCE_ORDER.map((audienceKey) => [audienceKey, []]),
+  );
   layers.forEach((layer) => {
     if (!layer?.isEnabled) return;
     const canDriveMap =
       layer?.viewerCanManage !== false || Boolean(layer?.isForcedEnabled);
     if (!canDriveMap) return;
+    if (isMyPostsAudienceVirtualLayer(layer)) {
+      const audienceKey = normalizeAudienceValue(layer?.myPostsAudienceKey);
+      if (!enabledMyPostsVirtualLayerIdsByAudience.has(audienceKey)) return;
+      const existing = enabledMyPostsVirtualLayerIdsByAudience.get(audienceKey) || [];
+      if (!existing.includes(layer.id)) existing.push(layer.id);
+      enabledMyPostsVirtualLayerIdsByAudience.set(audienceKey, existing);
+      return;
+    }
     const ownerType = layer?.owner_type || "system";
     if (ownerType !== "system") return;
     const key = getPinLayerKeyFromLayer(layer);
@@ -133,8 +158,7 @@ export const resolvePinsForMap = async ({
   const enabledOwnUserPostingLayerIds = enabledLayerIds.filter((layerId) => {
     const layerMeta = layerById.get(layerId);
     if (!layerMeta) return false;
-    if (layerMeta?.isOwnUserPostsLayer) return true;
-    return (layerMeta?.owner_type || "system") === "user";
+    return Boolean(layerMeta?.isOwnUserPostsLayer);
   });
   const enabledFriendScopedLayerIds = enabledLayerIds.filter((layerId) => {
     const layerMeta = layerById.get(layerId);
@@ -150,6 +174,7 @@ export const resolvePinsForMap = async ({
     enabledFriendsLayerIds,
     includePublicAudience,
     includeFriendsAudience,
+    includeMyPostsAudienceByKey: Object.fromEntries(includeMyPostsAudienceByKey),
   });
 
   const pinById = new Map();
@@ -297,8 +322,19 @@ export const resolvePinsForMap = async ({
     });
   }
 
-  if (ownUserId && enabledOwnUserPostingLayerIds.length > 0) {
-    const ownPins = await loadMyPins(reader, ownUserId, accessToken, refreshToken);
+  let ownPinsCache = null;
+  const loadOwnPinsCached = async () => {
+    if (ownPinsCache) return ownPinsCache;
+    ownPinsCache = await loadMyPins(reader, ownUserId, accessToken, refreshToken);
+    return ownPinsCache;
+  };
+
+  if (
+    ownUserId &&
+    enabledOwnUserPostingLayerIds.length > 0 &&
+    includeAnyMyPostsAudience
+  ) {
+    const ownPins = await loadOwnPinsCached();
     logLayerTrace("resolvePinsForMap:myPosts", {
       ownUserId,
       count: ownPins.length,
@@ -307,9 +343,31 @@ export const resolvePinsForMap = async ({
     ownPins.forEach((pin) => {
       const pinId = String(pin?.id || "");
       if (!pinId) return;
+      const pinAudience = normalizeAudienceValue(pin?.base_audience || pin?.layer);
+      if (!includeMyPostsAudienceByKey.get(pinAudience)) return;
       pinById.set(pinId, pin);
       const existing = membershipsByPinId.get(pinId) || [];
       enabledOwnUserPostingLayerIds.forEach((layerId) => {
+        if (!existing.includes(layerId)) existing.push(layerId);
+      });
+      membershipsByPinId.set(pinId, existing);
+    });
+  }
+
+  if (ownUserId && includeAnyMyPostsAudience) {
+    const ownPins = await loadOwnPinsCached();
+    ownPins.forEach((pin) => {
+      const pinId = String(pin?.id || "");
+      if (!pinId) return;
+      const pinAudience = normalizeAudienceValue(pin?.base_audience || pin?.layer);
+      if (!MY_POSTS_AUDIENCE_ORDER.includes(pinAudience)) return;
+      if (!includeMyPostsAudienceByKey.get(pinAudience)) return;
+
+      pinById.set(pinId, pin);
+      const existing = membershipsByPinId.get(pinId) || [];
+      const virtualLayerIds =
+        enabledMyPostsVirtualLayerIdsByAudience.get(pinAudience) || [];
+      virtualLayerIds.forEach((layerId) => {
         if (!existing.includes(layerId)) existing.push(layerId);
       });
       membershipsByPinId.set(pinId, existing);
@@ -427,6 +485,10 @@ export const resolvePinsForMap = async ({
     if (uniqueCandidateIds.length === 0) return null;
     const pinOwnerId = String(pin?.user_id || "");
     const pinAudience = normalizeAudienceValue(pin?.base_audience || pin?.layer);
+    const isOwnPin = pinOwnerId && ownUserId && pinOwnerId === String(ownUserId);
+    const privateMyPostsEnabled = Boolean(
+      includeMyPostsAudienceByKey.get("private"),
+    );
 
     const sorted = [...uniqueCandidateIds].sort((a, b) => {
       const rankA = layerOrderIndex.has(a)
@@ -443,11 +505,16 @@ export const resolvePinsForMap = async ({
       if (!layerMeta) return false;
       const pinKey = getPinLayerKeyFromLayer(layerMeta);
       const layerOwnerType = layerMeta?.owner_type || "system";
+      if (layerMeta?.isMyPostsAudienceVirtual) {
+        const isOwn = pinOwnerId && ownUserId && pinOwnerId === String(ownUserId);
+        if (!isOwn) return false;
+        const audienceKey = normalizeAudienceValue(
+          layerMeta?.myPostsAudienceKey || pinKey,
+        );
+        return audienceKey && pinAudience === audienceKey;
+      }
 
-      if (
-        layerMeta?.isOwnUserPostsLayer ||
-        layerOwnerType === "user"
-      ) {
+      if (layerMeta?.isOwnUserPostsLayer) {
         return pinOwnerId && ownUserId && pinOwnerId === String(ownUserId);
       }
 
@@ -464,7 +531,28 @@ export const resolvePinsForMap = async ({
       return true;
     });
 
-    return validSorted[0] || null;
+    const topLayerId = validSorted[0] || null;
+    if (!topLayerId) return null;
+
+    // Final safety gate: own private posts must not leak through unless
+    // MyPosts private is enabled, or another non-private enabled layer
+    // legitimately admits the post.
+    if (isOwnPin && pinAudience === "private" && !privateMyPostsEnabled) {
+      const topLayer = layerById.get(topLayerId) || null;
+      if (!topLayer) return null;
+      const topLayerKey = getPinLayerKeyFromLayer(topLayer);
+      const topOwnerType = topLayer?.owner_type || "system";
+      const topIsOwnScoped =
+        Boolean(topLayer?.isOwnUserPostsLayer) ||
+        Boolean(topLayer?.isMyPostsAudienceVirtual);
+      const topIsSystemPrivate =
+        topOwnerType === "system" && topLayerKey === "private";
+      if (topIsOwnScoped || topIsSystemPrivate) {
+        return null;
+      }
+    }
+
+    return topLayerId;
   };
 
   const withResolvedLayer = pinsData

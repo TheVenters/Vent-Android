@@ -28,6 +28,12 @@ const normalizeVisibility = (value) => {
 const visibilityLabel = (value) =>
   String(value || "").charAt(0).toUpperCase() + String(value || "").slice(1);
 
+const isRenderableMediaUrl = (value) => {
+  const uri = String(value || "").trim();
+  if (!uri) return false;
+  return !uri.toLowerCase().startsWith("storage://");
+};
+
 const PinDetailModal = ({
   visible,
   pin,
@@ -52,13 +58,31 @@ const PinDetailModal = ({
   const [caption, setCaption] = useState("");
   const [visibility, setVisibility] = useState("public");
   const [mediaAspectRatio, setMediaAspectRatio] = useState(4 / 3);
+  const [activeMediaIndex, setActiveMediaIndex] = useState(0);
   const [commentDraft, setCommentDraft] = useState("");
   const [replyToCommentId, setReplyToCommentId] = useState(null);
   const [expandedReplyThreads, setExpandedReplyThreads] = useState({});
 
   const isOwner = pin?.user_id === currentUserId;
+  const mediaUrls = useMemo(() => {
+    const geometryList = Array.isArray(pin?.geometry?.media_urls)
+      ? pin.geometry.media_urls
+      : [];
+    const topLevelList = Array.isArray(pin?.media_urls) ? pin.media_urls : [];
+    const normalizedList = [...geometryList, ...topLevelList]
+      .map((value) => String(value || "").trim())
+      .filter(isRenderableMediaUrl);
+    if (normalizedList.length > 0) {
+      return Array.from(new Set(normalizedList));
+    }
+    const primary = String(pin?.media_url || "").trim();
+    return isRenderableMediaUrl(primary) ? [primary] : [];
+  }, [pin?.geometry?.media_urls, pin?.media_url, pin?.media_urls]);
   const isMediaPin =
-    pin?.type === "media" || pin?.type === "photo" || pin?.type === "video";
+    pin?.type === "media" ||
+    pin?.type === "photo" ||
+    pin?.type === "video" ||
+    mediaUrls.length > 0;
 
   useEffect(() => {
     if (pin) {
@@ -69,17 +93,21 @@ const PinDetailModal = ({
       setReplyToCommentId(null);
       setExpandedReplyThreads({});
       setIsEditing(false);
+      setActiveMediaIndex(0);
     }
   }, [pin]);
 
+  const activeMediaUrl =
+    mediaUrls[Math.max(0, Math.min(activeMediaIndex, mediaUrls.length - 1))] || null;
+
   useEffect(() => {
-    if (!pin?.media_url || pin?.media_type === "video") {
+    if (!activeMediaUrl || pin?.media_type === "video") {
       setMediaAspectRatio(4 / 3);
       return;
     }
 
     Image.getSize(
-      pin.media_url,
+      activeMediaUrl,
       (width, height) => {
         if (width > 0 && height > 0) {
           setMediaAspectRatio(width / height);
@@ -89,7 +117,7 @@ const PinDetailModal = ({
       },
       () => setMediaAspectRatio(4 / 3),
     );
-  }, [pin?.media_url, pin?.media_type]);
+  }, [activeMediaUrl, pin?.media_type]);
 
   const handleSave = () => {
     if (!isMediaPin && !content.trim()) {
@@ -463,7 +491,7 @@ const PinDetailModal = ({
   return (
     <Modal
       visible={visible}
-      animationType="slide"
+      animationType="fade"
       transparent={true}
       onRequestClose={handleClose}
     >
@@ -493,22 +521,51 @@ const PinDetailModal = ({
 
           <ScrollView style={styles.content}>
             {/* Media Preview */}
-            {isMediaPin && pin.media_url && (
+            {isMediaPin && mediaUrls.length > 0 && (
               <View style={styles.mediaContainer}>
-                {pin.media_type === "video" ? (
+                {pin.media_type === "video" && mediaUrls.length === 1 ? (
                   <View style={styles.videoPlaceholder}>
                     <Text style={styles.videoIcon}>🎬</Text>
                     <Text style={styles.videoText}>Video</Text>
                   </View>
                 ) : (
-                  <Image
-                    source={{ uri: pin.media_url }}
-                    style={[
-                      styles.mediaImage,
-                      { aspectRatio: mediaAspectRatio },
-                    ]}
-                    resizeMode="contain"
-                  />
+                  <>
+                    <Image
+                      source={{ uri: activeMediaUrl }}
+                      style={[
+                        styles.mediaImage,
+                        { aspectRatio: mediaAspectRatio },
+                      ]}
+                      resizeMode="contain"
+                    />
+                    {mediaUrls.length > 1 ? (
+                      <View style={styles.mediaPagerRow}>
+                        <TouchableOpacity
+                          style={styles.mediaPagerBtn}
+                          onPress={() =>
+                            setActiveMediaIndex((prev) =>
+                              prev <= 0 ? mediaUrls.length - 1 : prev - 1,
+                            )
+                          }
+                        >
+                          <Text style={styles.mediaPagerBtnText}>Prev</Text>
+                        </TouchableOpacity>
+                        <Text style={styles.mediaPagerLabel}>
+                          {activeMediaIndex + 1} / {mediaUrls.length}
+                        </Text>
+                        <TouchableOpacity
+                          style={styles.mediaPagerBtn}
+                          onPress={() =>
+                            setActiveMediaIndex((prev) =>
+                              prev >= mediaUrls.length - 1 ? 0 : prev + 1,
+                            )
+                          }
+                        >
+                          <Text style={styles.mediaPagerBtnText}>Next</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ) : null}
+                  </>
                 )}
               </View>
             )}
@@ -844,6 +901,31 @@ const styles = StyleSheet.create({
   videoText: {
     color: COLORS.white,
     fontSize: SIZES.lg,
+  },
+  mediaPagerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: SIZES.sm,
+    gap: SIZES.sm,
+  },
+  mediaPagerBtn: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: SIZES.radiusFull,
+    paddingHorizontal: SIZES.md,
+    paddingVertical: SIZES.xs,
+    backgroundColor: COLORS.light,
+  },
+  mediaPagerBtnText: {
+    color: COLORS.dark,
+    fontSize: SIZES.sm,
+    fontWeight: "700",
+  },
+  mediaPagerLabel: {
+    color: COLORS.gray,
+    fontSize: SIZES.sm,
+    fontWeight: "700",
   },
   contentContainer: {
     marginBottom: SIZES.lg,

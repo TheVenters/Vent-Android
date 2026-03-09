@@ -18,6 +18,7 @@ import {
   fetchVisiblePinsViaEdgeFunction,
   getActiveSession,
   getCurrentUser,
+  hydratePinsWithSignedMediaUrls,
   signIn,
   signUp,
   signOut,
@@ -226,7 +227,7 @@ const AccountScreen = ({ navigation, route }) => {
             .limit(200);
 
         let res = await queryPins(
-          "id,type,content,caption,layer,base_audience,created_at,lat,lng,media_url,media_type",
+          "id,type,content,caption,layer,base_audience,created_at,lat,lng,media_url,media_type,geometry",
         );
         const missingBaseAudienceColumn =
           String(res?.error?.code || "") === "42703" ||
@@ -236,13 +237,18 @@ const AccountScreen = ({ navigation, route }) => {
 
         if (missingBaseAudienceColumn) {
           res = await queryPins(
-            "id,type,content,caption,layer,created_at,lat,lng,media_url,media_type",
+            "id,type,content,caption,layer,created_at,lat,lng,media_url,media_type,geometry",
           );
         }
 
         if (res.error) throw res.error;
         basePosts = Array.isArray(res.data) ? res.data : [];
       }
+
+      basePosts = await hydratePinsWithSignedMediaUrls(
+        basePosts,
+        accessToken ? { access_token: accessToken } : session,
+      );
 
       const pinIds = basePosts
         .map((post) => String(post?.id || ""))
@@ -481,6 +487,32 @@ const AccountScreen = ({ navigation, route }) => {
       : [];
     if (explicitLabels.length > 0) return explicitLabels;
     return [getAudienceLabel(post?.base_audience || post?.layer || "public")];
+  };
+
+  const isRenderableRemoteMediaUrl = (value) => {
+    const uri = String(value || "").trim();
+    if (!uri) return false;
+    const lowered = uri.toLowerCase();
+    if (lowered.startsWith("storage://")) return false;
+    if (lowered.startsWith("file://")) return false;
+    if (lowered.startsWith("content://")) return false;
+    if (lowered.startsWith("ph://")) return false;
+    return true;
+  };
+
+  const getPostMediaUrls = (post) => {
+    const geometryList = Array.isArray(post?.geometry?.media_urls)
+      ? post.geometry.media_urls
+      : [];
+    const mediaList = Array.isArray(post?.media_urls) ? post.media_urls : [];
+    const normalizedList = [...geometryList, ...mediaList]
+      .map((value) => String(value || "").trim())
+      .filter(isRenderableRemoteMediaUrl);
+    if (normalizedList.length > 0) {
+      return Array.from(new Set(normalizedList));
+    }
+    const primary = String(post?.media_url || "").trim();
+    return isRenderableRemoteMediaUrl(primary) ? [primary] : [];
   };
 
   const openPostDetail = (post) => {
@@ -957,6 +989,7 @@ const AccountScreen = ({ navigation, route }) => {
                 const audienceIcon = getAudienceIcon(audienceRaw);
                 const postType = String(post?.type || "text").toUpperCase();
                 const layerLabels = getPostLayerLabels(post);
+                const mediaUrls = getPostMediaUrls(post);
                 return (
                   <TouchableOpacity
                     key={String(post?.id || `post-${index}`)}
@@ -977,6 +1010,29 @@ const AccountScreen = ({ navigation, route }) => {
                     <Text style={styles.postPreview} numberOfLines={4}>
                       {getPostPreview(post)}
                     </Text>
+                    {mediaUrls.length > 0 ? (
+                      <ScrollView
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        contentContainerStyle={styles.postMediaStrip}
+                      >
+                        {mediaUrls.slice(0, 4).map((mediaUrl, mediaIndex) => (
+                          <Image
+                            key={`${post?.id || index}-${mediaIndex}`}
+                            source={{ uri: mediaUrl }}
+                            style={styles.postMediaThumb}
+                            resizeMode="cover"
+                          />
+                        ))}
+                        {mediaUrls.length > 4 ? (
+                          <View style={styles.postMediaOverflowBadge}>
+                            <Text style={styles.postMediaOverflowText}>
+                              +{mediaUrls.length - 4}
+                            </Text>
+                          </View>
+                        ) : null}
+                      </ScrollView>
+                    ) : null}
                     <View style={styles.postLayersWrap}>
                       {layerLabels.map((label) => (
                         <View key={`${post?.id}-${label}`} style={styles.postLayerChip}>
@@ -1019,16 +1075,34 @@ const AccountScreen = ({ navigation, route }) => {
 
               {selectedPost ? (
                 <ScrollView style={styles.postModalContent}>
-                  {selectedPost.media_url &&
+                  {getPostMediaUrls(selectedPost).length > 0 &&
                   String(selectedPost.media_type || "").toLowerCase() !==
                     "video" ? (
-                    <Image
-                      source={{ uri: selectedPost.media_url }}
-                      style={styles.postModalImage}
-                      resizeMode="cover"
-                    />
+                    <>
+                      <Image
+                        source={{ uri: getPostMediaUrls(selectedPost)[0] }}
+                        style={styles.postModalImage}
+                        resizeMode="cover"
+                      />
+                      {getPostMediaUrls(selectedPost).length > 1 ? (
+                        <ScrollView
+                          horizontal
+                          showsHorizontalScrollIndicator={false}
+                          contentContainerStyle={styles.postModalImageStrip}
+                        >
+                          {getPostMediaUrls(selectedPost).map((mediaUrl, index) => (
+                            <Image
+                              key={`${selectedPost.id || "post"}-${index}`}
+                              source={{ uri: mediaUrl }}
+                              style={styles.postModalImageThumb}
+                              resizeMode="cover"
+                            />
+                          ))}
+                        </ScrollView>
+                      ) : null}
+                    </>
                   ) : null}
-                  {selectedPost.media_url &&
+                  {String(selectedPost.media_url || "").trim() &&
                   String(selectedPost.media_type || "").toLowerCase() ===
                     "video" ? (
                     <View style={styles.postModalVideoPlaceholder}>
@@ -1668,6 +1742,35 @@ const createStyles = (palette) =>
       fontWeight: "600",
       lineHeight: 22,
     },
+    postMediaStrip: {
+      flexDirection: "row",
+      gap: SIZES.xs,
+      paddingTop: SIZES.xs,
+      paddingBottom: 2,
+    },
+    postMediaThumb: {
+      width: 84,
+      height: 84,
+      borderRadius: SIZES.radius,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.mutedSurface,
+    },
+    postMediaOverflowBadge: {
+      width: 84,
+      height: 84,
+      borderRadius: SIZES.radius,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.mutedSurface,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    postMediaOverflowText: {
+      color: palette.text,
+      fontSize: 18,
+      fontWeight: "700",
+    },
     postBottomRow: {
       flexDirection: "row",
       justifyContent: "space-between",
@@ -1759,6 +1862,18 @@ const createStyles = (palette) =>
       borderRadius: SIZES.radiusLg,
       marginBottom: SIZES.md,
       backgroundColor: palette.mutedSurface,
+    },
+    postModalImageStrip: {
+      gap: SIZES.sm,
+      paddingBottom: SIZES.md,
+    },
+    postModalImageThumb: {
+      width: 78,
+      height: 78,
+      borderRadius: SIZES.radius,
+      backgroundColor: palette.mutedSurface,
+      borderWidth: 1,
+      borderColor: palette.border,
     },
     postModalVideoPlaceholder: {
       width: "100%",

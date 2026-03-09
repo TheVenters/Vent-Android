@@ -1,25 +1,38 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  View,
+  Alert,
+  Dimensions,
+  Image,
+  KeyboardAvoidingView,
   Modal,
+  PanResponder,
+  Platform,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  ScrollView,
-  Alert,
-  KeyboardAvoidingView,
-  Platform,
+  View,
 } from "react-native";
+import { CameraView, useCameraPermissions } from "expo-camera";
 import * as ImagePicker from "expo-image-picker";
-import { SIZES, GEOMETRY_TYPES } from "../constants/theme";
+import Animated, {
+  Extrapolation,
+  interpolate,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from "react-native-reanimated";
+import { GEOMETRY_TYPES, SIZES } from "../constants/theme";
 import { useAppTheme } from "../context/ThemeContext";
+import { getBrandAssetsForTheme } from "../constants/brandAssets";
 import { getPinLayerKeyFromLayer } from "../utils/layers";
 
 const LOCATION_MODES = {
   CURRENT: "current",
   PICK_ON_MAP: "pick_on_map",
 };
+
 const MEDIA_SOURCE = {
   LIBRARY: "library",
   CAMERA: "camera",
@@ -37,27 +50,88 @@ const OWNER_LABELS = {
   user: "User",
 };
 
+const DROPDOWN_IDS = {
+  GEOMETRY: "geometry",
+};
+
+const normalizePickedAsset = (asset, fallbackSource) => {
+  if (!asset || typeof asset !== "object") return null;
+
+  const isVideo = String(asset.type || "").toLowerCase() === "video";
+  const mediaType = isVideo ? "video" : "photo";
+  const source = String(fallbackSource || "").trim() || MEDIA_SOURCE.LIBRARY;
+  let mediaUrl = String(asset.uri || "").trim();
+  if (!mediaUrl) return null;
+
+  // Keep photos in-memory as data URIs so uploads do not rely on
+  // temporary file permissions.
+  if (!isVideo && asset.base64) {
+    const mimeType = String(asset.mimeType || "").trim() || "image/jpeg";
+    mediaUrl = `data:${mimeType};base64,${asset.base64}`;
+  }
+
+  const uniqueSuffix = `${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+  return {
+    id: `${String(asset.assetId || asset.uri || "media").trim()}-${uniqueSuffix}`,
+    mediaUrl,
+    mediaType,
+    mediaSource: source,
+  };
+};
+
 const PostCreationForm = ({
   visible,
   onClose,
   onSubmit,
   layers,
   userLocation,
+  holdRecordStartToken = 0,
+  holdRecordStopToken = 0,
 }) => {
   const { palette, isDark } = useAppTheme();
   const styles = createStyles(palette, isDark);
+  const brandAssets = useMemo(() => getBrandAssetsForTheme(isDark), [isDark]);
+  const cameraRef = useRef(null);
+  const optionsExpandProgress = useSharedValue(0);
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
 
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [geometryType, setGeometryType] = useState(GEOMETRY_TYPES.POINT);
-  const [showGeometryOptions, setShowGeometryOptions] = useState(false);
   const [selectedCommunityLayerId, setSelectedCommunityLayerId] =
     useState(null);
   const [locationMode, setLocationMode] = useState(LOCATION_MODES.CURRENT);
-  const [mediaUrl, setMediaUrl] = useState(null);
-  const [mediaType, setMediaType] = useState(null);
-  const [mediaSource, setMediaSource] = useState(null);
+  const [mediaItems, setMediaItems] = useState([]);
   const [baseAudience, setBaseAudience] = useState(POST_AUDIENCE.FRIENDS);
+  const [openDropdown, setOpenDropdown] = useState(null);
+  const [showOptionsPanel, setShowOptionsPanel] = useState(false);
+  const [activeOptionsTab, setActiveOptionsTab] = useState("settings");
+  const [cameraFacing, setCameraFacing] = useState("back");
+  const [cameraFlashMode, setCameraFlashMode] = useState("off");
+  const [cameraReady, setCameraReady] = useState(false);
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [isVideoRecording, setIsVideoRecording] = useState(false);
+  const [pendingHoldRecordStart, setPendingHoldRecordStart] = useState(false);
+  const [isPhotoPreviewVisible, setIsPhotoPreviewVisible] = useState(false);
+  const [photoPreviewIndex, setPhotoPreviewIndex] = useState(0);
+  const [stackTopIndex, setStackTopIndex] = useState(0);
+  const photoPreviewScrollRef = useRef(null);
+  const prevMediaCountRef = useRef(0);
+  const lastHoldStartTokenRef = useRef(0);
+  const lastHoldStopTokenRef = useRef(0);
+
+  const safelyStopRecording = () => {
+    const stopRecording = cameraRef.current?.stopRecording;
+    if (typeof stopRecording !== "function") return;
+    try {
+      const stopResult = stopRecording.call(cameraRef.current);
+      if (stopResult && typeof stopResult.then === "function") {
+        stopResult.catch(() => {});
+      }
+    } catch (_error) {}
+  };
 
   const availableLayers = useMemo(
     () => (Array.isArray(layers) ? layers : []),
@@ -71,6 +145,7 @@ const PostCreationForm = ({
         .sort((a, b) => (a.name || "").localeCompare(b.name || "")),
     [availableLayers],
   );
+
   const friendsBaseLayer = useMemo(
     () =>
       availableLayers.find(
@@ -80,9 +155,11 @@ const PostCreationForm = ({
       ) ||
       availableLayers.find(
         (layer) => getPinLayerKeyFromLayer(layer) === "friends",
-      ) || null,
+      ) ||
+      null,
     [availableLayers],
   );
+
   const publicBaseLayer = useMemo(
     () =>
       availableLayers.find(
@@ -94,27 +171,95 @@ const PostCreationForm = ({
         (layer) =>
           layer.owner_type !== "user" &&
           getPinLayerKeyFromLayer(layer) === "public",
-      ) || null,
+      ) ||
+      null,
     [availableLayers],
+  );
+  const selectedCommunityLayer = useMemo(
+    () =>
+      communityAudienceLayers.find((layer) => layer.id === selectedCommunityLayerId) ||
+      null,
+    [communityAudienceLayers, selectedCommunityLayerId],
   );
 
   useEffect(() => {
     if (!visible) return;
     setBaseAudience(POST_AUDIENCE.FRIENDS);
     setSelectedCommunityLayerId(null);
-  }, [communityAudienceLayers, visible]);
+    setOpenDropdown(null);
+    setShowOptionsPanel(false);
+    setActiveOptionsTab("settings");
+    setCameraFacing("back");
+    setCameraFlashMode("off");
+    setCameraReady(false);
+    setIsVideoRecording(false);
+    setPendingHoldRecordStart(false);
+    setIsPhotoPreviewVisible(false);
+    setPhotoPreviewIndex(0);
+    setStackTopIndex(0);
+    if (!cameraPermission?.granted) {
+      requestCameraPermission().catch(() => {});
+    }
+  }, [visible, cameraPermission?.granted, requestCameraPermission]);
+
+  useEffect(() => {
+    optionsExpandProgress.value = withTiming(showOptionsPanel ? 1 : 0, {
+      duration: 250,
+    });
+  }, [showOptionsPanel, optionsExpandProgress]);
+
+  const normalizedMediaItems = useMemo(
+    () =>
+      (Array.isArray(mediaItems) ? mediaItems : [])
+        .map((item) => ({
+          id: String(item?.id || "").trim(),
+          mediaUrl: String(item?.mediaUrl || "").trim(),
+          mediaType: String(item?.mediaType || "photo").toLowerCase(),
+          mediaSource: String(item?.mediaSource || "").toLowerCase(),
+        }))
+        .filter((item) => item.mediaUrl.length > 0),
+    [mediaItems],
+  );
+  const previewableMediaItems = useMemo(
+    () => normalizedMediaItems.filter((item) => item.mediaType === "photo"),
+    [normalizedMediaItems],
+  );
+
+  const primaryMediaItem = normalizedMediaItems[0] || null;
+  const primaryMediaUrl = primaryMediaItem?.mediaUrl || null;
+  const primaryMediaType = primaryMediaItem?.mediaType || null;
+  const primaryMediaSource = useMemo(() => {
+    if (normalizedMediaItems.length === 0) return null;
+    if (
+      normalizedMediaItems.some(
+        (item) => item.mediaSource === MEDIA_SOURCE.LIBRARY,
+      )
+    ) {
+      return MEDIA_SOURCE.LIBRARY;
+    }
+    return MEDIA_SOURCE.CAMERA;
+  }, [normalizedMediaItems]);
 
   const resetForm = () => {
+    safelyStopRecording();
     setTitle("");
     setContent("");
     setGeometryType(GEOMETRY_TYPES.POINT);
-    setShowGeometryOptions(false);
     setSelectedCommunityLayerId(null);
     setLocationMode(LOCATION_MODES.CURRENT);
-    setMediaUrl(null);
-    setMediaType(null);
-    setMediaSource(null);
+    setMediaItems([]);
     setBaseAudience(POST_AUDIENCE.FRIENDS);
+    setOpenDropdown(null);
+    setShowOptionsPanel(false);
+    setActiveOptionsTab("settings");
+    setCameraFacing("back");
+    setCameraFlashMode("off");
+    setCameraReady(false);
+    setIsVideoRecording(false);
+    setPendingHoldRecordStart(false);
+    setIsPhotoPreviewVisible(false);
+    setPhotoPreviewIndex(0);
+    setStackTopIndex(0);
   };
 
   const handleClose = () => {
@@ -124,7 +269,7 @@ const PostCreationForm = ({
 
   const handleSubmit = () => {
     if (!title.trim()) {
-      Alert.alert("Error", "Please enter a title.");
+      Alert.alert("Headline Required", "Add a headline before posting.");
       return;
     }
 
@@ -135,6 +280,7 @@ const PostCreationForm = ({
       );
       return;
     }
+
     if (baseAudience === POST_AUDIENCE.PUBLIC && !publicBaseLayer?.id) {
       Alert.alert(
         "Public Layer Unavailable",
@@ -142,6 +288,7 @@ const PostCreationForm = ({
       );
       return;
     }
+
     if (baseAudience === POST_AUDIENCE.FRIENDS && !friendsBaseLayer?.id) {
       Alert.alert(
         "Friends Layer Unavailable",
@@ -149,6 +296,7 @@ const PostCreationForm = ({
       );
       return;
     }
+
     onSubmit({
       title,
       content,
@@ -161,9 +309,10 @@ const PostCreationForm = ({
               longitude: userLocation.longitude,
             }
           : null,
-      mediaUrl,
-      mediaType,
-      mediaSource,
+      mediaItems: normalizedMediaItems,
+      mediaUrl: primaryMediaUrl,
+      mediaType: primaryMediaType,
+      mediaSource: primaryMediaSource,
       baseAudience,
       basePublicLayerId:
         baseAudience === POST_AUDIENCE.PUBLIC ? publicBaseLayer?.id || null : null,
@@ -178,23 +327,18 @@ const PostCreationForm = ({
   };
 
   const applyPickedMedia = (result, source) => {
-    if (result.canceled || !result.assets?.[0]) return;
-    const asset = result.assets[0];
-    const isVideo = asset.type === "video";
-    const normalizedMediaType = isVideo ? "video" : "photo";
-    let normalizedMediaUrl = asset.uri;
+    if (result.canceled || !Array.isArray(result.assets) || result.assets.length === 0)
+      return;
 
-    // Keep photos in-memory as data URIs so we always have a portable payload
-    // for upload, even if local temp file permissions change.
-    if (!isVideo && asset.base64) {
-      const mimeType =
-        String(asset.mimeType || "").trim() || "image/jpeg";
-      normalizedMediaUrl = `data:${mimeType};base64,${asset.base64}`;
-    }
+    const nextItems = result.assets
+      .map((asset) => normalizePickedAsset(asset, source))
+      .filter(Boolean);
+    if (nextItems.length === 0) return;
 
-    setMediaUrl(normalizedMediaUrl);
-    setMediaType(normalizedMediaType);
-    setMediaSource(source || null);
+    setMediaItems((prev) => {
+      const existing = Array.isArray(prev) ? prev : [];
+      return [...existing, ...nextItems];
+    });
   };
 
   const pickMediaFromLibrary = async () => {
@@ -210,7 +354,9 @@ const PostCreationForm = ({
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ["images", "videos"],
+        mediaTypes: ["images"],
+        allowsMultipleSelection: true,
+        selectionLimit: 8,
         allowsEditing: false,
         quality: 0.8,
         base64: true,
@@ -222,327 +368,850 @@ const PostCreationForm = ({
     }
   };
 
-  const capturePhotoWithCamera = async () => {
-    try {
-      const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
-      if (!permissionResult.granted) {
+  const captureFromLiveCamera = async () => {
+    if (isCapturing || isVideoRecording) return;
+
+    if (!cameraPermission?.granted) {
+      const permission = await requestCameraPermission();
+      if (!permission?.granted) {
         Alert.alert("Permission Needed", "Please grant camera permissions.");
         return;
       }
+    }
 
-      const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: "images",
-        allowsEditing: false,
-        quality: 0.8,
-        base64: true,
-      });
-      applyPickedMedia(result, MEDIA_SOURCE.CAMERA);
+    if (!cameraRef.current) {
+      Alert.alert("Camera Not Ready", "Camera is still initializing.");
+      return;
+    }
+
+    try {
+      setIsCapturing(true);
+      const photo =
+        (await cameraRef.current?.takePictureAsync?.({
+          quality: 0.8,
+          base64: true,
+        })) ||
+        (await cameraRef.current?.takePicture?.({
+          quality: 0.8,
+          base64: true,
+        }));
+
+      if (!photo?.uri) return;
+      const normalized = normalizePickedAsset(
+        {
+          uri: photo.uri,
+          base64: photo.base64,
+          mimeType: "image/jpeg",
+          type: "image",
+        },
+        MEDIA_SOURCE.CAMERA,
+      );
+      if (!normalized) return;
+      setMediaItems((prev) => [...(Array.isArray(prev) ? prev : []), normalized]);
     } catch (error) {
-      console.error("Error taking photo:", error);
-      Alert.alert("Error", "Failed to open camera.");
+      console.error("Error capturing photo:", error);
+      Alert.alert("Capture Failed", "Unable to capture photo right now.");
+    } finally {
+      setIsCapturing(false);
     }
   };
+
+  const stopVideoRecording = () => {
+    setPendingHoldRecordStart(false);
+    safelyStopRecording();
+  };
+
+  const startVideoRecording = async () => {
+    if (isVideoRecording || isCapturing) return;
+
+    if (!cameraPermission?.granted) {
+      const permission = await requestCameraPermission();
+      if (!permission?.granted) {
+        setPendingHoldRecordStart(false);
+        Alert.alert(
+          "Permission Needed",
+          "Please grant camera permissions before recording.",
+        );
+        return;
+      }
+    }
+
+    if (!cameraReady || !cameraRef.current?.record) {
+      return;
+    }
+
+    try {
+      setPendingHoldRecordStart(false);
+      setIsVideoRecording(true);
+      const video = await cameraRef.current.record({
+        maxDuration: 60,
+      });
+      if (!video?.uri) return;
+      const normalized = normalizePickedAsset(
+        {
+          uri: video.uri,
+          type: "video",
+        },
+        MEDIA_SOURCE.CAMERA,
+      );
+      if (!normalized) return;
+      setMediaItems((prev) => [...(Array.isArray(prev) ? prev : []), normalized]);
+    } catch (error) {
+      const message = String(error?.message || "");
+      if (!/stop|cancel|abort|not recording/i.test(message)) {
+        console.error("Error recording video:", error);
+        Alert.alert("Recording Failed", "Unable to record video right now.");
+      }
+    } finally {
+      setIsVideoRecording(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!visible) return;
+    const nextToken = Number(holdRecordStartToken || 0);
+    if (!Number.isFinite(nextToken)) return;
+    if (nextToken === lastHoldStartTokenRef.current) return;
+    lastHoldStartTokenRef.current = nextToken;
+    setPendingHoldRecordStart(true);
+  }, [holdRecordStartToken, visible]);
+
+  useEffect(() => {
+    if (!pendingHoldRecordStart || !visible) return;
+    startVideoRecording();
+  }, [
+    pendingHoldRecordStart,
+    visible,
+    cameraReady,
+    cameraPermission?.granted,
+    isVideoRecording,
+    isCapturing,
+  ]);
+
+  useEffect(() => {
+    const nextToken = Number(holdRecordStopToken || 0);
+    if (!Number.isFinite(nextToken)) return;
+    if (nextToken === lastHoldStopTokenRef.current) return;
+    lastHoldStopTokenRef.current = nextToken;
+    stopVideoRecording();
+  }, [holdRecordStopToken]);
+
+  const handleShutterPress = async () => {
+    if (isVideoRecording) {
+      stopVideoRecording();
+      return;
+    }
+    await captureFromLiveCamera();
+  };
+
+  const renderDropdown = (
+    id,
+    label,
+    selectedLabel,
+    selectedValue,
+    options,
+    onSelect,
+  ) => {
+    const isOpen = openDropdown === id;
+    return (
+      <View style={styles.dropdownWrap}>
+        <Text style={styles.fieldLabel}>{label}</Text>
+        <TouchableOpacity
+          style={styles.dropdownTrigger}
+          onPress={() => setOpenDropdown(isOpen ? null : id)}
+        >
+          <Text style={styles.dropdownTriggerText}>{selectedLabel}</Text>
+          <Text style={styles.dropdownChevron}>{isOpen ? "▲" : "▼"}</Text>
+        </TouchableOpacity>
+        {isOpen ? (
+          <View style={styles.dropdownMenu}>
+            {options.map((option) => {
+              const isSelected = option.value === selectedValue;
+              return (
+                <TouchableOpacity
+                  key={option.value}
+                  style={[
+                    styles.dropdownOption,
+                    isSelected && styles.dropdownOptionSelected,
+                  ]}
+                  onPress={() => {
+                    onSelect(option.value);
+                    setOpenDropdown(null);
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.dropdownOptionText,
+                      isSelected && styles.dropdownOptionTextSelected,
+                    ]}
+                  >
+                    {option.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        ) : null}
+      </View>
+    );
+  };
+
+  const geometryLabel =
+    geometryType.charAt(0).toUpperCase() + geometryType.slice(1);
+  const postButtonLabel =
+    normalizedMediaItems.length === 0 ? "Post without photo(s)" : "Post";
+  const mediaCountLabel =
+    normalizedMediaItems.length > 0
+      ? `${normalizedMediaItems.length} media item${
+          normalizedMediaItems.length === 1 ? "" : "s"
+        } selected`
+      : "No media selected";
+  const isPickOnMap = locationMode === LOCATION_MODES.PICK_ON_MAP;
+  const audienceOptions = [
+    { label: "Friends", value: POST_AUDIENCE.FRIENDS },
+    { label: "Public", value: POST_AUDIENCE.PUBLIC },
+    { label: "Private", value: POST_AUDIENCE.PRIVATE },
+  ];
+
+  const toggleOptionsPanel = () => {
+    setOpenDropdown(null);
+    setShowOptionsPanel((prev) => {
+      if (prev) return false;
+      setActiveOptionsTab("settings");
+      return true;
+    });
+  };
+
+  const optionsMenuAnimatedStyle = useAnimatedStyle(() => {
+    const translateY = interpolate(
+      optionsExpandProgress.value,
+      [0, 1],
+      [100, 0],
+      Extrapolation.CLAMP,
+    );
+    const opacity = interpolate(
+      optionsExpandProgress.value,
+      [0, 0.3, 1],
+      [0, 0, 1],
+      Extrapolation.CLAMP,
+    );
+    return { transform: [{ translateY }], opacity };
+  });
+
+  const optionsPanelAnimatedStyle = useAnimatedStyle(() => {
+    const translateY = interpolate(
+      optionsExpandProgress.value,
+      [0, 1],
+      [80, 0],
+      Extrapolation.CLAMP,
+    );
+    const opacity = interpolate(
+      optionsExpandProgress.value,
+      [0, 0.3, 1],
+      [0, 0, 1],
+      Extrapolation.CLAMP,
+    );
+    const scale = interpolate(
+      optionsExpandProgress.value,
+      [0, 1],
+      [0.96, 1],
+      Extrapolation.CLAMP,
+    );
+    return {
+      opacity,
+      transform: [{ translateY }, { scale }],
+    };
+  });
+
+  const showLiveCamera = true;
+  const screenWidth = Dimensions.get("window").width;
+
+  useEffect(() => {
+    if (previewableMediaItems.length === 0) {
+      setStackTopIndex(0);
+      prevMediaCountRef.current = 0;
+      return;
+    }
+    const previousCount = Number(prevMediaCountRef.current || 0);
+    if (previewableMediaItems.length > previousCount) {
+      setStackTopIndex(previewableMediaItems.length - 1);
+      prevMediaCountRef.current = previewableMediaItems.length;
+      return;
+    }
+    setStackTopIndex((prev) =>
+      Math.max(0, Math.min(previewableMediaItems.length - 1, Number(prev) || 0)),
+    );
+    prevMediaCountRef.current = previewableMediaItems.length;
+  }, [previewableMediaItems.length]);
+
+  const stackedPreviewItems = useMemo(() => {
+    if (previewableMediaItems.length === 0) return [];
+    const clampedTop = Math.max(
+      0,
+      Math.min(previewableMediaItems.length - 1, Number(stackTopIndex) || 0),
+    );
+    let start = Math.max(0, clampedTop - 2);
+    let end = clampedTop + 1;
+    while (end - start < 3 && end < previewableMediaItems.length) {
+      end += 1;
+    }
+    while (end - start < 3 && start > 0) {
+      start -= 1;
+    }
+    return previewableMediaItems.slice(start, end);
+  }, [previewableMediaItems, stackTopIndex]);
+
+  useEffect(() => {
+    if (!isPhotoPreviewVisible) return;
+    const targetX = Math.max(0, photoPreviewIndex) * screenWidth;
+    requestAnimationFrame(() => {
+      photoPreviewScrollRef.current?.scrollTo?.({
+        x: targetX,
+        y: 0,
+        animated: false,
+      });
+    });
+  }, [isPhotoPreviewVisible, photoPreviewIndex, screenWidth]);
+
+  const openPhotoPreview = (index = 0) => {
+    if (previewableMediaItems.length === 0) return;
+    const clampedIndex = Math.max(
+      0,
+      Math.min(previewableMediaItems.length - 1, Number(index) || 0),
+    );
+    setPhotoPreviewIndex(clampedIndex);
+    setIsPhotoPreviewVisible(true);
+  };
+
+  const stackPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: (_evt, gestureState) =>
+          Math.abs(Number(gestureState?.dx || 0)) > 4 &&
+          Math.abs(Number(gestureState?.dx || 0)) >
+            Math.abs(Number(gestureState?.dy || 0)),
+        onPanResponderTerminationRequest: () => true,
+        onPanResponderRelease: (_evt, gestureState) => {
+          const dx = Number(gestureState?.dx || 0);
+          const dy = Number(gestureState?.dy || 0);
+          if (Math.abs(dx) < 16 && Math.abs(dy) < 16) {
+            openPhotoPreview(stackTopIndex);
+            return;
+          }
+          const count = previewableMediaItems.length;
+          if (Math.abs(dx) < 14 || count <= 1) return;
+          setStackTopIndex((prev) => {
+            const current = Math.max(0, Math.min(count - 1, Number(prev) || 0));
+            if (dx < 0) return (current + 1) % count;
+            return (current - 1 + count) % count;
+          });
+        },
+        onPanResponderTerminate: (_evt, gestureState) => {
+          const dx = Number(gestureState?.dx || 0);
+          const count = previewableMediaItems.length;
+          if (Math.abs(dx) < 14 || count <= 1) return;
+          setStackTopIndex((prev) => {
+            const current = Math.max(0, Math.min(count - 1, Number(prev) || 0));
+            if (dx < 0) return (current + 1) % count;
+            return (current - 1 + count) % count;
+          });
+        },
+      }),
+    [previewableMediaItems.length, stackTopIndex],
+  );
 
   return (
     <Modal
       visible={visible}
-      animationType="slide"
-      transparent
+      animationType="fade"
       onRequestClose={handleClose}
     >
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         style={styles.overlay}
       >
-        <TouchableOpacity
-          style={styles.backdrop}
-          activeOpacity={1}
-          onPress={handleClose}
-        />
+        <View style={styles.stage}>
+          {showLiveCamera ? (
+            cameraPermission?.granted ? (
+              <CameraView
+                ref={cameraRef}
+                style={styles.cameraFill}
+                facing={cameraFacing}
+                flash={cameraFlashMode}
+                mute
+                onCameraReady={() => setCameraReady(true)}
+              />
+            ) : (
+              <View style={styles.cameraFallback}>
+                <Text style={styles.cameraFallbackTitle}>Camera Access Needed</Text>
+                <Text style={styles.cameraFallbackSubtext}>
+                  Enable camera to start in capture mode.
+                </Text>
+                <TouchableOpacity
+                  style={styles.enableBtn}
+                  onPress={() => requestCameraPermission()}
+                >
+                  <Text style={styles.enableBtnText}>Enable Camera</Text>
+                </TouchableOpacity>
+              </View>
+            )
+          ) : null}
 
-        <View style={styles.container}>
-          <View style={styles.header}>
-            <Text style={styles.headerTitle}>New Post</Text>
-            <TouchableOpacity onPress={handleClose} style={styles.closeBtn}>
-              <Text style={styles.closeBtnText}>X</Text>
+          <View style={styles.shade} />
+
+          <View style={styles.topBar}>
+            <TouchableOpacity style={styles.topChip} onPress={handleClose}>
+              <Text style={styles.topChipText}>Close</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.topPrimaryChip} onPress={handleSubmit}>
+              <Text style={styles.topPrimaryChipText}>{postButtonLabel}</Text>
+            </TouchableOpacity>
+          </View>
+          {isVideoRecording ? (
+            <View style={styles.recordingBadge}>
+              <View style={styles.recordingDot} />
+              <Text style={styles.recordingBadgeText}>Recording</Text>
+            </View>
+          ) : null}
+
+          <View style={styles.cameraQuickControls}>
+            <TouchableOpacity
+              style={styles.cameraQuickControlBtn}
+              onPress={() =>
+                setCameraFacing((prev) => (prev === "back" ? "front" : "back"))
+              }
+            >
+              <Text style={styles.cameraQuickControlText}>⇄</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.cameraQuickControlBtn,
+                cameraFlashMode === "on" && styles.cameraQuickControlBtnActive,
+              ]}
+              onPress={() =>
+                setCameraFlashMode((prev) => (prev === "on" ? "off" : "on"))
+              }
+            >
+              <Text style={styles.cameraQuickControlText}>
+                {cameraFlashMode === "on" ? "⚡" : "⚡︎"}
+              </Text>
             </TouchableOpacity>
           </View>
 
-          <ScrollView
-            style={styles.scrollContent}
-            keyboardShouldPersistTaps="handled"
-          >
+          <View style={styles.mediaCountBadge}>
+            <Text style={styles.mediaCountBadgeText}>{mediaCountLabel}</Text>
+          </View>
+
+          <View style={styles.composerText}>
             <TextInput
-              style={styles.titleInput}
-              placeholder="Title"
-              placeholderTextColor={palette.subtext}
+              style={styles.headlineInput}
+              placeholder="Headline"
+              placeholderTextColor="rgba(255,255,255,0.76)"
               value={title}
               onChangeText={setTitle}
+              maxLength={90}
             />
-
             <TextInput
-              style={[styles.input, styles.textArea]}
-              placeholder="Content"
-              placeholderTextColor={palette.subtext}
+              style={styles.captionInput}
+              placeholder="What happened?"
+              placeholderTextColor="rgba(255,255,255,0.7)"
               value={content}
               onChangeText={setContent}
               multiline
-              numberOfLines={4}
               textAlignVertical="top"
+              maxLength={420}
             />
+          </View>
 
-            <Text style={styles.sectionLabel}>Media (Optional)</Text>
-            <View style={styles.mediaRow}>
-              <TouchableOpacity
-                style={styles.mediaBtn}
-                onPress={pickMediaFromLibrary}
-              >
-                <Text style={styles.mediaBtnText}>
-                  {mediaUrl ? "Change Library Media" : "Choose from Library"}
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.mediaBtn}
-                onPress={capturePhotoWithCamera}
-              >
-                <Text style={styles.mediaBtnText}>
-                  {mediaUrl ? "Retake Photo" : "Take Photo"}
-                </Text>
-              </TouchableOpacity>
+          {stackedPreviewItems.length > 0 ? (
+            <View
+              style={styles.photoStackDock}
+              {...stackPanResponder.panHandlers}
+            >
+              <View style={styles.photoStackStage}>
+                {stackedPreviewItems.map((item, index) => {
+                  const backOffset = stackedPreviewItems.length - index - 1;
+                  return (
+                    <Image
+                      key={`${item.id || "media"}-${index}`}
+                      source={{ uri: item.mediaUrl }}
+                      style={[
+                        styles.photoStackCard,
+                        {
+                          left: backOffset * 10,
+                          bottom: backOffset * 6,
+                          transform: [{ rotate: `${(backOffset - 1) * -5}deg` }],
+                          zIndex: index + 1,
+                        },
+                      ]}
+                      resizeMode="cover"
+                    />
+                  );
+                })}
+              </View>
+              {previewableMediaItems.length > 1 ? (
+                <View style={styles.photoStackCountChip}>
+                  <Text style={styles.photoStackCountText}>
+                    {previewableMediaItems.length}
+                  </Text>
+                </View>
+              ) : null}
             </View>
-            {mediaUrl ? (
-              <View style={styles.mediaRemoveRow}>
+          ) : null}
+
+          <Animated.View
+            style={[styles.optionsPanel, optionsPanelAnimatedStyle]}
+            pointerEvents={showOptionsPanel ? "auto" : "none"}
+          >
+              <ScrollView
+                style={styles.optionsScroll}
+                contentContainerStyle={styles.optionsContent}
+                keyboardShouldPersistTaps="handled"
+              >
+                {activeOptionsTab === "settings" ? (
+                  <>
+                    <View style={styles.section}>
+                      <Text style={styles.sectionLabel}>Audience</Text>
+                      <View style={styles.segmentRow}>
+                        {audienceOptions.map((option) => {
+                          const isSelected = option.value === baseAudience;
+                          return (
+                            <TouchableOpacity
+                              key={option.value}
+                              style={[
+                                styles.segmentChip,
+                                isSelected && styles.segmentChipActive,
+                              ]}
+                              onPress={() => setBaseAudience(option.value)}
+                            >
+                              <Text
+                                style={[
+                                  styles.segmentChipText,
+                                  isSelected && styles.segmentChipTextActive,
+                                ]}
+                              >
+                                {option.label}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    </View>
+
+                    <View style={styles.section}>
+                      <Text style={styles.sectionLabel}>Location</Text>
+                      <View style={styles.locationToggleRow}>
+                        <TouchableOpacity
+                          style={[
+                            styles.locationToggleChip,
+                            !isPickOnMap && styles.locationToggleChipActive,
+                          ]}
+                          onPress={() => setLocationMode(LOCATION_MODES.CURRENT)}
+                        >
+                          <Text
+                            style={[
+                              styles.locationToggleText,
+                              !isPickOnMap && styles.locationToggleTextActive,
+                            ]}
+                          >
+                            Current
+                          </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[
+                            styles.locationToggleChip,
+                            isPickOnMap && styles.locationToggleChipActive,
+                          ]}
+                          onPress={() => setLocationMode(LOCATION_MODES.PICK_ON_MAP)}
+                        >
+                          <Text
+                            style={[
+                              styles.locationToggleText,
+                              isPickOnMap && styles.locationToggleTextActive,
+                            ]}
+                          >
+                            Choose
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                      <Text style={styles.locationSwitchHint}>
+                        {isPickOnMap
+                          ? "Tap map after post to place it."
+                          : "Post uses your live location."}
+                      </Text>
+                    </View>
+
+                    <View style={styles.section}>
+                      <Text style={styles.sectionLabel}>Geometry</Text>
+                      {renderDropdown(
+                        DROPDOWN_IDS.GEOMETRY,
+                        "Geometry",
+                        geometryLabel,
+                        geometryType,
+                        [
+                          { label: "Point", value: GEOMETRY_TYPES.POINT },
+                          { label: "Line", value: GEOMETRY_TYPES.LINE },
+                          { label: "Plane", value: GEOMETRY_TYPES.PLANE },
+                        ],
+                        setGeometryType,
+                      )}
+                    </View>
+
+                    <View style={styles.section}>
+                      <Text style={styles.sectionLabel}>Selected Media</Text>
+                      {normalizedMediaItems.length === 0 ? (
+                        <Text style={styles.inlineHint}>
+                          No media selected. You can still post with text only.
+                        </Text>
+                      ) : (
+                        <View style={styles.mediaItemList}>
+                          {normalizedMediaItems.map((item, index) => (
+                            <View
+                              key={`${item.id || "media"}-${index}`}
+                              style={styles.mediaItemRow}
+                            >
+                              {item.mediaType === "video" ? (
+                                <View style={styles.videoThumbPlaceholder}>
+                                  <Text style={styles.videoThumbPlaceholderText}>Video</Text>
+                                </View>
+                              ) : (
+                                <Image
+                                  source={{ uri: item.mediaUrl }}
+                                  style={styles.mediaThumb}
+                                  resizeMode="cover"
+                                />
+                              )}
+                              <View style={styles.mediaItemMeta}>
+                                <Text style={styles.mediaItemTitle}>
+                                  {item.mediaType === "video" ? "Video" : "Photo"}{" "}
+                                  {index + 1}
+                                </Text>
+                                <Text style={styles.mediaItemSubtitle}>
+                                  {item.mediaSource === MEDIA_SOURCE.LIBRARY
+                                    ? "From library"
+                                    : "From camera"}
+                                </Text>
+                              </View>
+                              <TouchableOpacity
+                                style={styles.mediaItemRemove}
+                                onPress={() =>
+                                  setMediaItems((prev) =>
+                                    (Array.isArray(prev) ? prev : []).filter(
+                                      (entry) =>
+                                        String(entry?.id || "") !==
+                                        String(item.id || ""),
+                                    ),
+                                  )
+                                }
+                              >
+                                <Text style={styles.mediaItemRemoveText}>Remove</Text>
+                              </TouchableOpacity>
+                            </View>
+                          ))}
+                        </View>
+                      )}
+                    </View>
+
+                    {primaryMediaSource === MEDIA_SOURCE.LIBRARY ? (
+                      <Text style={styles.inlineHint}>
+                        Library media can use current location, but it is not
+                        location-verified.
+                      </Text>
+                    ) : null}
+                  </>
+                ) : (
+                  <View style={styles.section}>
+                    <Text style={styles.sectionLabel}>Other Layers (Optional)</Text>
+                    {communityAudienceLayers.length === 0 ? (
+                      <Text style={styles.inlineHint}>
+                        You have no joined community layers yet.
+                      </Text>
+                    ) : (
+                      <>
+                        <ScrollView
+                          horizontal
+                          showsHorizontalScrollIndicator={false}
+                          contentContainerStyle={styles.layerPillRow}
+                        >
+                          <TouchableOpacity
+                            style={[
+                              styles.layerPill,
+                              !selectedCommunityLayerId && styles.layerPillSelected,
+                            ]}
+                            onPress={() => setSelectedCommunityLayerId(null)}
+                          >
+                            <Text
+                              style={[
+                                styles.layerPillText,
+                                !selectedCommunityLayerId &&
+                                  styles.layerPillTextSelected,
+                              ]}
+                            >
+                              No extra layer
+                            </Text>
+                          </TouchableOpacity>
+                          {communityAudienceLayers.map((layer) => {
+                            const isSelected =
+                              selectedCommunityLayerId === layer.id;
+                            return (
+                              <TouchableOpacity
+                                key={layer.id}
+                                style={[
+                                  styles.layerPill,
+                                  isSelected && styles.layerPillSelected,
+                                ]}
+                                onPress={() => setSelectedCommunityLayerId(layer.id)}
+                              >
+                                <Text
+                                  style={[
+                                    styles.layerPillText,
+                                    isSelected && styles.layerPillTextSelected,
+                                  ]}
+                                >
+                                  {layer.name}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </ScrollView>
+                        {selectedCommunityLayer ? (
+                          <Text style={styles.inlineHint}>
+                            {`${OWNER_LABELS[selectedCommunityLayer.owner_type] || "Community"} | ${
+                              selectedCommunityLayer.ownerCommunityName || "Community"
+                            }`}
+                          </Text>
+                        ) : null}
+                      </>
+                    )}
+                  </View>
+                )}
+              </ScrollView>
+          </Animated.View>
+
+          {isPhotoPreviewVisible ? (
+            <View style={styles.photoPreviewOverlay}>
+              <View style={styles.photoPreviewTopBar}>
+                <Text style={styles.photoPreviewCount}>
+                  {photoPreviewIndex + 1} / {previewableMediaItems.length}
+                </Text>
                 <TouchableOpacity
-                  style={styles.mediaClearBtn}
+                  style={styles.photoPreviewCloseBtn}
+                  onPress={() => setIsPhotoPreviewVisible(false)}
+                >
+                  <Text style={styles.photoPreviewCloseText}>Close</Text>
+                </TouchableOpacity>
+              </View>
+              <ScrollView
+                ref={photoPreviewScrollRef}
+                horizontal
+                pagingEnabled
+                showsHorizontalScrollIndicator={false}
+                directionalLockEnabled
+                onMomentumScrollEnd={(event) => {
+                  const offsetX = Number(event?.nativeEvent?.contentOffset?.x || 0);
+                  const nextIndex = Math.round(offsetX / Math.max(1, screenWidth));
+                  if (Number.isFinite(nextIndex)) {
+                    setPhotoPreviewIndex(
+                      Math.max(
+                        0,
+                        Math.min(previewableMediaItems.length - 1, nextIndex),
+                      ),
+                    );
+                  }
+                }}
+              >
+                {previewableMediaItems.map((item, index) => (
+                  <View
+                    key={`preview-${item.id || "media"}-${index}`}
+                    style={[styles.photoPreviewPage, { width: screenWidth }]}
+                  >
+                    <Image
+                      source={{ uri: item.mediaUrl }}
+                      style={styles.photoPreviewImage}
+                      resizeMode="contain"
+                    />
+                  </View>
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
+
+          <View style={styles.rightCluster}>
+            <Animated.View
+              style={[styles.menuColumn, optionsMenuAnimatedStyle]}
+              pointerEvents={showOptionsPanel ? "auto" : "none"}
+            >
+                <TouchableOpacity
+                  style={[
+                    styles.menuItem,
+                    activeOptionsTab === "settings" && styles.menuItemActive,
+                  ]}
                   onPress={() => {
-                    setMediaUrl(null);
-                    setMediaType(null);
-                    setMediaSource(null);
+                    setOpenDropdown(null);
+                    setActiveOptionsTab("settings");
                   }}
                 >
-                  <Text style={styles.mediaClearBtnText}>Remove</Text>
+                  <Text style={styles.menuItemText}>⚙</Text>
                 </TouchableOpacity>
-              </View>
-            ) : null}
-            {mediaUrl ? (
-              <Text style={styles.inlineHint}>
-                Attached {mediaType === "video" ? "video" : "photo"}
-              </Text>
-            ) : null}
-
-            <Text style={styles.sectionLabel}>Post To</Text>
-            <View style={styles.audienceRow}>
-              <TouchableOpacity
-                style={[
-                  styles.audienceBtn,
-                  baseAudience === POST_AUDIENCE.FRIENDS &&
-                    styles.audienceBtnActive,
-                ]}
-                onPress={() => setBaseAudience(POST_AUDIENCE.FRIENDS)}
-              >
-                <Text
-                  style={[
-                    styles.audienceBtnText,
-                    baseAudience === POST_AUDIENCE.FRIENDS &&
-                      styles.audienceBtnTextActive,
-                  ]}
-                >
-                  Friends
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.audienceBtn,
-                  baseAudience === POST_AUDIENCE.PUBLIC &&
-                    styles.audienceBtnActive,
-                ]}
-                onPress={() => setBaseAudience(POST_AUDIENCE.PUBLIC)}
-              >
-                <Text
-                  style={[
-                    styles.audienceBtnText,
-                    baseAudience === POST_AUDIENCE.PUBLIC &&
-                      styles.audienceBtnTextActive,
-                  ]}
-                >
-                  Public
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.audienceBtn,
-                  baseAudience === POST_AUDIENCE.PRIVATE &&
-                    styles.audienceBtnActive,
-                ]}
-                onPress={() => setBaseAudience(POST_AUDIENCE.PRIVATE)}
-              >
-                <Text
-                  style={[
-                    styles.audienceBtnText,
-                    baseAudience === POST_AUDIENCE.PRIVATE &&
-                      styles.audienceBtnTextActive,
-                  ]}
-                >
-                  Private
-                </Text>
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.inlineHint}>
-              {baseAudience === POST_AUDIENCE.FRIENDS
-                ? "Posts to your friends layer."
-                : baseAudience === POST_AUDIENCE.PUBLIC
-                  ? "Posts to the public layer (and friends)."
-                  : "Private is route-controlled: visible only in layers you attach."}
-            </Text>
-            <Text style={styles.sectionLabel}>Optional Community Layer</Text>
-            {communityAudienceLayers.length === 0 ? (
-              <Text style={styles.emptyStateText}>
-                You have no joined community layers yet.
-              </Text>
-            ) : (
-              <View style={styles.layerList}>
                 <TouchableOpacity
                   style={[
-                    styles.layerRow,
-                    !selectedCommunityLayerId && styles.layerRowSelected,
+                    styles.menuItem,
+                    activeOptionsTab === "layers" && styles.menuItemActive,
                   ]}
-                  onPress={() => setSelectedCommunityLayerId(null)}
+                  onPress={() => {
+                    setOpenDropdown(null);
+                    setActiveOptionsTab("layers");
+                  }}
                 >
-                  <View style={styles.layerRowLeft}>
-                    <Text style={styles.layerName}>None</Text>
-                    <Text style={styles.layerMeta}>
-                      Do not add an extra community layer
-                    </Text>
-                  </View>
-                  <Text style={styles.chooseText}>
-                    {!selectedCommunityLayerId ? "Selected" : "Select"}
-                  </Text>
+                  <Image
+                    source={brandAssets.menu.layers}
+                    style={styles.menuIconImage}
+                    resizeMode="contain"
+                  />
                 </TouchableOpacity>
-                {communityAudienceLayers.map((layer) => {
-                  const isSelected =
-                    selectedCommunityLayerId === layer.id;
-                  return (
-                    <TouchableOpacity
-                      key={layer.id}
-                      style={[
-                        styles.layerRow,
-                        isSelected && styles.layerRowSelected,
-                      ]}
-                      onPress={() => setSelectedCommunityLayerId(layer.id)}
-                    >
-                      <View style={styles.layerRowLeft}>
-                        <Text style={styles.layerName}>{layer.name}</Text>
-                        <Text style={styles.layerMeta}>
-                          {OWNER_LABELS[layer.owner_type] || "Community"}{" "}
-                          • {layer.ownerCommunityName || "Community"}
-                        </Text>
-                      </View>
+                <TouchableOpacity
+                  style={styles.menuItem}
+                  onPress={pickMediaFromLibrary}
+                >
+                  <Image
+                    source={brandAssets.menu.add}
+                    style={styles.menuIconImage}
+                    resizeMode="contain"
+                  />
+                </TouchableOpacity>
+            </Animated.View>
 
-                      <Text style={styles.chooseText}>
-                        {isSelected ? "Selected" : "Select"}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            )}
-
-            <Text style={styles.sectionLabel}>Geometry Type</Text>
             <TouchableOpacity
-              style={styles.geometryDropdownTrigger}
-              onPress={() => setShowGeometryOptions((prev) => !prev)}
+              style={[
+                styles.ventButton,
+                showOptionsPanel && styles.ventButtonActive,
+              ]}
+              onPress={toggleOptionsPanel}
             >
-              <Text style={styles.geometryDropdownText}>
-                {geometryType.charAt(0).toUpperCase() + geometryType.slice(1)}
-              </Text>
-              <Text style={styles.geometryDropdownArrow}>
-                {showGeometryOptions ? "▲" : "▼"}
-              </Text>
+              <Image
+                source={brandAssets.logo}
+                style={styles.ventButtonLogo}
+                resizeMode="contain"
+              />
+              <View
+                style={[
+                  styles.ventIndicator,
+                  showOptionsPanel && styles.ventIndicatorActive,
+                ]}
+              />
             </TouchableOpacity>
-            {showGeometryOptions && (
-              <View style={styles.geometryDropdownMenu}>
-                {Object.values(GEOMETRY_TYPES).map((type) => {
-                  const isActive = geometryType === type;
-                  return (
-                    <TouchableOpacity
-                      key={type}
-                      style={[
-                        styles.geometryOption,
-                        isActive && styles.geometryOptionActive,
-                      ]}
-                      onPress={() => {
-                        setGeometryType(type);
-                        setShowGeometryOptions(false);
-                      }}
-                    >
-                      <Text
-                        style={[
-                          styles.geometryOptionText,
-                          isActive && styles.geometryOptionTextActive,
-                        ]}
-                      >
-                        {type.charAt(0).toUpperCase() + type.slice(1)}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
+
+            <TouchableOpacity
+              style={styles.shutterButton}
+              onPress={handleShutterPress}
+              disabled={isCapturing}
+            >
+              <View style={styles.shutterCore}>
+                <Text style={styles.shutterText}>
+                  {isVideoRecording ? "■" : isCapturing ? "..." : "◉"}
+                </Text>
               </View>
-            )}
-
-            <Text style={styles.sectionLabel}>Location</Text>
-            <View style={styles.locationModeRow}>
-              <TouchableOpacity
-                style={[
-                  styles.locationModeBtn,
-                  locationMode === LOCATION_MODES.CURRENT &&
-                    styles.locationModeBtnActive,
-                ]}
-                onPress={() => setLocationMode(LOCATION_MODES.CURRENT)}
-              >
-                <Text
-                  style={[
-                    styles.locationModeBtnText,
-                    locationMode === LOCATION_MODES.CURRENT &&
-                      styles.locationModeBtnTextActive,
-                  ]}
-                >
-                  Current
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[
-                  styles.locationModeBtn,
-                  locationMode === LOCATION_MODES.PICK_ON_MAP &&
-                    styles.locationModeBtnActive,
-                ]}
-                onPress={() => setLocationMode(LOCATION_MODES.PICK_ON_MAP)}
-              >
-                <Text
-                  style={[
-                    styles.locationModeBtnText,
-                    locationMode === LOCATION_MODES.PICK_ON_MAP &&
-                      styles.locationModeBtnTextActive,
-                  ]}
-                >
-                  Choose on Map
-                </Text>
-              </TouchableOpacity>
-            </View>
-            {mediaSource === MEDIA_SOURCE.LIBRARY && (
-              <Text style={styles.inlineHint}>
-                Library media can use current location, but it will not be marked
-                as location-verified.
-              </Text>
-            )}
-          </ScrollView>
-
-          <View style={styles.actions}>
-            <TouchableOpacity style={styles.cancelBtn} onPress={handleClose}>
-              <Text style={styles.cancelBtnText}>Cancel</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.submitBtn} onPress={handleSubmit}>
-              <Text style={styles.submitBtnText}>Post</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -555,202 +1224,506 @@ const createStyles = (palette, isDark) =>
   StyleSheet.create({
     overlay: {
       flex: 1,
+      backgroundColor: "#060b14",
+    },
+    stage: {
+      flex: 1,
+      backgroundColor: "#0b1220",
+    },
+    cameraFill: {
+      ...StyleSheet.absoluteFillObject,
+    },
+    cameraFallback: {
+      ...StyleSheet.absoluteFillObject,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: 24,
+      backgroundColor: "#111827",
+    },
+    cameraFallbackTitle: {
+      color: "#f8fafc",
+      fontSize: 20,
+      fontWeight: "800",
+      marginBottom: 8,
+    },
+    cameraFallbackSubtext: {
+      color: "rgba(248,250,252,0.82)",
+      fontSize: 13,
+      fontWeight: "600",
+      textAlign: "center",
+      marginBottom: 16,
+    },
+    enableBtn: {
+      backgroundColor: palette.primary,
+      borderRadius: 999,
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+    },
+    enableBtnText: {
+      color: palette.onPrimary,
+      fontSize: 13,
+      fontWeight: "800",
+    },
+    shade: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: "rgba(2, 6, 23, 0.3)",
+    },
+    topBar: {
+      position: "absolute",
+      top: Platform.OS === "ios" ? 52 : 18,
+      left: 14,
+      right: 14,
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+    },
+    topChip: {
+      borderWidth: 1,
+      borderColor: "rgba(255,255,255,0.38)",
+      backgroundColor: "rgba(15,23,42,0.56)",
+      borderRadius: 999,
+      paddingHorizontal: 13,
+      paddingVertical: 8,
+    },
+    topChipText: {
+      color: "#f8fafc",
+      fontSize: 12,
+      fontWeight: "800",
+    },
+    topPrimaryChip: {
+      backgroundColor: palette.primary,
+      borderRadius: 999,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      maxWidth: "72%",
+    },
+    topPrimaryChipText: {
+      color: palette.onPrimary,
+      fontSize: 11,
+      fontWeight: "800",
+      textAlign: "center",
+    },
+    recordingBadge: {
+      position: "absolute",
+      top: Platform.OS === "ios" ? 102 : 68,
+      alignSelf: "center",
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      borderWidth: 1,
+      borderColor: "rgba(248,113,113,0.8)",
+      backgroundColor: "rgba(127,29,29,0.9)",
+      borderRadius: 999,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+      zIndex: 13,
+    },
+    recordingDot: {
+      width: 7,
+      height: 7,
+      borderRadius: 999,
+      backgroundColor: "#ef4444",
+    },
+    recordingBadgeText: {
+      color: "#fee2e2",
+      fontSize: 11,
+      fontWeight: "800",
+      letterSpacing: 0.2,
+      textTransform: "uppercase",
+    },
+    cameraQuickControls: {
+      position: "absolute",
+      right: 84,
+      bottom: Platform.OS === "ios" ? 46 : 30,
+      flexDirection: "row",
+      gap: 8,
+      zIndex: 11,
+    },
+    cameraQuickControlBtn: {
+      width: 38,
+      height: 38,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: "rgba(255,255,255,0.36)",
+      backgroundColor: "rgba(15,23,42,0.62)",
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    cameraQuickControlBtnActive: {
+      borderColor: palette.primary,
+      backgroundColor: isDark ? "rgba(102,126,234,0.26)" : "rgba(102,126,234,0.18)",
+    },
+    cameraQuickControlText: {
+      color: "#f8fafc",
+      fontSize: 14,
+      fontWeight: "800",
+    },
+    mediaCountBadge: {
+      position: "absolute",
+      left: 14,
+      top: Platform.OS === "ios" ? 100 : 66,
+      borderWidth: 1,
+      borderColor: "rgba(255,255,255,0.28)",
+      backgroundColor: "rgba(15,23,42,0.58)",
+      borderRadius: 999,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      maxWidth: "70%",
+    },
+    mediaCountBadgeText: {
+      color: "#f8fafc",
+      fontSize: 11,
+      fontWeight: "700",
+    },
+    photoStackDock: {
+      position: "absolute",
+      left: 14,
+      bottom: Platform.OS === "ios" ? 154 : 134,
+      width: 92,
+      height: 88,
+      justifyContent: "flex-end",
+      zIndex: 9,
+    },
+    photoStackStage: {
+      width: 86,
+      height: 68,
       justifyContent: "flex-end",
     },
-    backdrop: {
-      ...StyleSheet.absoluteFillObject,
-      backgroundColor: "rgba(0, 0, 0, 0.5)",
+    photoStackCard: {
+      position: "absolute",
+      width: 54,
+      height: 64,
+      borderRadius: 12,
+      borderWidth: 1.5,
+      borderColor: "rgba(255,255,255,0.72)",
+      backgroundColor: "#0f172a",
+      shadowColor: "#000",
+      shadowOpacity: 0.24,
+      shadowRadius: 8,
+      shadowOffset: { width: 0, height: 3 },
+      elevation: 6,
     },
-    container: {
-      backgroundColor: palette.surface,
-      borderTopLeftRadius: SIZES.radiusXl,
-      borderTopRightRadius: SIZES.radiusXl,
-      maxHeight: "84%",
-      borderTopWidth: 1,
-      borderTopColor: palette.border,
-    },
-    header: {
-      flexDirection: "row",
-      justifyContent: "space-between",
-      alignItems: "center",
-      paddingHorizontal: 16,
-      paddingVertical: 12,
-      borderBottomWidth: 1,
-      borderBottomColor: palette.border,
-    },
-    headerTitle: {
-      fontSize: 18,
-      fontWeight: "800",
-      color: palette.text,
-    },
-    closeBtn: {
-      width: 28,
-      height: 28,
-      borderRadius: 14,
-      backgroundColor: palette.mutedSurface,
-      justifyContent: "center",
-      alignItems: "center",
-    },
-    closeBtnText: {
-      fontSize: 14,
-      fontWeight: "700",
-      color: palette.subtext,
-    },
-    scrollContent: {
-      padding: 16,
-    },
-    titleInput: {
+    photoStackCountChip: {
+      position: "absolute",
+      right: 2,
+      bottom: 2,
+      minWidth: 24,
+      height: 24,
+      borderRadius: 12,
       borderWidth: 1,
-      borderColor: palette.border,
-      borderRadius: SIZES.radius,
-      padding: 12,
-      fontSize: 16,
-      fontWeight: "600",
-      marginBottom: 10,
-      color: palette.text,
-      backgroundColor: isDark ? "#202632" : "#ffffff",
-    },
-    input: {
-      borderWidth: 1,
-      borderColor: palette.border,
-      borderRadius: SIZES.radius,
-      padding: 12,
-      fontSize: 14,
-      marginBottom: 10,
-      color: palette.text,
-      backgroundColor: isDark ? "#202632" : "#ffffff",
-    },
-    textArea: {
-      minHeight: 90,
-    },
-    sectionLabel: {
-      fontSize: 13,
-      fontWeight: "700",
-      color: palette.text,
-      marginBottom: 6,
-      marginTop: 6,
-    },
-    inlineHint: {
-      fontSize: 12,
-      color: palette.subtext,
-      marginBottom: 8,
-      marginTop: -2,
-    },
-    audienceRow: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      gap: 8,
-      marginBottom: 8,
-    },
-    audienceBtn: {
-      width: "48%",
-      paddingVertical: 9,
-      backgroundColor: palette.mutedSurface,
-      borderRadius: SIZES.radius,
-      alignItems: "center",
-      borderWidth: 1,
-      borderColor: palette.border,
-    },
-    audienceBtnActive: {
-      backgroundColor: palette.primary,
-      borderColor: palette.primary,
-    },
-    audienceBtnText: {
-      fontSize: 12,
-      fontWeight: "700",
-      color: palette.text,
-    },
-    audienceBtnTextActive: {
-      color: palette.onPrimary,
-    },
-    mediaRow: {
-      flexDirection: "row",
-      gap: 8,
-      marginBottom: 10,
-    },
-    mediaRemoveRow: {
-      alignItems: "flex-start",
-      marginBottom: 10,
-    },
-    mediaBtn: {
-      flex: 1,
-      paddingVertical: 9,
-      backgroundColor: palette.mutedSurface,
-      borderRadius: SIZES.radius,
-      alignItems: "center",
-      borderWidth: 1,
-      borderColor: palette.border,
-    },
-    mediaBtnText: {
-      fontSize: 13,
-      fontWeight: "700",
-      color: palette.text,
-    },
-    mediaClearBtn: {
-      paddingHorizontal: 14,
-      paddingVertical: 9,
-      backgroundColor: "rgba(239, 68, 68, 0.14)",
-      borderWidth: 1,
-      borderColor: "rgba(239, 68, 68, 0.35)",
-      borderRadius: SIZES.radius,
+      borderColor: "rgba(255,255,255,0.5)",
+      backgroundColor: "rgba(15,23,42,0.9)",
       alignItems: "center",
       justifyContent: "center",
+      paddingHorizontal: 6,
     },
-    mediaClearBtnText: {
-      color: "#ef4444",
-      fontSize: 12,
-      fontWeight: "700",
-    },
-    geometryDropdownTrigger: {
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "space-between",
-      borderWidth: 1,
-      borderColor: palette.border,
-      borderRadius: SIZES.radius,
-      backgroundColor: isDark ? "#202632" : "#f9fbff",
-      paddingHorizontal: 12,
-      paddingVertical: 10,
-      marginBottom: 8,
-    },
-    geometryDropdownText: {
-      fontSize: 13,
-      color: palette.text,
-      fontWeight: "700",
-    },
-    geometryDropdownArrow: {
+    photoStackCountText: {
+      color: "#f8fafc",
       fontSize: 11,
-      color: palette.subtext,
-      fontWeight: "700",
+      fontWeight: "800",
     },
-    geometryDropdownMenu: {
+    photoPreviewOverlay: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: "rgba(2,6,23,0.94)",
+      zIndex: 30,
+      justifyContent: "center",
+    },
+    photoPreviewTopBar: {
+      position: "absolute",
+      top: Platform.OS === "ios" ? 52 : 18,
+      left: 14,
+      right: 14,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      zIndex: 31,
+    },
+    photoPreviewCount: {
+      color: "#f8fafc",
+      fontSize: 12,
+      fontWeight: "800",
+    },
+    photoPreviewCloseBtn: {
+      borderWidth: 1,
+      borderColor: "rgba(255,255,255,0.34)",
+      borderRadius: 999,
+      paddingHorizontal: 12,
+      paddingVertical: 7,
+      backgroundColor: "rgba(15,23,42,0.55)",
+    },
+    photoPreviewCloseText: {
+      color: "#f8fafc",
+      fontSize: 12,
+      fontWeight: "800",
+    },
+    photoPreviewPage: {
+      flex: 1,
+      justifyContent: "center",
+      alignItems: "center",
+      paddingHorizontal: 10,
+      paddingTop: Platform.OS === "ios" ? 56 : 22,
+      paddingBottom: Platform.OS === "ios" ? 34 : 18,
+    },
+    photoPreviewImage: {
+      width: "100%",
+      height: "100%",
+      maxHeight: "86%",
+    },
+    composerText: {
+      position: "absolute",
+      left: 14,
+      right: 84,
+      bottom: 24,
+      gap: 8,
+    },
+    headlineInput: {
+      color: "#ffffff",
+      fontSize: 24,
+      lineHeight: 30,
+      fontWeight: "800",
+      textShadowColor: "rgba(0,0,0,0.45)",
+      textShadowOffset: { width: 0, height: 2 },
+      textShadowRadius: 5,
+      minHeight: 34,
+      paddingTop: 2,
+      paddingBottom: 2,
+    },
+    captionInput: {
+      color: "rgba(248,250,252,0.96)",
+      fontSize: 14,
+      fontWeight: "600",
+      lineHeight: 19,
+      minHeight: 66,
+      maxHeight: 110,
+      textShadowColor: "rgba(0,0,0,0.35)",
+      textShadowOffset: { width: 0, height: 1 },
+      textShadowRadius: 3,
+      paddingVertical: 0,
+    },
+    rightCluster: {
+      position: "absolute",
+      right: 16,
+      bottom: Platform.OS === "ios" ? 34 : 18,
+      alignItems: "center",
+      gap: 8,
+    },
+    menuColumn: {
+      position: "absolute",
+      right: 0,
+      bottom: 132,
+      alignItems: "center",
+      gap: 8,
+      zIndex: 20,
+    },
+    menuItem: {
+      width: 52,
+      height: 52,
+      borderRadius: 26,
       borderWidth: 1,
       borderColor: palette.border,
-      borderRadius: SIZES.radius,
-      overflow: "hidden",
-      marginBottom: 10,
+      backgroundColor: palette.surface,
+      alignItems: "center",
+      justifyContent: "center",
+      shadowColor: "#000",
+      shadowOpacity: 0.14,
+      shadowRadius: 6,
+      shadowOffset: { width: 0, height: 2 },
+      elevation: 4,
     },
-    geometryOption: {
-      paddingHorizontal: 12,
-      paddingVertical: 10,
-      backgroundColor: isDark ? "#202632" : "#f9fbff",
-      borderBottomWidth: 1,
-      borderBottomColor: palette.border,
+    menuItemActive: {
+      borderColor: palette.primary,
+      backgroundColor: isDark ? "rgba(102,126,234,0.22)" : "rgba(102,126,234,0.14)",
     },
-    geometryOptionActive: {
-      backgroundColor: "rgba(129, 140, 248, 0.22)",
-    },
-    geometryOptionText: {
+    menuItemText: {
       color: palette.text,
-      fontSize: 13,
-      fontWeight: "700",
+      fontSize: 16,
+      fontWeight: "800",
     },
-    geometryOptionTextActive: {
+    menuIconImage: {
+      width: 62,
+      height: 62,
+    },
+    shutterButton: {
+      width: 62,
+      height: 62,
+      borderRadius: 31,
+      borderWidth: 2,
+      borderColor: "rgba(255,255,255,0.8)",
+      backgroundColor: "rgba(255,255,255,0.28)",
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    shutterCore: {
+      width: 48,
+      height: 48,
+      borderRadius: 24,
+      backgroundColor: "#ffffff",
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    shutterText: {
+      color: "#0f172a",
+      fontSize: 16,
+      fontWeight: "800",
+    },
+    ventButton: {
+      width: 56,
+      height: 56,
+      borderRadius: 28,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.surface,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    ventButtonActive: {
+      borderColor: palette.primary,
+      shadowColor: palette.primary,
+      shadowOpacity: 0.25,
+      shadowRadius: 8,
+      shadowOffset: { width: 0, height: 0 },
+      elevation: 6,
+    },
+    ventButtonLogo: {
+      width: 34,
+      height: 34,
+    },
+    ventIndicator: {
+      position: "absolute",
+      top: 8,
+      right: 8,
+      width: 7,
+      height: 7,
+      borderRadius: 999,
+      backgroundColor: palette.subtext,
+      opacity: 0.65,
+    },
+    ventIndicatorActive: {
+      backgroundColor: palette.primary,
+      opacity: 1,
+    },
+    optionsPanel: {
+      position: "absolute",
+      left: 14,
+      right: 126,
+      bottom: Platform.OS === "ios" ? 124 : 106,
+      maxHeight: "56%",
+      borderRadius: SIZES.radiusLg,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: isDark ? "rgba(22,27,37,0.98)" : "rgba(255,255,255,0.98)",
+      overflow: "hidden",
+      zIndex: 12,
+    },
+    optionsScroll: {
+      flex: 1,
+    },
+    optionsContent: {
+      paddingTop: 12,
+      paddingHorizontal: 12,
+      paddingBottom: 12,
+      gap: 12,
+    },
+    section: {
+      gap: 8,
+    },
+    segmentRow: {
+      flexDirection: "row",
+      gap: 8,
+      flexWrap: "wrap",
+    },
+    segmentChip: {
+      borderWidth: 1,
+      borderColor: palette.border,
+      borderRadius: 999,
+      backgroundColor: isDark ? "#1f2633" : "#f8fbff",
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+    },
+    segmentChipActive: {
+      borderColor: palette.primary,
+      backgroundColor: isDark ? "rgba(102,126,234,0.22)" : "rgba(102,126,234,0.14)",
+    },
+    segmentChipText: {
+      color: palette.text,
+      fontSize: 11,
+      fontWeight: "800",
+    },
+    segmentChipTextActive: {
       color: palette.primary,
     },
-    layerList: {
-      marginBottom: 10,
+    locationToggleRow: {
+      flexDirection: "row",
+      alignItems: "center",
       gap: 8,
+    },
+    locationToggleChip: {
+      flex: 1,
+      borderWidth: 1,
+      borderColor: palette.border,
+      borderRadius: 999,
+      backgroundColor: isDark ? "#1f2633" : "#f8fbff",
+      paddingHorizontal: 12,
+      paddingVertical: 9,
+      alignItems: "center",
+    },
+    locationToggleChipActive: {
+      borderColor: palette.primary,
+      backgroundColor: isDark ? "rgba(102,126,234,0.22)" : "rgba(102,126,234,0.14)",
+    },
+    locationToggleText: {
+      color: palette.text,
+      fontSize: 12,
+      fontWeight: "800",
+    },
+    locationToggleTextActive: {
+      color: palette.primary,
+    },
+    locationSwitchHint: {
+      color: palette.subtext,
+      fontSize: 11,
+      fontWeight: "600",
+      lineHeight: 16,
+    },
+    sectionLabel: {
+      color: palette.text,
+      fontSize: 12,
+      fontWeight: "800",
+      textTransform: "uppercase",
+      letterSpacing: 0.2,
+    },
+    inlineHint: {
+      color: palette.subtext,
+      fontSize: 12,
+      fontWeight: "600",
+      lineHeight: 17,
+    },
+    layerList: {
+      gap: 8,
+    },
+    layerPillRow: {
+      gap: 8,
+      paddingRight: 8,
+    },
+    layerPill: {
+      borderWidth: 1,
+      borderColor: palette.border,
+      borderRadius: 999,
+      backgroundColor: isDark ? "#1f2633" : "#f8fbff",
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+    },
+    layerPillSelected: {
+      borderColor: palette.primary,
+      backgroundColor: isDark ? "rgba(102,126,234,0.22)" : "rgba(102,126,234,0.14)",
+    },
+    layerPillText: {
+      color: palette.text,
+      fontSize: 11,
+      fontWeight: "800",
+    },
+    layerPillTextSelected: {
+      color: palette.primary,
     },
     layerRow: {
       flexDirection: "row",
@@ -759,120 +1732,170 @@ const createStyles = (palette, isDark) =>
       borderWidth: 1,
       borderColor: palette.border,
       borderRadius: SIZES.radius,
-      padding: 10,
-      backgroundColor: isDark ? "#202632" : "#f9fbff",
+      paddingHorizontal: 10,
+      paddingVertical: 9,
+      backgroundColor: isDark ? "#1f2633" : "#f8fbff",
       gap: 8,
     },
     layerRowSelected: {
       borderColor: palette.primary,
+      backgroundColor: "rgba(102, 126, 234, 0.14)",
     },
-    layerRowLeft: {
+    layerMain: {
       flex: 1,
-      paddingRight: 10,
+      gap: 2,
+      paddingRight: 8,
     },
     layerName: {
-      fontSize: 14,
-      fontWeight: "700",
       color: palette.text,
-      marginBottom: 2,
+      fontSize: 13,
+      fontWeight: "800",
     },
     layerMeta: {
-      fontSize: 12,
       color: palette.subtext,
+      fontSize: 11,
       fontWeight: "600",
     },
-    chooseText: {
-      fontSize: 12,
-      fontWeight: "700",
+    layerAction: {
       color: palette.primary,
+      fontSize: 11,
+      fontWeight: "800",
     },
-    emptyStateText: {
-      color: palette.subtext,
-      fontSize: 13,
-      marginBottom: 8,
+    dropdownWrap: {
+      gap: 5,
     },
-    locationModeRow: {
+    fieldLabel: {
+      color: palette.text,
+      fontSize: 11,
+      fontWeight: "700",
+      textTransform: "uppercase",
+      letterSpacing: 0.2,
+    },
+    dropdownTrigger: {
       flexDirection: "row",
-      gap: 8,
-      marginBottom: 8,
-    },
-    radiusRow: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      gap: 8,
-      marginBottom: 10,
-    },
-    radiusChip: {
+      alignItems: "center",
+      justifyContent: "space-between",
       borderWidth: 1,
       borderColor: palette.border,
-      borderRadius: SIZES.radiusFull,
-      paddingHorizontal: 12,
-      paddingVertical: 7,
-      backgroundColor: isDark ? "#202632" : "#f9fbff",
-    },
-    radiusChipActive: {
-      borderColor: palette.primary,
-      backgroundColor: "rgba(129, 140, 248, 0.2)",
-    },
-    radiusChipText: {
-      color: palette.text,
-      fontSize: 12,
-      fontWeight: "700",
-    },
-    radiusChipTextActive: {
-      color: palette.primary,
-    },
-    locationModeBtn: {
-      flex: 1,
+      borderRadius: SIZES.radius,
+      backgroundColor: isDark ? "#1f2633" : "#f8fbff",
+      paddingHorizontal: 10,
       paddingVertical: 9,
-      backgroundColor: palette.mutedSurface,
+    },
+    dropdownTriggerText: {
+      color: palette.text,
+      fontSize: 12,
+      fontWeight: "700",
+    },
+    dropdownChevron: {
+      color: palette.subtext,
+      fontSize: 10,
+      fontWeight: "800",
+    },
+    dropdownMenu: {
+      borderWidth: 1,
+      borderColor: palette.border,
       borderRadius: SIZES.radius,
+      overflow: "hidden",
+    },
+    dropdownOption: {
+      paddingHorizontal: 10,
+      paddingVertical: 9,
+      backgroundColor: isDark ? "#1f2633" : "#f8fbff",
+      borderBottomWidth: 1,
+      borderBottomColor: palette.border,
+    },
+    dropdownOptionSelected: {
+      backgroundColor: "rgba(102, 126, 234, 0.14)",
+    },
+    dropdownOptionText: {
+      color: palette.text,
+      fontSize: 12,
+      fontWeight: "700",
+    },
+    dropdownOptionTextSelected: {
+      color: palette.primary,
+    },
+    quickActionRow: {
+      flexDirection: "row",
+      gap: 8,
+      flexWrap: "wrap",
+    },
+    quickAction: {
+      borderWidth: 1,
+      borderColor: palette.border,
+      borderRadius: 999,
+      backgroundColor: isDark ? "#1f2633" : "#f8fbff",
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+    },
+    quickActionText: {
+      color: palette.text,
+      fontSize: 11,
+      fontWeight: "800",
+    },
+    mediaItemList: {
+      gap: 8,
+    },
+    mediaItemRow: {
+      flexDirection: "row",
       alignItems: "center",
       borderWidth: 1,
       borderColor: palette.border,
+      borderRadius: SIZES.radius,
+      backgroundColor: isDark ? "#1f2633" : "#f8fbff",
+      padding: 8,
+      gap: 8,
     },
-    locationModeBtnActive: {
-      backgroundColor: palette.primary,
-      borderColor: palette.primary,
+    mediaThumb: {
+      width: 44,
+      height: 44,
+      borderRadius: 8,
+      backgroundColor: "#111827",
     },
-    locationModeBtnText: {
+    videoThumbPlaceholder: {
+      width: 44,
+      height: 44,
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: isDark ? "#141b2a" : "#e2e8f0",
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    videoThumbPlaceholderText: {
+      color: palette.text,
+      fontSize: 9,
+      fontWeight: "800",
+      textTransform: "uppercase",
+      letterSpacing: 0.25,
+    },
+    mediaItemMeta: {
+      flex: 1,
+      gap: 2,
+    },
+    mediaItemTitle: {
+      color: palette.text,
       fontSize: 12,
       fontWeight: "700",
-      color: palette.text,
     },
-    locationModeBtnTextActive: {
-      color: palette.onPrimary,
+    mediaItemSubtitle: {
+      color: palette.subtext,
+      fontSize: 11,
+      fontWeight: "600",
     },
-    actions: {
-      flexDirection: "row",
-      padding: 12,
-      gap: 8,
-      borderTopWidth: 1,
-      borderTopColor: palette.border,
+    mediaItemRemove: {
+      borderWidth: 1,
+      borderColor: "rgba(239,68,68,0.4)",
+      borderRadius: 999,
+      backgroundColor: "rgba(239,68,68,0.12)",
+      paddingHorizontal: 9,
+      paddingVertical: 6,
     },
-    cancelBtn: {
-      flex: 1,
-      paddingVertical: 10,
-      backgroundColor: palette.mutedSurface,
-      borderRadius: SIZES.radius,
-      alignItems: "center",
-    },
-    cancelBtnText: {
-      fontSize: 14,
-      fontWeight: "700",
-      color: palette.text,
-    },
-    submitBtn: {
-      flex: 1,
-      paddingVertical: 10,
-      backgroundColor: palette.primary,
-      borderRadius: SIZES.radius,
-      alignItems: "center",
-    },
-    submitBtnText: {
-      fontSize: 14,
-      fontWeight: "700",
-      color: palette.onPrimary,
+    mediaItemRemoveText: {
+      color: "#ef4444",
+      fontSize: 10,
+      fontWeight: "800",
     },
   });
 
