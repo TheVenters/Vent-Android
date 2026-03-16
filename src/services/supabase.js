@@ -3,9 +3,16 @@ import { AppState, Platform } from 'react-native';
 import { createClient } from '@supabase/supabase-js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// Load from environment variables (set in .env file)
-const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+// Support both the standard Expo public keys and the repo's *_DEV variants.
+const SUPABASE_URL =
+  process.env.EXPO_PUBLIC_SUPABASE_URL ||
+  process.env.EXPO_PUBLIC_SUPABASE_URL_DEV;
+const SUPABASE_ANON_KEY =
+  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ||
+  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY_DEV;
+const POST_MEDIA_BUCKET =
+  process.env.EXPO_PUBLIC_POST_MEDIA_BUCKET ||
+  process.env.EXPO_PUBLIC_POST_MEDIA_BUCKET_DEV;
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   console.error('Missing Supabase environment variables. Check your .env file.');
@@ -415,9 +422,8 @@ const socialAction = async (action, payload, accessToken, refreshToken = null) =
 };
 
 const STORAGE_MEDIA_SCHEME = 'storage://';
-const POST_MEDIA_BUCKET_ENV_KEY = 'EXPO_PUBLIC_POST_MEDIA_BUCKET';
 const DEFAULT_POST_MEDIA_BUCKET_CANDIDATES = [
-  process.env[POST_MEDIA_BUCKET_ENV_KEY],
+  POST_MEDIA_BUCKET,
   'post-images',
 ]
   .map((value) => String(value || '').trim())
@@ -635,28 +641,26 @@ export const hydratePinsWithSignedMediaUrls = async (
     const topLevelList = Array.isArray(pin?.media_urls) ? pin.media_urls : [];
     const primary = String(pin?.media_url || '').trim();
 
-    const orderedBase =
-      geometryList.length > 0
-        ? geometryList
-        : topLevelList.length > 0
-          ? topLevelList
-          : [];
-    const normalized = orderedBase
+    const normalized = [
+      ...topLevelList,
+      ...geometryList,
+    ]
       .map((value) => String(value || '').trim())
       .filter(Boolean);
 
-    if (normalized.length === 0 && primary) {
-      normalized.push(primary);
+    if (!primary) {
       return dedupeStrings(normalized);
     }
 
-    // If the row already includes media arrays and media_url is a signed URL for
-    // the first asset, avoid injecting it here to prevent duplicate first images.
-    if (
-      primary &&
-      isStorageMediaPointer(primary) &&
-      !normalized.includes(primary)
-    ) {
+    // Preserve already-renderable primary media URLs from edge responses or
+    // cached hydrated rows; otherwise we can accidentally downgrade a valid
+    // signed URL back to a raw storage pointer.
+    if (!isStorageMediaPointer(primary)) {
+      normalized.unshift(primary);
+      return dedupeStrings(normalized);
+    }
+
+    if (!normalized.includes(primary)) {
       normalized.unshift(primary);
     }
     return dedupeStrings(normalized);

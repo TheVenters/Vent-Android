@@ -38,6 +38,9 @@ const MEDIA_SOURCE = {
   CAMERA: "camera",
 };
 
+const SHUTTER_RECORD_LONG_PRESS_DELAY_MS = 220;
+const CAMERA_ZOOM_STEP = 0.12;
+
 const POST_AUDIENCE = {
   FRIENDS: "friends",
   PUBLIC: "public",
@@ -48,6 +51,12 @@ const OWNER_LABELS = {
   system: "System",
   community: "Community",
   user: "User",
+};
+
+const AUDIENCE_VISUALS = {
+  friends: { icon: "👥", label: "Friends" },
+  public: { icon: "🌐", label: "Public" },
+  private: { icon: "🔒", label: "Private" },
 };
 
 const DROPDOWN_IDS = {
@@ -98,7 +107,6 @@ const PostCreationForm = ({
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
 
   const [title, setTitle] = useState("");
-  const [content, setContent] = useState("");
   const [geometryType, setGeometryType] = useState(GEOMETRY_TYPES.POINT);
   const [selectedCommunityLayerId, setSelectedCommunityLayerId] =
     useState(null);
@@ -110,6 +118,7 @@ const PostCreationForm = ({
   const [activeOptionsTab, setActiveOptionsTab] = useState("settings");
   const [cameraFacing, setCameraFacing] = useState("back");
   const [cameraFlashMode, setCameraFlashMode] = useState("off");
+  const [cameraZoom, setCameraZoom] = useState(0);
   const [cameraReady, setCameraReady] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [isVideoRecording, setIsVideoRecording] = useState(false);
@@ -121,6 +130,8 @@ const PostCreationForm = ({
   const prevMediaCountRef = useRef(0);
   const lastHoldStartTokenRef = useRef(0);
   const lastHoldStopTokenRef = useRef(0);
+  const shutterLongPressActiveRef = useRef(false);
+  const suppressNextShutterTapRef = useRef(false);
 
   const safelyStopRecording = () => {
     const stopRecording = cameraRef.current?.stopRecording;
@@ -191,6 +202,7 @@ const PostCreationForm = ({
     setActiveOptionsTab("settings");
     setCameraFacing("back");
     setCameraFlashMode("off");
+    setCameraZoom(0);
     setCameraReady(false);
     setIsVideoRecording(false);
     setPendingHoldRecordStart(false);
@@ -243,7 +255,6 @@ const PostCreationForm = ({
   const resetForm = () => {
     safelyStopRecording();
     setTitle("");
-    setContent("");
     setGeometryType(GEOMETRY_TYPES.POINT);
     setSelectedCommunityLayerId(null);
     setLocationMode(LOCATION_MODES.CURRENT);
@@ -254,12 +265,15 @@ const PostCreationForm = ({
     setActiveOptionsTab("settings");
     setCameraFacing("back");
     setCameraFlashMode("off");
+    setCameraZoom(0);
     setCameraReady(false);
     setIsVideoRecording(false);
     setPendingHoldRecordStart(false);
     setIsPhotoPreviewVisible(false);
     setPhotoPreviewIndex(0);
     setStackTopIndex(0);
+    shutterLongPressActiveRef.current = false;
+    suppressNextShutterTapRef.current = false;
   };
 
   const handleClose = () => {
@@ -269,7 +283,7 @@ const PostCreationForm = ({
 
   const handleSubmit = () => {
     if (!title.trim()) {
-      Alert.alert("Headline Required", "Add a headline before posting.");
+      Alert.alert("Title Required", "Add a title before posting.");
       return;
     }
 
@@ -298,8 +312,7 @@ const PostCreationForm = ({
     }
 
     onSubmit({
-      title,
-      content,
+      title: title.trim(),
       geometryType,
       locationMode,
       location:
@@ -354,7 +367,7 @@ const PostCreationForm = ({
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ["images"],
+        mediaTypes: ["images", "videos"],
         allowsMultipleSelection: true,
         selectionLimit: 8,
         allowsEditing: false,
@@ -496,12 +509,50 @@ const PostCreationForm = ({
     stopVideoRecording();
   }, [holdRecordStopToken]);
 
+  const cycleAudience = () => {
+    setBaseAudience((prev) => {
+      if (prev === POST_AUDIENCE.FRIENDS) return POST_AUDIENCE.PUBLIC;
+      if (prev === POST_AUDIENCE.PUBLIC) return POST_AUDIENCE.PRIVATE;
+      return POST_AUDIENCE.FRIENDS;
+    });
+  };
+
+  const handleShutterPressIn = () => {
+    shutterLongPressActiveRef.current = false;
+  };
+
+  const handleShutterLongPress = () => {
+    shutterLongPressActiveRef.current = true;
+    suppressNextShutterTapRef.current = true;
+    startVideoRecording();
+  };
+
+  const handleShutterPressOut = () => {
+    if (shutterLongPressActiveRef.current || isVideoRecording) {
+      suppressNextShutterTapRef.current = true;
+      stopVideoRecording();
+    }
+    shutterLongPressActiveRef.current = false;
+  };
+
   const handleShutterPress = async () => {
     if (isVideoRecording) {
       stopVideoRecording();
       return;
     }
+    if (suppressNextShutterTapRef.current) {
+      suppressNextShutterTapRef.current = false;
+      return;
+    }
     await captureFromLiveCamera();
+  };
+
+  const adjustCameraZoom = (direction) => {
+    setCameraZoom((prev) => {
+      const delta = direction === "in" ? CAMERA_ZOOM_STEP : -CAMERA_ZOOM_STEP;
+      const next = Number(prev || 0) + delta;
+      return Math.max(0, Math.min(1, next));
+    });
   };
 
   const renderDropdown = (
@@ -558,8 +609,7 @@ const PostCreationForm = ({
 
   const geometryLabel =
     geometryType.charAt(0).toUpperCase() + geometryType.slice(1);
-  const postButtonLabel =
-    normalizedMediaItems.length === 0 ? "Post without photo(s)" : "Post";
+  const postButtonLabel = "Post";
   const mediaCountLabel =
     normalizedMediaItems.length > 0
       ? `${normalizedMediaItems.length} media item${
@@ -572,6 +622,8 @@ const PostCreationForm = ({
     { label: "Public", value: POST_AUDIENCE.PUBLIC },
     { label: "Private", value: POST_AUDIENCE.PRIVATE },
   ];
+  const activeAudienceVisual =
+    AUDIENCE_VISUALS[baseAudience] || AUDIENCE_VISUALS[POST_AUDIENCE.FRIENDS];
 
   const toggleOptionsPanel = () => {
     setOpenDropdown(null);
@@ -739,6 +791,7 @@ const PostCreationForm = ({
                 style={styles.cameraFill}
                 facing={cameraFacing}
                 flash={cameraFlashMode}
+                zoom={cameraZoom}
                 mute
                 onCameraReady={() => setCameraReady(true)}
               />
@@ -764,6 +817,10 @@ const PostCreationForm = ({
             <TouchableOpacity style={styles.topChip} onPress={handleClose}>
               <Text style={styles.topChipText}>Close</Text>
             </TouchableOpacity>
+            <TouchableOpacity style={styles.audienceChip} onPress={cycleAudience}>
+              <Text style={styles.audienceChipIcon}>{activeAudienceVisual.icon}</Text>
+              <Text style={styles.audienceChipText}>{activeAudienceVisual.label}</Text>
+            </TouchableOpacity>
             <TouchableOpacity style={styles.topPrimaryChip} onPress={handleSubmit}>
               <Text style={styles.topPrimaryChipText}>{postButtonLabel}</Text>
             </TouchableOpacity>
@@ -776,6 +833,26 @@ const PostCreationForm = ({
           ) : null}
 
           <View style={styles.cameraQuickControls}>
+            <View style={styles.zoomControls}>
+              <TouchableOpacity
+                style={styles.cameraQuickControlBtn}
+                onPress={() => adjustCameraZoom("out")}
+              >
+                <Text style={styles.cameraQuickControlText}>-</Text>
+              </TouchableOpacity>
+              <View style={styles.zoomBadge}>
+                <Text style={styles.zoomBadgeLabel}>Zoom</Text>
+                <Text style={styles.zoomBadgeValue}>
+                  {Math.round(cameraZoom * 100)}%
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.cameraQuickControlBtn}
+                onPress={() => adjustCameraZoom("in")}
+              >
+                <Text style={styles.cameraQuickControlText}>+</Text>
+              </TouchableOpacity>
+            </View>
             <TouchableOpacity
               style={styles.cameraQuickControlBtn}
               onPress={() =>
@@ -806,21 +883,11 @@ const PostCreationForm = ({
           <View style={styles.composerText}>
             <TextInput
               style={styles.headlineInput}
-              placeholder="Headline"
+              placeholder="Title"
               placeholderTextColor="rgba(255,255,255,0.76)"
               value={title}
               onChangeText={setTitle}
               maxLength={90}
-            />
-            <TextInput
-              style={styles.captionInput}
-              placeholder="What happened?"
-              placeholderTextColor="rgba(255,255,255,0.7)"
-              value={content}
-              onChangeText={setContent}
-              multiline
-              textAlignVertical="top"
-              maxLength={420}
             />
           </View>
 
@@ -962,7 +1029,7 @@ const PostCreationForm = ({
                       <Text style={styles.sectionLabel}>Selected Media</Text>
                       {normalizedMediaItems.length === 0 ? (
                         <Text style={styles.inlineHint}>
-                          No media selected. You can still post with text only.
+                          No media selected. You can still post with a title only.
                         </Text>
                       ) : (
                         <View style={styles.mediaItemList}>
@@ -1205,11 +1272,19 @@ const PostCreationForm = ({
             <TouchableOpacity
               style={styles.shutterButton}
               onPress={handleShutterPress}
+              onPressIn={handleShutterPressIn}
+              onLongPress={handleShutterLongPress}
+              onPressOut={handleShutterPressOut}
+              delayLongPress={SHUTTER_RECORD_LONG_PRESS_DELAY_MS}
               disabled={isCapturing}
             >
               <View style={styles.shutterCore}>
                 <Text style={styles.shutterText}>
-                  {isVideoRecording ? "■" : isCapturing ? "..." : "◉"}
+                  {isVideoRecording
+                    ? "■"
+                    : isCapturing
+                      ? "..."
+                      : "◉"}
                 </Text>
               </View>
             </TouchableOpacity>
@@ -1276,6 +1351,7 @@ const createStyles = (palette, isDark) =>
       flexDirection: "row",
       justifyContent: "space-between",
       alignItems: "center",
+      gap: 8,
     },
     topChip: {
       borderWidth: 1,
@@ -1295,13 +1371,35 @@ const createStyles = (palette, isDark) =>
       borderRadius: 999,
       paddingHorizontal: 12,
       paddingVertical: 8,
-      maxWidth: "72%",
+      maxWidth: "44%",
     },
     topPrimaryChipText: {
       color: palette.onPrimary,
       fontSize: 11,
       fontWeight: "800",
       textAlign: "center",
+    },
+    audienceChip: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      borderWidth: 1,
+      borderColor: "rgba(255,255,255,0.38)",
+      backgroundColor: "rgba(15,23,42,0.56)",
+      borderRadius: 999,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      minWidth: 104,
+      justifyContent: "center",
+      flexShrink: 1,
+    },
+    audienceChipIcon: {
+      fontSize: 12,
+    },
+    audienceChipText: {
+      color: "#f8fafc",
+      fontSize: 11,
+      fontWeight: "800",
     },
     recordingBadge: {
       position: "absolute",
@@ -1336,8 +1434,38 @@ const createStyles = (palette, isDark) =>
       right: 84,
       bottom: Platform.OS === "ios" ? 46 : 30,
       flexDirection: "row",
+      alignItems: "center",
       gap: 8,
       zIndex: 11,
+    },
+    zoomControls: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      marginRight: 2,
+    },
+    zoomBadge: {
+      borderWidth: 1,
+      borderColor: "rgba(255,255,255,0.36)",
+      borderRadius: 999,
+      backgroundColor: "rgba(15,23,42,0.62)",
+      paddingHorizontal: 12,
+      paddingVertical: 7,
+      alignItems: "center",
+      justifyContent: "center",
+      minWidth: 68,
+    },
+    zoomBadgeLabel: {
+      color: "rgba(248,250,252,0.74)",
+      fontSize: 9,
+      fontWeight: "700",
+      textTransform: "uppercase",
+      letterSpacing: 0.3,
+    },
+    zoomBadgeValue: {
+      color: "#f8fafc",
+      fontSize: 11,
+      fontWeight: "800",
     },
     cameraQuickControlBtn: {
       width: 38,
@@ -1487,18 +1615,6 @@ const createStyles = (palette, isDark) =>
       minHeight: 34,
       paddingTop: 2,
       paddingBottom: 2,
-    },
-    captionInput: {
-      color: "rgba(248,250,252,0.96)",
-      fontSize: 14,
-      fontWeight: "600",
-      lineHeight: 19,
-      minHeight: 66,
-      maxHeight: 110,
-      textShadowColor: "rgba(0,0,0,0.35)",
-      textShadowOffset: { width: 0, height: 1 },
-      textShadowRadius: 3,
-      paddingVertical: 0,
     },
     rightCluster: {
       position: "absolute",

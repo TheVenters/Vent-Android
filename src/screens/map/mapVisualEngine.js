@@ -331,10 +331,21 @@ const mergeNearbyClouds = (clouds, mapRegion, mapSize) => {
   return merged;
 };
 
-export const computeMapVisuals = (posts, mapRegion, mapSize, focusedPinId = null) => {
+export const computeMapVisuals = (
+  posts,
+  mapRegion,
+  mapSize,
+  focusedPinId = null,
+  options = {},
+) => {
   const normalizedPosts = (Array.isArray(posts) ? posts : []).filter(
     hasValidCoordinate,
   );
+  const cloudsEnabled = options?.cloudsEnabled !== false;
+
+  if (!cloudsEnabled) {
+    return { visiblePins: normalizedPosts, visibleClouds: [] };
+  }
 
   const baseClusters = buildCloudsFromPosts(
     normalizedPosts,

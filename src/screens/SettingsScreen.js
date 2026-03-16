@@ -1,11 +1,17 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Switch } from 'react-native';
 import { useAppTheme } from '../context/ThemeContext';
 import { getCurrentUser, supabase } from '../services/supabase';
+import {
+  DEFAULT_MAP_CLOUDS_ENABLED,
+  getMapCloudsEnabled,
+  setMapCloudsEnabled,
+} from '../utils/mapPreferences';
 
 const SettingsScreen = ({ navigation }) => {
   const { themeMode, setThemeMode, palette } = useAppTheme();
   const [isAdmin, setIsAdmin] = useState(false);
+  const [cloudsEnabled, setCloudsEnabledState] = useState(DEFAULT_MAP_CLOUDS_ENABLED);
 
   const styles = createStyles(palette);
 
@@ -46,6 +52,32 @@ const SettingsScreen = ({ navigation }) => {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+
+    const loadMapPreferences = async () => {
+      const nextCloudsEnabled = await getMapCloudsEnabled();
+      if (active) {
+        setCloudsEnabledState(nextCloudsEnabled);
+      }
+    };
+
+    loadMapPreferences();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const handleCloudsToggle = async (nextValue) => {
+    setCloudsEnabledState(nextValue);
+    try {
+      await setMapCloudsEnabled(nextValue);
+    } catch (error) {
+      setCloudsEnabledState((prev) => !prev);
+      console.warn('Failed to save map cloud preference:', error);
+    }
+  };
+
   return (
     <View style={styles.container}>
       <View style={styles.topBar}>
@@ -83,6 +115,23 @@ const SettingsScreen = ({ navigation }) => {
               Dark Mode
             </Text>
           </TouchableOpacity>
+        </View>
+
+        <Text style={[styles.sectionTitle, styles.sectionSpacing]}>Map</Text>
+        <View style={styles.settingCard}>
+          <View style={styles.settingCopy}>
+            <Text style={styles.settingTitle}>Show clouds</Text>
+            <Text style={styles.settingHint}>
+              When off, clustered cloud markers are replaced with individual posts on the map.
+            </Text>
+          </View>
+          <Switch
+            value={cloudsEnabled}
+            onValueChange={handleCloudsToggle}
+            trackColor={{ false: palette.border, true: palette.primary }}
+            thumbColor={palette.onPrimary}
+            ios_backgroundColor={palette.border}
+          />
         </View>
 
         <Text style={[styles.sectionTitle, styles.sectionSpacing]}>Support</Text>
@@ -177,6 +226,32 @@ const createStyles = (palette) =>
     },
     optionTextActive: {
       color: palette.onPrimary,
+    },
+    settingCard: {
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.surface,
+      paddingVertical: 14,
+      paddingHorizontal: 14,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 12,
+    },
+    settingCopy: {
+      flex: 1,
+      gap: 4,
+    },
+    settingTitle: {
+      fontSize: 15,
+      fontWeight: '700',
+      color: palette.text,
+    },
+    settingHint: {
+      fontSize: 13,
+      lineHeight: 18,
+      color: palette.subtext,
     },
     sectionSpacing: {
       marginTop: 30,

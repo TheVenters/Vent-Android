@@ -1115,10 +1115,11 @@ const AccountScreen = ({ navigation, route }) => {
                   <Text style={styles.postModalCaption}>
                     {String(selectedPost.caption || "").trim() || "Untitled"}
                   </Text>
-                  <Text style={styles.postModalBody}>
-                    {String(selectedPost.content || "").trim() ||
-                      "No text content"}
-                  </Text>
+                  {String(selectedPost.content || "").trim() ? (
+                    <Text style={styles.postModalBody}>
+                      {String(selectedPost.content || "").trim()}
+                    </Text>
+                  ) : null}
 
                   <View style={styles.postModalMetaBlock}>
                     <Text style={styles.postModalMetaText}>

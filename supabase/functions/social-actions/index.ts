@@ -1216,12 +1216,42 @@ const handleListPins = async (
     })
     .slice(0, limit);
 
+  const readCandidateMediaList = (pin: Record<string, unknown>) => {
+    const geometryMediaUrls = Array.isArray((pin?.geometry as Record<string, unknown> | null)?.media_urls)
+      ? ((pin?.geometry as Record<string, unknown>).media_urls as unknown[])
+      : [];
+    const topLevelMediaUrls = Array.isArray(pin?.media_urls)
+      ? (pin.media_urls as unknown[])
+      : [];
+    const primary = asString(pin?.media_url);
+
+    const normalized = [...topLevelMediaUrls, ...geometryMediaUrls]
+      .map((value) => asString(value))
+      .filter(Boolean);
+
+    if (!primary) {
+      return Array.from(new Set(normalized));
+    }
+
+    if (!primary.toLowerCase().startsWith(MEDIA_STORAGE_POINTER_SCHEME)) {
+      normalized.unshift(primary);
+      return Array.from(new Set(normalized));
+    }
+
+    if (!normalized.includes(primary)) {
+      normalized.unshift(primary);
+    }
+    return Array.from(new Set(normalized));
+  };
+
   const mediaPointerByKey = new Map<string, { bucket: string; path: string }>();
   pins.forEach((pin) => {
-    const pointer = parseStorageMediaPointer(pin?.media_url);
-    if (!pointer) return;
-    const key = `${pointer.bucket}::${pointer.path}`;
-    if (!mediaPointerByKey.has(key)) mediaPointerByKey.set(key, pointer);
+    readCandidateMediaList(pin).forEach((value) => {
+      const pointer = parseStorageMediaPointer(value);
+      if (!pointer) return;
+      const key = `${pointer.bucket}::${pointer.path}`;
+      if (!mediaPointerByKey.has(key)) mediaPointerByKey.set(key, pointer);
+    });
   });
 
   const signedMediaUrlByKey = new Map<string, string>();
@@ -1237,16 +1267,27 @@ const handleListPins = async (
   );
 
   const hydratedPins = pins.map((pin) => {
-    const pointer = parseStorageMediaPointer(pin?.media_url);
-    if (!pointer) return pin;
-    const key = `${pointer.bucket}::${pointer.path}`;
-    const signedUrl = signedMediaUrlByKey.get(key);
-    if (!signedUrl) return pin;
+    const mediaValues = readCandidateMediaList(pin);
+    const resolvedMediaUrls = Array.from(
+      new Set(
+        mediaValues.map((value) => {
+          const pointer = parseStorageMediaPointer(value);
+          if (!pointer) return value;
+          const key = `${pointer.bucket}::${pointer.path}`;
+          return asString(signedMediaUrlByKey.get(key)) || value;
+        }),
+      ),
+    );
+    const firstPointer = mediaValues
+      .map((value) => parseStorageMediaPointer(value))
+      .find(Boolean);
+
     return {
       ...pin,
-      media_url: signedUrl,
-      media_storage_bucket: pointer.bucket,
-      media_storage_path: pointer.path,
+      media_urls: resolvedMediaUrls,
+      media_url: resolvedMediaUrls[0] || asString(pin?.media_url) || null,
+      media_storage_bucket: firstPointer?.bucket || asString(pin?.media_storage_bucket) || null,
+      media_storage_path: firstPointer?.path || asString(pin?.media_storage_path) || null,
     };
   });
 

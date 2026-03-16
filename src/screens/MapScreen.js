@@ -44,6 +44,7 @@ import {
   getCurrentUser,
   getActiveSession,
   hydratePinsWithSignedMediaUrls,
+  isStorageMediaPointer,
   uploadPostMediaToStorage,
   votePinViaEdgeFunction,
   supabaseWithAccessToken,
@@ -89,6 +90,10 @@ import {
 } from "./map/layerRuntime";
 import { resolvePinsForMap } from "./map/pinFeedResolver";
 import { readRemovedLayerIds, setLayerRemovedState } from "../utils/removedLayerIds";
+import {
+  DEFAULT_MAP_CLOUDS_ENABLED,
+  getMapCloudsEnabled,
+} from "../utils/mapPreferences";
 
 const formatUsernameForLayer = (user) => {
   const fromMeta =
@@ -441,6 +446,41 @@ const hasValidCoordinate = (post) =>
   Number.isFinite(post.lat) &&
   typeof post?.lng === "number" &&
   Number.isFinite(post.lng);
+
+const hasValidMapCoordinate = (coordinate) =>
+  Number.isFinite(coordinate?.latitude) &&
+  Number.isFinite(coordinate?.longitude);
+
+const pinHasUnhydratedMedia = (pin) => {
+  const primary = String(pin?.media_url || "").trim();
+  if (isStorageMediaPointer(primary)) return true;
+
+  const topLevelList = Array.isArray(pin?.media_urls) ? pin.media_urls : [];
+  const geometryList = Array.isArray(pin?.geometry?.media_urls)
+    ? pin.geometry.media_urls
+    : [];
+  return [...topLevelList, ...geometryList].some((value) =>
+    isStorageMediaPointer(String(value || "").trim()),
+  );
+};
+
+const pinHasAnyMedia = (pin) => {
+  if (!pin) return false;
+  if (["media", "photo", "video"].includes(String(pin?.type || "").toLowerCase())) {
+    return true;
+  }
+
+  const primary = String(pin?.media_url || "").trim();
+  if (primary) return true;
+
+  const topLevelList = Array.isArray(pin?.media_urls) ? pin.media_urls : [];
+  const geometryList = Array.isArray(pin?.geometry?.media_urls)
+    ? pin.geometry.media_urls
+    : [];
+  return [...topLevelList, ...geometryList].some((value) =>
+    String(value || "").trim(),
+  );
+};
 
 const normalizeLongitude = (longitude) => {
   if (!Number.isFinite(longitude)) return longitude;
@@ -862,6 +902,7 @@ const MapScreen = ({ navigation, route }) => {
   const [selectedCloud, setSelectedCloud] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [mapSize, setMapSize] = useState(DEFAULT_MAP_SIZE);
+  const [cloudsEnabled, setCloudsEnabled] = useState(DEFAULT_MAP_CLOUDS_ENABLED);
   const pins = mapVisuals.pins;
   const clouds = mapVisuals.clouds;
   const persistedShapes = useMemo(
@@ -2082,6 +2123,22 @@ const MapScreen = ({ navigation, route }) => {
 
   useFocusEffect(
     useCallback(() => {
+      let active = true;
+      const loadMapPreferences = async () => {
+        const nextCloudsEnabled = await getMapCloudsEnabled();
+        if (active) {
+          setCloudsEnabled(nextCloudsEnabled);
+        }
+      };
+      loadMapPreferences();
+      return () => {
+        active = false;
+      };
+    }, []),
+  );
+
+  useFocusEffect(
+    useCallback(() => {
       return () => {
         // Ensure map-only overlays never leak across tabs/screens.
         dismissMapCallouts({ clearArrowFocus: true });
@@ -2091,6 +2148,12 @@ const MapScreen = ({ navigation, route }) => {
       };
     }, [dismissMapCallouts]),
   );
+
+  useEffect(() => {
+    if (cloudsEnabled) return;
+    setCloudPostsModalVisible(false);
+    setSelectedCloud(null);
+  }, [cloudsEnabled]);
 
   const clearCommunityMapContext = () => {
     setCommunityMapContext(null);
@@ -2145,6 +2208,7 @@ useEffect(() => {
         region,
         mapSize,
         arrowFocusedPinId,
+        { cloudsEnabled },
       );
       setMapVisuals((prev) => {
         const samePins = haveSameEntitySignatures(
@@ -2162,7 +2226,7 @@ useEffect(() => {
       });
     });
     return () => cancelAnimationFrame(frame);
-  }, [allLoadedPosts, arrowFocusedPinId, mapSize, region]);
+  }, [allLoadedPosts, arrowFocusedPinId, cloudsEnabled, mapSize, region]);
 
   const requestLocationPermission = async () => {
     try {
@@ -3373,6 +3437,16 @@ useEffect(() => {
       }
       const primaryPersistedMediaPointer = persistedMediaPointers[0] || null;
       const primaryPersistedMediaType = persistedMediaTypes[0] || null;
+      const resolvedPostType =
+        persistedMediaPointers.length === 0
+          ? "text"
+          : persistedMediaPointers.length === 1 &&
+              primaryPersistedMediaType === "video"
+            ? "video"
+            : persistedMediaPointers.length === 1 &&
+                primaryPersistedMediaType === "photo"
+              ? "photo"
+              : "media";
 
       if (persistedMediaPointers.length > 0) {
         geometry = {
@@ -3386,8 +3460,8 @@ useEffect(() => {
       const insertRows = [
         {
           user_id: activeUserId,
-          type: persistedMediaPointers.length > 0 ? "media" : "text",
-          content: postData.content,
+          type: resolvedPostType,
+          content: "",
           caption: postData.title,
           media_url: primaryPersistedMediaPointer,
           media_type: primaryPersistedMediaType,
@@ -3830,12 +3904,60 @@ useEffect(() => {
     return await requestPromise;
   };
 
+  const hydrateSinglePinMedia = useCallback(
+    async (targetPin) => {
+      const pinId = String(targetPin?.id || "");
+      if (!pinId) return null;
+
+      let session = await getActiveSession();
+      if (!session?.access_token) {
+        const {
+          data: { session: fallbackSession },
+        } = await supabase.auth.getSession();
+        session = fallbackSession || null;
+      }
+      if (!session?.access_token) return null;
+
+      const sourcePin =
+        (Array.isArray(allLoadedPostsRef.current)
+          ? allLoadedPostsRef.current
+          : []
+        ).find((pin) => String(pin?.id || "") === pinId) || targetPin;
+      if (!sourcePin) return null;
+
+      const [hydratedPin] = await hydratePinsWithSignedMediaUrls(
+        [sourcePin],
+        session,
+      );
+      if (!hydratedPin) return null;
+
+      setAllLoadedPosts((prev) =>
+        (Array.isArray(prev) ? prev : []).map((pin) =>
+          String(pin?.id || "") === pinId ? { ...pin, ...hydratedPin } : pin,
+        ),
+      );
+      setSelectedPin((prev) => {
+        if (!prev || String(prev?.id || "") !== pinId) return prev;
+        return { ...prev, ...hydratedPin };
+      });
+
+      return hydratedPin;
+    },
+    [],
+  );
+
   const handlePinPress = (pin) => {
     dismissMapCallouts({ clearArrowFocus: false });
-    selectedPinIdRef.current = pin.id;
-    setSelectedPin(pin);
-    const cached = pinVoteSummaryCacheRef.current.get(pin.id);
-    const cachedComments = pinCommentsCacheRef.current.get(pin.id);
+    const pinId = String(pin?.id || "");
+    const latestPin =
+      (Array.isArray(allLoadedPostsRef.current)
+        ? allLoadedPostsRef.current
+        : []
+      ).find((item) => String(item?.id || "") === pinId) || pin;
+    selectedPinIdRef.current = latestPin.id;
+    setSelectedPin(latestPin);
+    const cached = pinVoteSummaryCacheRef.current.get(latestPin.id);
+    const cachedComments = pinCommentsCacheRef.current.get(latestPin.id);
     setPinVoteSummary(
       cached || {
         upvotes: 0,
@@ -3846,17 +3968,17 @@ useEffect(() => {
     setPinComments(cachedComments || []);
     setPinCommentsLoading(!cachedComments);
     setDeletingCommentId(null);
-    loadPinVotes(pin.id, {
+    loadPinVotes(latestPin.id, {
       preferCache: true,
       suppressState: false,
       backgroundRefresh: true,
     }).catch(() => {});
-    loadPinComments(pin.id, {
+    loadPinComments(latestPin.id, {
       preferCache: true,
       suppressState: false,
       backgroundRefresh: true,
     }).catch(() => {});
-    loadPinAssociations(pin);
+    loadPinAssociations(latestPin);
     setShowDetailModal(true);
   };
 
@@ -3882,6 +4004,79 @@ useEffect(() => {
     if (stillVisible) return;
     resetSelectedPinDetail();
   }, [allLoadedPosts, resetSelectedPinDetail, selectedPin?.id, showDetailModal]);
+
+  useEffect(() => {
+    if (!showDetailModal) return;
+    const selectedId = String(selectedPin?.id || "");
+    if (!selectedId) return;
+
+    const latestVisiblePin = (Array.isArray(allLoadedPosts) ? allLoadedPosts : []).find(
+      (pin) => String(pin?.id || "") === selectedId,
+    );
+    if (!latestVisiblePin) return;
+
+    setSelectedPin((prev) => {
+      if (!prev || String(prev?.id || "") !== selectedId) return prev;
+
+      const prevMediaUrl = String(prev?.media_url || "").trim();
+      const nextMediaUrl = String(latestVisiblePin?.media_url || "").trim();
+      const prevMediaUrls = JSON.stringify(prev?.media_urls || []);
+      const nextMediaUrls = JSON.stringify(latestVisiblePin?.media_urls || []);
+      const prevGeometryMediaUrls = JSON.stringify(prev?.geometry?.media_urls || []);
+      const nextGeometryMediaUrls = JSON.stringify(
+        latestVisiblePin?.geometry?.media_urls || [],
+      );
+
+      const hasMeaningfulMediaChange =
+        prevMediaUrl !== nextMediaUrl ||
+        prevMediaUrls !== nextMediaUrls ||
+        prevGeometryMediaUrls !== nextGeometryMediaUrls;
+
+      if (!hasMeaningfulMediaChange && prev === latestVisiblePin) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        ...latestVisiblePin,
+      };
+    });
+  }, [allLoadedPosts, selectedPin?.id, showDetailModal]);
+
+  useEffect(() => {
+    if (!showDetailModal || !selectedPin || !pinHasAnyMedia(selectedPin)) {
+      return;
+    }
+
+    let active = true;
+
+    const hydrateSelectedPinMedia = async () => {
+      try {
+        const hydratedPin = await hydrateSinglePinMedia(selectedPin);
+        if (!active || !hydratedPin) return;
+      } catch (error) {
+        console.warn("Failed to hydrate selected pin media:", error);
+      }
+    };
+
+    hydrateSelectedPinMedia();
+    return () => {
+      active = false;
+    };
+  }, [hydrateSinglePinMedia, selectedPin, showDetailModal]);
+
+  const handleSelectedPinMediaLoadError = useCallback(
+    (pin, failedUrl) => {
+      console.warn("Pin media failed to load, retrying hydration:", {
+        pinId: pin?.id,
+        failedUrl,
+      });
+      hydrateSinglePinMedia(pin).catch((error) => {
+        console.warn("Retry pin media hydration failed:", error);
+      });
+    },
+    [hydrateSinglePinMedia],
+  );
 
   useEffect(() => {
     const visiblePinIds = new Set(
@@ -4006,7 +4201,7 @@ useEffect(() => {
     });
   };
 
-  const handleRegionChangeComplete = useCallback((nextRegion) => {
+  const syncRegionFromMap = useCallback((nextRegion) => {
     const normalizedRegion = {
       latitude: Number(nextRegion?.latitude),
       longitude: Number(nextRegion?.longitude),
@@ -4038,6 +4233,10 @@ useEffect(() => {
       }
       return normalizedRegion;
     });
+  }, []);
+
+  const handleRegionChangeComplete = useCallback((nextRegion) => {
+    syncRegionFromMap(nextRegion);
     if (
       multiTouchGestureLockedRef.current &&
       activeMapTouchCountRef.current <= 1 &&
@@ -4046,9 +4245,10 @@ useEffect(() => {
       multiTouchGestureLockedRef.current = false;
       setIsMapMultiTouchActive(false);
     }
-  }, []);
+  }, [syncRegionFromMap]);
 
-  const handleRegionChange = useCallback(() => {
+  const handleRegionChange = useCallback((nextRegion) => {
+    syncRegionFromMap(nextRegion);
     if (!isDrawingMode) return;
     const hasMultiTouchContext =
       activeMapTouchCountRef.current > 1 || multiTouchGestureLockedRef.current;
@@ -4058,7 +4258,7 @@ useEffect(() => {
     suppressDrawUntilRef.current = Math.max(suppressDrawUntilRef.current, until);
     multiTouchGestureLockedRef.current = true;
     setIsMapMultiTouchActive(true);
-  }, [isDrawingMode]);
+  }, [isDrawingMode, syncRegionFromMap]);
 
   const showArrowPinCallout = useCallback((pinId, attempt = 0) => {
     const normalizedPinId = String(pinId || "");
@@ -4853,32 +5053,38 @@ useEffect(() => {
             />
           ),
         )}
-        {pins.map((pin) => (
-          <CustomMarker
-            key={pin.id}
-            ref={(markerRef) => {
-              if (markerRef) {
-                markerRefsByIdRef.current.set(String(pin.id), markerRef);
-              } else {
-                markerRefsByIdRef.current.delete(String(pin.id));
-              }
-            }}
-            pin={pin}
-            onPress={handlePinPress}
-            onSelect={handleMarkerSelect}
-            onDeselect={handleMarkerDeselect}
-          />
-        ))}
-        {clouds.map((cloud) => (
-          <React.Fragment key={cloud.id}>
+        {pins.map((pin) => {
+          if (!hasValidCoordinate(pin)) return null;
+          return (
+            <CustomMarker
+              key={pin.id}
+              ref={(markerRef) => {
+                if (markerRef) {
+                  markerRefsByIdRef.current.set(String(pin.id), markerRef);
+                } else {
+                  markerRefsByIdRef.current.delete(String(pin.id));
+                }
+              }}
+              pin={pin}
+              onPress={handlePinPress}
+              onSelect={handleMarkerSelect}
+              onDeselect={handleMarkerDeselect}
+            />
+          );
+        })}
+        {clouds.flatMap((cloud) => {
+          if (!hasValidMapCoordinate(cloud?.center)) return [];
+          return [
             <Circle
+              key={`cloud-circle-${cloud.id}`}
               center={cloud.center}
               radius={cloud.radiusMeters}
               strokeColor="rgba(129, 140, 248, 0.55)"
               fillColor="rgba(129, 140, 248, 0.16)"
               strokeWidth={2}
-            />
+            />,
             <Marker
+              key={`cloud-marker-${cloud.id}`}
               coordinate={cloud.center}
               onPress={() => handleCloudPress(cloud)}
               tracksViewChanges={false}
@@ -4888,9 +5094,9 @@ useEffect(() => {
                   {cloud.badgeCount || cloud.count}
                 </Text>
               </View>
-            </Marker>
-          </React.Fragment>
-        ))}
+            </Marker>,
+          ];
+        })}
 
         {isDrawingMode &&
           drawingCoords.length >= 2 &&
@@ -5256,6 +5462,7 @@ useEffect(() => {
         onClose={resetSelectedPinDetail}
         onUpdate={handleUpdatePin}
         onDelete={handleDeletePin}
+        onMediaLoadError={handleSelectedPinMediaLoadError}
       />
     </View>
   );

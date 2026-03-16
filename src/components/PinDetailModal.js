@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   View,
   Modal,
@@ -11,6 +11,7 @@ import {
   Platform,
   Image,
   Alert,
+  Dimensions,
 } from "react-native";
 import { COLORS, SIZES } from "../constants/theme";
 
@@ -52,6 +53,7 @@ const PinDetailModal = ({
   onClose,
   onUpdate,
   onDelete,
+  onMediaLoadError,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [content, setContent] = useState("");
@@ -59,25 +61,51 @@ const PinDetailModal = ({
   const [visibility, setVisibility] = useState("public");
   const [mediaAspectRatio, setMediaAspectRatio] = useState(4 / 3);
   const [activeMediaIndex, setActiveMediaIndex] = useState(0);
+  const [isPhotoViewerVisible, setIsPhotoViewerVisible] = useState(false);
   const [commentDraft, setCommentDraft] = useState("");
   const [replyToCommentId, setReplyToCommentId] = useState(null);
   const [expandedReplyThreads, setExpandedReplyThreads] = useState({});
+  const modalMediaScrollRef = useRef(null);
+  const photoViewerScrollRef = useRef(null);
+  const viewerWidth = Dimensions.get("window").width;
+  const viewerHeight = Dimensions.get("window").height;
+  const modalMediaWidth = Math.max(1, viewerWidth - SIZES.xl * 2);
 
   const isOwner = pin?.user_id === currentUserId;
   const mediaUrls = useMemo(() => {
+    const topLevelList = Array.isArray(pin?.media_urls) ? pin.media_urls : [];
     const geometryList = Array.isArray(pin?.geometry?.media_urls)
       ? pin.geometry.media_urls
       : [];
-    const topLevelList = Array.isArray(pin?.media_urls) ? pin.media_urls : [];
-    const normalizedList = [...geometryList, ...topLevelList]
+    const primary = String(pin?.media_url || "").trim();
+
+    // Match the marker/callout precedence so the modal uses the same
+    // freshest hydrated URL instead of preferring stale geometry values.
+    const normalizedList = [...topLevelList, ...geometryList]
       .map((value) => String(value || "").trim())
       .filter(isRenderableMediaUrl);
+
+    if (isRenderableMediaUrl(primary)) {
+      normalizedList.unshift(primary);
+    }
+
     if (normalizedList.length > 0) {
       return Array.from(new Set(normalizedList));
     }
-    const primary = String(pin?.media_url || "").trim();
     return isRenderableMediaUrl(primary) ? [primary] : [];
   }, [pin?.geometry?.media_urls, pin?.media_url, pin?.media_urls]);
+  const mediaTypes = useMemo(() => {
+    const topLevelTypes = Array.isArray(pin?.media_types) ? pin.media_types : [];
+    const geometryTypes = Array.isArray(pin?.geometry?.media_types)
+      ? pin.geometry.media_types
+      : [];
+    const normalized = [...topLevelTypes, ...geometryTypes]
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean);
+    if (normalized.length > 0) return normalized;
+    const primaryType = String(pin?.media_type || "").trim().toLowerCase();
+    return primaryType ? [primaryType] : [];
+  }, [pin?.geometry?.media_types, pin?.media_type, pin?.media_types]);
   const isMediaPin =
     pin?.type === "media" ||
     pin?.type === "photo" ||
@@ -94,17 +122,24 @@ const PinDetailModal = ({
       setExpandedReplyThreads({});
       setIsEditing(false);
       setActiveMediaIndex(0);
+      setIsPhotoViewerVisible(false);
     }
   }, [pin]);
 
   const activeMediaUrl =
     mediaUrls[Math.max(0, Math.min(activeMediaIndex, mediaUrls.length - 1))] || null;
+  const activeMediaType =
+    mediaTypes[Math.max(0, Math.min(activeMediaIndex, mediaTypes.length - 1))] ||
+    String(pin?.media_type || "").toLowerCase();
+  const hasBodyContent = String(pin?.content || "").trim().length > 0;
 
   useEffect(() => {
-    if (!activeMediaUrl || pin?.media_type === "video") {
+    if (!activeMediaUrl || activeMediaType === "video") {
       setMediaAspectRatio(4 / 3);
       return;
     }
+
+    Image.prefetch(activeMediaUrl).catch(() => {});
 
     Image.getSize(
       activeMediaUrl,
@@ -117,16 +152,43 @@ const PinDetailModal = ({
       },
       () => setMediaAspectRatio(4 / 3),
     );
-  }, [activeMediaUrl, pin?.media_type]);
+  }, [activeMediaType, activeMediaUrl]);
+
+  useEffect(() => {
+    if (mediaUrls.length <= 1) return;
+    const targetX = Math.max(0, activeMediaIndex) * modalMediaWidth;
+    requestAnimationFrame(() => {
+      modalMediaScrollRef.current?.scrollTo?.({
+        x: targetX,
+        y: 0,
+        animated: true,
+      });
+    });
+  }, [activeMediaIndex, mediaUrls.length, modalMediaWidth]);
+
+  useEffect(() => {
+    if (!isPhotoViewerVisible) return;
+    const targetX = Math.max(0, activeMediaIndex) * viewerWidth;
+    requestAnimationFrame(() => {
+      photoViewerScrollRef.current?.scrollTo?.({
+        x: targetX,
+        y: 0,
+        animated: false,
+      });
+    });
+  }, [activeMediaIndex, isPhotoViewerVisible, viewerWidth]);
 
   const handleSave = () => {
-    if (!isMediaPin && !content.trim()) {
-      Alert.alert("Error", "Content cannot be empty");
+    if (!caption.trim()) {
+      Alert.alert("Error", "Title cannot be empty");
       return;
     }
-    const updates = { caption, layer: normalizeVisibility(visibility) };
+    const updates = {
+      caption: caption.trim(),
+      layer: normalizeVisibility(visibility),
+    };
     if (!isMediaPin) {
-      updates.content = content;
+      updates.content = content.trim();
     }
     onUpdate(pin.id, updates);
     setIsEditing(false);
@@ -523,21 +585,56 @@ const PinDetailModal = ({
             {/* Media Preview */}
             {isMediaPin && mediaUrls.length > 0 && (
               <View style={styles.mediaContainer}>
-                {pin.media_type === "video" && mediaUrls.length === 1 ? (
+                {activeMediaType === "video" ? (
                   <View style={styles.videoPlaceholder}>
                     <Text style={styles.videoIcon}>🎬</Text>
                     <Text style={styles.videoText}>Video</Text>
+                    <Text style={styles.videoHintText}>
+                      Video capture is enabled. Playback is not wired into this modal yet.
+                    </Text>
                   </View>
                 ) : (
                   <>
-                    <Image
-                      source={{ uri: activeMediaUrl }}
-                      style={[
-                        styles.mediaImage,
-                        { aspectRatio: mediaAspectRatio },
-                      ]}
-                      resizeMode="contain"
-                    />
+                    <ScrollView
+                      ref={modalMediaScrollRef}
+                      horizontal
+                      pagingEnabled
+                      showsHorizontalScrollIndicator={false}
+                      onMomentumScrollEnd={(event) => {
+                        const offsetX = Number(event?.nativeEvent?.contentOffset?.x || 0);
+                        const nextIndex = Math.round(
+                          offsetX / Math.max(1, modalMediaWidth),
+                        );
+                        if (Number.isFinite(nextIndex)) {
+                          setActiveMediaIndex(
+                            Math.max(0, Math.min(mediaUrls.length - 1, nextIndex)),
+                          );
+                        }
+                      }}
+                    >
+                      {mediaUrls.map((mediaUrl, index) => (
+                        <TouchableOpacity
+                          key={`modal-media-${index}`}
+                          activeOpacity={0.95}
+                          onPress={() => {
+                            setActiveMediaIndex(index);
+                            setIsPhotoViewerVisible(true);
+                          }}
+                          style={[styles.mediaPage, { width: modalMediaWidth }]}
+                        >
+                          <Image
+                            source={{ uri: mediaUrl }}
+                            style={[
+                              styles.mediaImage,
+                              { aspectRatio: mediaAspectRatio },
+                            ]}
+                            resizeMode="contain"
+                            onError={() => onMediaLoadError?.(pin, mediaUrl)}
+                          />
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                    <Text style={styles.mediaZoomHint}>Tap image to zoom</Text>
                     {mediaUrls.length > 1 ? (
                       <View style={styles.mediaPagerRow}>
                         <TouchableOpacity
@@ -629,9 +726,9 @@ const PinDetailModal = ({
                 <Text style={styles.postTitleText}>
                   {pin.caption || "Untitled"}
                 </Text>
-                <Text style={styles.contentText}>
-                  {pin.content || "No caption"}
-                </Text>
+                {hasBodyContent ? (
+                  <Text style={styles.contentText}>{pin.content}</Text>
+                ) : null}
               </View>
             )}
 
@@ -817,6 +914,83 @@ const PinDetailModal = ({
             </View>
           )}
         </View>
+
+        <Modal
+          visible={isPhotoViewerVisible}
+          animationType="fade"
+          transparent={false}
+          onRequestClose={() => setIsPhotoViewerVisible(false)}
+        >
+          <View style={styles.photoViewerModal}>
+            <View style={styles.photoViewerTopBar}>
+              <Text style={styles.photoViewerCount}>
+                {activeMediaIndex + 1} / {mediaUrls.length}
+              </Text>
+              <TouchableOpacity
+                style={styles.photoViewerCloseButton}
+                onPress={() => setIsPhotoViewerVisible(false)}
+              >
+                <Text style={styles.photoViewerCloseText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+            <ScrollView
+              ref={photoViewerScrollRef}
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
+              onMomentumScrollEnd={(event) => {
+                const offsetX = Number(event?.nativeEvent?.contentOffset?.x || 0);
+                const nextIndex = Math.round(offsetX / Math.max(1, viewerWidth));
+                if (Number.isFinite(nextIndex)) {
+                  setActiveMediaIndex(
+                    Math.max(0, Math.min(mediaUrls.length - 1, nextIndex)),
+                  );
+                }
+              }}
+            >
+              {mediaUrls.map((mediaUrl, index) => (
+                <View
+                  key={`media-viewer-${index}`}
+                  style={[styles.photoViewerPage, { width: viewerWidth }]}
+                >
+                  {(mediaTypes[index] || activeMediaType) === "video" ? (
+                    <View style={styles.photoViewerVideoPlaceholder}>
+                      <Text style={styles.videoIcon}>🎬</Text>
+                      <Text style={styles.videoText}>Video</Text>
+                    </View>
+                  ) : (
+                    <ScrollView
+                      style={styles.photoViewerZoomScroll}
+                      contentContainerStyle={[
+                        styles.photoViewerZoomContent,
+                        { width: viewerWidth, minHeight: viewerHeight * 0.78 },
+                      ]}
+                      maximumZoomScale={4}
+                      minimumZoomScale={1}
+                      centerContent
+                      showsHorizontalScrollIndicator={false}
+                      showsVerticalScrollIndicator={false}
+                      pinchGestureEnabled
+                    >
+                      <Image
+                        source={{ uri: mediaUrl }}
+                        style={[
+                          styles.photoViewerImage,
+                          { width: viewerWidth, height: viewerHeight * 0.78 },
+                        ]}
+                        resizeMode="contain"
+                        onError={() => onMediaLoadError?.(pin, mediaUrl)}
+                      />
+                    </ScrollView>
+                  )}
+                </View>
+              ))}
+            </ScrollView>
+            <Text style={styles.photoViewerHint}>
+              Pinch to zoom. Swipe sideways to move between photos.
+            </Text>
+          </View>
+        </Modal>
       </KeyboardAvoidingView>
     </Modal>
   );
@@ -878,6 +1052,9 @@ const styles = StyleSheet.create({
     borderRadius: SIZES.radiusLg,
     overflow: "hidden",
   },
+  mediaPage: {
+    justifyContent: "center",
+  },
   mediaImage: {
     width: "100%",
     aspectRatio: 4 / 3,
@@ -901,6 +1078,20 @@ const styles = StyleSheet.create({
   videoText: {
     color: COLORS.white,
     fontSize: SIZES.lg,
+  },
+  videoHintText: {
+    color: "rgba(255,255,255,0.82)",
+    fontSize: SIZES.sm,
+    marginTop: SIZES.sm,
+    textAlign: "center",
+    paddingHorizontal: SIZES.lg,
+  },
+  mediaZoomHint: {
+    marginTop: SIZES.sm,
+    color: COLORS.gray,
+    fontSize: SIZES.sm,
+    fontWeight: "600",
+    textAlign: "center",
   },
   mediaPagerRow: {
     flexDirection: "row",
@@ -940,6 +1131,64 @@ const styles = StyleSheet.create({
     fontSize: SIZES.lg,
     color: COLORS.dark,
     lineHeight: 30,
+  },
+  photoViewerModal: {
+    flex: 1,
+    backgroundColor: "#05070d",
+  },
+  photoViewerTopBar: {
+    paddingTop: Platform.OS === "ios" ? 56 : 20,
+    paddingHorizontal: SIZES.lg,
+    paddingBottom: SIZES.md,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  photoViewerCount: {
+    color: COLORS.white,
+    fontSize: SIZES.md,
+    fontWeight: "700",
+  },
+  photoViewerCloseButton: {
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.22)",
+    borderRadius: SIZES.radiusFull,
+    paddingHorizontal: SIZES.md,
+    paddingVertical: SIZES.xs,
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
+  photoViewerCloseText: {
+    color: COLORS.white,
+    fontSize: SIZES.sm,
+    fontWeight: "700",
+  },
+  photoViewerPage: {
+    flex: 1,
+    justifyContent: "center",
+  },
+  photoViewerVideoPlaceholder: {
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: 320,
+    paddingHorizontal: SIZES.lg,
+  },
+  photoViewerZoomScroll: {
+    flex: 1,
+  },
+  photoViewerZoomContent: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  photoViewerImage: {
+    backgroundColor: "#05070d",
+  },
+  photoViewerHint: {
+    color: "rgba(255,255,255,0.72)",
+    fontSize: SIZES.sm,
+    fontWeight: "600",
+    textAlign: "center",
+    paddingHorizontal: SIZES.lg,
+    paddingBottom: Platform.OS === "ios" ? 28 : 18,
   },
   editContainer: {
     marginBottom: SIZES.lg,
