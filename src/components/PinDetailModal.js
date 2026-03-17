@@ -76,6 +76,7 @@ const PinDetailModal = ({
   const [expandedReplyThreads, setExpandedReplyThreads] = useState({});
   const modalMediaScrollRef = useRef(null);
   const photoViewerScrollRef = useRef(null);
+  const lastInitializedPinIdRef = useRef(null);
   const viewerWidth = Dimensions.get("window").width;
   const viewerHeight = Dimensions.get("window").height;
   const modalMediaWidth = Math.max(1, viewerWidth - SIZES.xl * 2);
@@ -122,18 +123,26 @@ const PinDetailModal = ({
     mediaUrls.length > 0;
 
   useEffect(() => {
-    if (pin) {
-      setContent(pin.content || "");
-      setCaption(pin.caption || "");
-      setVisibility(normalizeVisibility(pin.layer));
-      setCommentDraft("");
-      setReplyToCommentId(null);
-      setExpandedReplyThreads({});
-      setIsEditing(false);
-      setActiveMediaIndex(0);
-      setIsPhotoViewerVisible(false);
+    const pinId = String(pin?.id || "");
+    if (!pinId) {
+      lastInitializedPinIdRef.current = null;
+      return;
     }
-  }, [pin]);
+    if (lastInitializedPinIdRef.current === pinId) {
+      return;
+    }
+
+    lastInitializedPinIdRef.current = pinId;
+    setContent(pin?.content || "");
+    setCaption(pin?.caption || "");
+    setVisibility(normalizeVisibility(pin?.layer));
+    setCommentDraft("");
+    setReplyToCommentId(null);
+    setExpandedReplyThreads({});
+    setIsEditing(false);
+    setActiveMediaIndex(0);
+    setIsPhotoViewerVisible(false);
+  }, [pin?.id, pin?.caption, pin?.content, pin?.layer]);
 
   const activeMediaUrl =
     mediaUrls[Math.max(0, Math.min(activeMediaIndex, mediaUrls.length - 1))] || null;

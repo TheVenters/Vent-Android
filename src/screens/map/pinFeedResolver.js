@@ -13,6 +13,7 @@ import {
   getMyPostsAudienceFilterKey,
   isMyPostsAudienceVirtualLayer,
 } from "./layerRuntime";
+import { hydrateAvatarUrlsInRows } from "../../utils/avatarUrls";
 
 const LAYER_TRACE_ENABLED = false;
 const logLayerTrace = (label, payload = null) => {
@@ -604,7 +605,12 @@ export const resolvePinsForMap = async ({
       .select("id,username,avatar_url")
       .in("id", userIds);
     if (profileError) throw profileError;
-    (profiles || []).forEach((profile) => profileByUserId.set(profile.id, profile));
+    const hydratedProfiles = await hydrateAvatarUrlsInRows(
+      profiles || [],
+      "avatar_url",
+      accessToken ? { access_token: accessToken } : null,
+    );
+    hydratedProfiles.forEach((profile) => profileByUserId.set(profile.id, profile));
   }
 
   const layerIconById = new Map(layers.map((layer) => [layer.id, layer.layer_icon || null]));

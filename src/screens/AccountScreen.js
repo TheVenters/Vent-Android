@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   View,
   Text,
@@ -30,6 +30,12 @@ import {
 import { SIZES } from "../constants/theme";
 import { useAppTheme } from "../context/ThemeContext";
 import { getBrandAssetsForTheme } from "../constants/brandAssets";
+import {
+  hydrateAvatarUrl,
+  hydrateAvatarUrlsInRows,
+} from "../utils/avatarUrls";
+
+const MAX_SAFE_AUTH_TOKEN_LENGTH = 12000;
 
 const AccountScreen = ({ navigation, route }) => {
   const [email, setEmail] = useState("");
@@ -53,6 +59,8 @@ const AccountScreen = ({ navigation, route }) => {
   const [joinedLayersError, setJoinedLayersError] = useState("");
   const [viewedProfile, setViewedProfile] = useState(null);
   const [selectedPost, setSelectedPost] = useState(null);
+  const cleanedAvatarMetadataRef = useRef(new Set());
+  const oversizedTokenAlertShownRef = useRef(false);
   const { palette, isDark } = useAppTheme();
   const insets = useSafeAreaInsets();
   const topInset = Math.max(
@@ -76,7 +84,7 @@ const AccountScreen = ({ navigation, route }) => {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_, session) => {
       if (session?.user) {
-        setCurrentUser(session.user);
+        loadUser();
       } else {
         setCurrentUser(null);
         setViewedProfile(null);
@@ -112,11 +120,69 @@ const AccountScreen = ({ navigation, route }) => {
     }
   }, [currentUser?.id, profileUserId]);
 
+  const isInlineAvatarDataUrl = (value) =>
+    /^data:image\//i.test(String(value || "").trim());
+
+  const scrubAvatarFromAuthMetadata = async (user) => {
+    const userId = String(user?.id || "");
+    const avatarValue = String(user?.user_metadata?.avatar_url || "").trim();
+    if (!userId || !isInlineAvatarDataUrl(avatarValue)) return user;
+    if (cleanedAvatarMetadataRef.current.has(userId)) return user;
+
+    cleanedAvatarMetadataRef.current.add(userId);
+    try {
+      const { data, error } = await supabase.auth.updateUser({
+        data: {
+          avatar_url: null,
+        },
+      });
+      if (error) throw error;
+      return data?.user || user;
+    } catch (error) {
+      console.warn("Failed to scrub avatar from auth metadata:", error);
+      return user;
+    }
+  };
+
+  const isOversizedSession = (session) =>
+    String(session?.access_token || "").length > MAX_SAFE_AUTH_TOKEN_LENGTH;
+
+  const handleOversizedSession = async (session) => {
+    if (!isOversizedSession(session)) return false;
+    try {
+      await supabase.auth.signOut({ scope: "local" });
+    } catch (_) {}
+    setCurrentUser(null);
+    setAvatarUrl(null);
+    setViewedProfile(null);
+    if (!oversizedTokenAlertShownRef.current) {
+      oversizedTokenAlertShownRef.current = true;
+      Alert.alert(
+        "Profile Metadata Too Large",
+        "This account still has a profile image stored inside auth metadata, which makes the login token too large for mobile requests. We need to remove `avatar_url` from this user's auth metadata in Supabase before this account can sign in normally again.",
+      );
+    }
+    return true;
+  };
+
   const loadUser = async () => {
-    const user = await getCurrentUser();
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (await handleOversizedSession(session)) {
+        return;
+      }
+    } catch (_) {}
+
+    const rawUser = await getCurrentUser();
+    const user = await scrubAvatarFromAuthMetadata(rawUser);
     setCurrentUser(user);
     if (user?.id) {
-      setAvatarUrl(user?.user_metadata?.avatar_url || null);
+      const resolvedAvatarUrl = await hydrateAvatarUrl(
+        user?.user_metadata?.avatar_url || null,
+      );
+      setAvatarUrl(resolvedAvatarUrl);
     } else {
       setAvatarUrl(null);
     }
@@ -148,7 +214,7 @@ const AccountScreen = ({ navigation, route }) => {
           "User"
         : "User";
       const fallbackAvatar = isOwnProfile
-        ? currentUser?.user_metadata?.avatar_url || null
+        ? await hydrateAvatarUrl(currentUser?.user_metadata?.avatar_url || null)
         : null;
 
       const normalizedProfile = {
@@ -157,10 +223,11 @@ const AccountScreen = ({ navigation, route }) => {
         display_name: data?.display_name || fallbackDisplayName,
         avatar_url: data?.avatar_url || fallbackAvatar,
       };
+      const [hydratedProfile] = await hydrateAvatarUrlsInRows([normalizedProfile]);
 
-      setViewedProfile(normalizedProfile);
+      setViewedProfile(hydratedProfile || normalizedProfile);
       if (isOwnProfile) {
-        setAvatarUrl(normalizedProfile.avatar_url || null);
+        setAvatarUrl(hydratedProfile?.avatar_url || normalizedProfile.avatar_url || null);
       }
     } catch (error) {
       const message = String(error?.message || "").toLowerCase();
@@ -171,6 +238,9 @@ const AccountScreen = ({ navigation, route }) => {
         console.error("Error loading profile:", error);
       }
       const isOwnProfile = Boolean(currentUser?.id && userId === currentUser.id);
+      const fallbackAvatar = isOwnProfile
+        ? await hydrateAvatarUrl(currentUser?.user_metadata?.avatar_url || null)
+        : null;
       setViewedProfile({
         id: userId,
         username: isOwnProfile
@@ -182,11 +252,9 @@ const AccountScreen = ({ navigation, route }) => {
             currentUser?.email ||
             "User"
           : "User",
-        avatar_url: isOwnProfile
-          ? currentUser?.user_metadata?.avatar_url || null
-          : null,
+        avatar_url: fallbackAvatar,
       });
-      if (isOwnProfile) setAvatarUrl(currentUser?.user_metadata?.avatar_url || null);
+      if (isOwnProfile) setAvatarUrl(fallbackAvatar);
     }
   };
 
@@ -539,8 +607,11 @@ const AccountScreen = ({ navigation, route }) => {
 
     setLoading(true);
     try {
-      const { error } = await signIn(email, password);
+      const { data, error } = await signIn(email, password);
       if (error) throw error;
+      if (await handleOversizedSession(data?.session || null)) {
+        return;
+      }
 
       Alert.alert("Success", "Signed in successfully!");
       clearForm();
@@ -772,7 +843,7 @@ const AccountScreen = ({ navigation, route }) => {
 
       const { error: updateMetaError } = await supabase.auth.updateUser({
         data: {
-          avatar_url: nextAvatarUrl,
+          avatar_url: null,
         },
       });
       if (updateMetaError) throw updateMetaError;

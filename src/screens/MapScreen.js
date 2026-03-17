@@ -96,6 +96,10 @@ import {
   DEFAULT_MAP_CLOUDS_ENABLED,
   getMapCloudsEnabled,
 } from "../utils/mapPreferences";
+import {
+  hydrateAvatarUrl,
+  hydrateAvatarUrlsInRows,
+} from "../utils/avatarUrls";
 
 const formatUsernameForLayer = (user) => {
   const fromMeta =
@@ -3499,6 +3503,10 @@ useEffect(() => {
       );
       const optimisticMediaUrl = optimisticMediaUrls[0] || null;
       const optimisticMediaType = optimisticMediaTypes[0] || null;
+      const resolvedAuthorAvatarUrl = await hydrateAvatarUrl(
+        activeUser?.user_metadata?.avatar_url || null,
+        session,
+      );
       const optimisticRows = insertRows.map((row, index) => ({
         ...row,
         media_url: optimisticMediaUrl,
@@ -3508,7 +3516,7 @@ useEffect(() => {
         id: `temp-${crossPostGroupId}-${index}`,
         created_at: optimisticCreatedAt,
         updated_at: optimisticCreatedAt,
-        author_avatar_url: activeUser?.user_metadata?.avatar_url || null,
+        author_avatar_url: resolvedAuthorAvatarUrl,
         layer_emoji: row?.geometry?.layer_id
           ? layerIconById.get(row.geometry.layer_id) || null
           : null,
@@ -3610,15 +3618,20 @@ useEffect(() => {
       const pinsRes = await supabase
         .from("pins")
         .select(
-          "id,user_id,caption,content,author_name,created_at,layer,geometry,media_url,media_type",
+          "id,user_id,caption,content,author_name,created_at,layer,geometry,media_url,media_type,media_urls,media_types",
         )
         .in("id", pinIds)
         .order("created_at", { ascending: false })
         .limit(50);
       if (pinsRes.error) throw pinsRes.error;
 
-      const exactLayerPosts = (pinsRes.data || []).filter(
+      let exactLayerPosts = (pinsRes.data || []).filter(
         (post) => !isCloudOnlyPost(post),
+      );
+      const session = await getActiveSession();
+      exactLayerPosts = await hydratePinsWithSignedMediaUrls(
+        exactLayerPosts,
+        session,
       );
       const hydratedById = new Map(
         (Array.isArray(allLoadedPostsRef.current)
@@ -3693,6 +3706,11 @@ useEffect(() => {
             comments = rawComments
               .map((row) => normalizePinComment(row))
               .filter(Boolean);
+            comments = await hydrateAvatarUrlsInRows(
+              comments,
+              "author_avatar_url",
+              session,
+            );
           } else {
             edgeError = commentResult.error;
           }
@@ -3731,7 +3749,12 @@ useEffect(() => {
               if (edgeError) throw edgeError;
               throw profileResult.error;
             }
-            (profileResult.data || []).forEach((profile) => {
+            const hydratedProfiles = await hydrateAvatarUrlsInRows(
+              profileResult.data || [],
+              "avatar_url",
+              session,
+            );
+            hydratedProfiles.forEach((profile) => {
               profileByUserId.set(profile.id, profile);
             });
           }
@@ -4440,6 +4463,12 @@ useEffect(() => {
       }
     }
 
+    const optimisticAuthorAvatarUrl = await hydrateAvatarUrl(
+      session?.user?.user_metadata?.avatar_url ||
+        currentUser?.user_metadata?.avatar_url ||
+        null,
+      session,
+    );
     const optimisticComment = normalizePinComment({
       id: `temp-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
       pin_id: pinId,
@@ -4456,10 +4485,7 @@ useEffect(() => {
         session?.user?.user_metadata?.username ||
         currentUser?.user_metadata?.username ||
         "",
-      author_avatar_url:
-        session?.user?.user_metadata?.avatar_url ||
-        currentUser?.user_metadata?.avatar_url ||
-        null,
+      author_avatar_url: optimisticAuthorAvatarUrl,
     });
     if (!optimisticComment) return false;
 
