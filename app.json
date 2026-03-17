@@ -52,7 +52,9 @@
     "plugins": [
       "expo-location",
       "expo-camera",
-      "expo-image-picker"
+      "expo-image-picker",
+      "expo-video",
+      "expo-media-library"
     ],
     "extra": {
       "eas": {

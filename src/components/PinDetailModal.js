@@ -13,6 +13,7 @@ import {
   Alert,
   Dimensions,
 } from "react-native";
+import { useVideoPlayer, VideoView } from "expo-video";
 import { COLORS, SIZES } from "../constants/theme";
 
 const VISIBILITY_OPTIONS = ["public", "friends", "private"];
@@ -33,6 +34,14 @@ const isRenderableMediaUrl = (value) => {
   const uri = String(value || "").trim();
   if (!uri) return false;
   return !uri.toLowerCase().startsWith("storage://");
+};
+
+const inferMediaTypeFromUrl = (value) => {
+  const uri = String(value || "").trim().toLowerCase();
+  if (!uri) return "photo";
+  if (uri.startsWith("data:video/")) return "video";
+  if (/\.(mp4|mov|m4v)(\?|#|$)/i.test(uri)) return "video";
+  return "photo";
 };
 
 const PinDetailModal = ({
@@ -128,10 +137,56 @@ const PinDetailModal = ({
 
   const activeMediaUrl =
     mediaUrls[Math.max(0, Math.min(activeMediaIndex, mediaUrls.length - 1))] || null;
-  const activeMediaType =
-    mediaTypes[Math.max(0, Math.min(activeMediaIndex, mediaTypes.length - 1))] ||
-    String(pin?.media_type || "").toLowerCase();
+  const mediaTypeForIndex = (index) => {
+    const safeIndex = Math.max(0, Math.min(mediaUrls.length - 1, Number(index) || 0));
+    const fromList = String(mediaTypes[safeIndex] || "")
+      .trim()
+      .toLowerCase();
+    if (fromList) return fromList;
+    if (safeIndex === 0) {
+      const primaryType = String(pin?.media_type || "")
+        .trim()
+        .toLowerCase();
+      if (primaryType) return primaryType;
+    }
+    return inferMediaTypeFromUrl(mediaUrls[safeIndex]);
+  };
+  const activeMediaType = mediaTypeForIndex(activeMediaIndex);
+  const modalVideoSource =
+    !isPhotoViewerVisible && activeMediaType === "video"
+      ? String(activeMediaUrl || "").trim() || null
+      : null;
+  const viewerVideoSource =
+    isPhotoViewerVisible && activeMediaType === "video"
+      ? String(activeMediaUrl || "").trim() || null
+      : null;
+  const modalVideoPlayer = useVideoPlayer(modalVideoSource, (player) => {
+    player.loop = true;
+  });
+  const viewerVideoPlayer = useVideoPlayer(viewerVideoSource, (player) => {
+    player.loop = true;
+  });
   const hasBodyContent = String(pin?.content || "").trim().length > 0;
+
+  useEffect(() => {
+    try {
+      if (modalVideoSource) {
+        modalVideoPlayer.play();
+      } else {
+        modalVideoPlayer.pause();
+      }
+    } catch (_error) {}
+  }, [modalVideoPlayer, modalVideoSource]);
+
+  useEffect(() => {
+    try {
+      if (viewerVideoSource) {
+        viewerVideoPlayer.play();
+      } else {
+        viewerVideoPlayer.pause();
+      }
+    } catch (_error) {}
+  }, [viewerVideoPlayer, viewerVideoSource]);
 
   useEffect(() => {
     if (!activeMediaUrl || activeMediaType === "video") {
@@ -586,13 +641,47 @@ const PinDetailModal = ({
             {isMediaPin && mediaUrls.length > 0 && (
               <View style={styles.mediaContainer}>
                 {activeMediaType === "video" ? (
-                  <View style={styles.videoPlaceholder}>
-                    <Text style={styles.videoIcon}>🎬</Text>
-                    <Text style={styles.videoText}>Video</Text>
-                    <Text style={styles.videoHintText}>
-                      Video capture is enabled. Playback is not wired into this modal yet.
-                    </Text>
-                  </View>
+                  <>
+                    <TouchableOpacity
+                      activeOpacity={0.95}
+                      onPress={() => setIsPhotoViewerVisible(true)}
+                    >
+                      <VideoView
+                        player={modalVideoPlayer}
+                        style={styles.mediaVideo}
+                        nativeControls
+                        contentFit="contain"
+                      />
+                    </TouchableOpacity>
+                    <Text style={styles.mediaZoomHint}>Tap video to open full screen</Text>
+                    {mediaUrls.length > 1 ? (
+                      <View style={styles.mediaPagerRow}>
+                        <TouchableOpacity
+                          style={styles.mediaPagerBtn}
+                          onPress={() =>
+                            setActiveMediaIndex((prev) =>
+                              prev <= 0 ? mediaUrls.length - 1 : prev - 1,
+                            )
+                          }
+                        >
+                          <Text style={styles.mediaPagerBtnText}>Prev</Text>
+                        </TouchableOpacity>
+                        <Text style={styles.mediaPagerLabel}>
+                          {activeMediaIndex + 1} / {mediaUrls.length}
+                        </Text>
+                        <TouchableOpacity
+                          style={styles.mediaPagerBtn}
+                          onPress={() =>
+                            setActiveMediaIndex((prev) =>
+                              prev >= mediaUrls.length - 1 ? 0 : prev + 1,
+                            )
+                          }
+                        >
+                          <Text style={styles.mediaPagerBtnText}>Next</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ) : null}
+                  </>
                 ) : (
                   <>
                     <ScrollView
@@ -953,11 +1042,22 @@ const PinDetailModal = ({
                   key={`media-viewer-${index}`}
                   style={[styles.photoViewerPage, { width: viewerWidth }]}
                 >
-                  {(mediaTypes[index] || activeMediaType) === "video" ? (
-                    <View style={styles.photoViewerVideoPlaceholder}>
-                      <Text style={styles.videoIcon}>🎬</Text>
-                      <Text style={styles.videoText}>Video</Text>
-                    </View>
+                  {mediaTypeForIndex(index) === "video" ? (
+                    index === activeMediaIndex ? (
+                      <View style={styles.photoViewerVideoContainer}>
+                        <VideoView
+                          player={viewerVideoPlayer}
+                          style={styles.photoViewerVideo}
+                          nativeControls
+                          contentFit="contain"
+                        />
+                      </View>
+                    ) : (
+                      <View style={styles.photoViewerVideoPlaceholder}>
+                        <Text style={styles.videoIcon}>🎬</Text>
+                        <Text style={styles.videoText}>Video</Text>
+                      </View>
+                    )
                   ) : (
                     <ScrollView
                       style={styles.photoViewerZoomScroll}
@@ -987,7 +1087,9 @@ const PinDetailModal = ({
               ))}
             </ScrollView>
             <Text style={styles.photoViewerHint}>
-              Pinch to zoom. Swipe sideways to move between photos.
+              {activeMediaType === "video"
+                ? "Tap play to preview video. Swipe sideways to move between media."
+                : "Pinch to zoom. Swipe sideways to move between photos."}
             </Text>
           </View>
         </Modal>
@@ -1086,6 +1188,13 @@ const styles = StyleSheet.create({
     textAlign: "center",
     paddingHorizontal: SIZES.lg,
   },
+  mediaVideo: {
+    width: "100%",
+    minHeight: 220,
+    maxHeight: 420,
+    borderRadius: SIZES.radiusLg,
+    backgroundColor: COLORS.dark,
+  },
   mediaZoomHint: {
     marginTop: SIZES.sm,
     color: COLORS.gray,
@@ -1171,6 +1280,18 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     minHeight: 320,
     paddingHorizontal: SIZES.lg,
+  },
+  photoViewerVideoContainer: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: SIZES.md,
+  },
+  photoViewerVideo: {
+    width: "100%",
+    height: "78%",
+    backgroundColor: "#05070d",
+    borderRadius: SIZES.radiusLg,
   },
   photoViewerZoomScroll: {
     flex: 1,
