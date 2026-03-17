@@ -23,6 +23,7 @@ import {
   useMicrophonePermissions,
 } from "expo-camera";
 import * as ImagePicker from "expo-image-picker";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   GestureHandlerRootView,
   PinchGestureHandler,
@@ -128,7 +129,8 @@ const PostCreationForm = ({
   holdRecordStopToken = 0,
 }) => {
   const { palette, isDark } = useAppTheme();
-  const styles = createStyles(palette, isDark);
+  const insets = useSafeAreaInsets();
+  const styles = createStyles(palette, isDark, insets);
   const brandAssets = useMemo(() => getBrandAssetsForTheme(isDark), [isDark]);
   const cameraRef = useRef(null);
   const optionsExpandProgress = useSharedValue(0);
@@ -137,6 +139,7 @@ const PostCreationForm = ({
     useMicrophonePermissions();
 
   const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
   const [geometryType, setGeometryType] = useState(GEOMETRY_TYPES.POINT);
   const [selectedCommunityLayerId, setSelectedCommunityLayerId] =
     useState(null);
@@ -395,6 +398,8 @@ const PostCreationForm = ({
 
   useEffect(() => {
     if (!visible) return;
+    setTitle("");
+    setDescription("");
     setBaseAudience(POST_AUDIENCE.FRIENDS);
     setSelectedCommunityLayerId(null);
     setOpenDropdown(null);
@@ -476,6 +481,7 @@ const PostCreationForm = ({
     clearForceStopFinalizeTimer();
     clearScheduledStopTimer();
     setTitle("");
+    setDescription("");
     setGeometryType(GEOMETRY_TYPES.POINT);
     setSelectedCommunityLayerId(null);
     setLocationMode(LOCATION_MODES.CURRENT);
@@ -548,6 +554,7 @@ const PostCreationForm = ({
 
     onSubmit({
       title: title.trim(),
+      content: description.trim(),
       geometryType,
       locationMode,
       location:
@@ -1406,7 +1413,13 @@ const PostCreationForm = ({
   );
 
   return (
-    <Modal visible={visible} animationType="fade" onRequestClose={handleClose}>
+    <Modal
+      visible={visible}
+      animationType="fade"
+      onRequestClose={handleClose}
+      statusBarTranslucent
+      navigationBarTranslucent
+    >
       <GestureHandlerRootView style={styles.gestureRoot}>
         <KeyboardAvoidingView
           behavior={Platform.OS === "ios" ? "padding" : "height"}
@@ -1544,6 +1557,16 @@ const PostCreationForm = ({
               value={title}
               onChangeText={setTitle}
               maxLength={90}
+            />
+            <TextInput
+              style={styles.descriptionInput}
+              placeholder="Description"
+              placeholderTextColor="rgba(255,255,255,0.7)"
+              value={description}
+              onChangeText={setDescription}
+              maxLength={500}
+              multiline
+              textAlignVertical="top"
             />
           </View>
 
@@ -1999,7 +2022,7 @@ const PostCreationForm = ({
   );
 };
 
-const createStyles = (palette, isDark) =>
+const createStyles = (palette, isDark, insets = { top: 0, bottom: 0 }) =>
   StyleSheet.create({
     gestureRoot: {
       flex: 1,
@@ -2055,7 +2078,7 @@ const createStyles = (palette, isDark) =>
     },
     topBar: {
       position: "absolute",
-      top: Platform.OS === "ios" ? 52 : 18,
+      top: (insets?.top || 0) + (Platform.OS === "ios" ? 8 : 18),
       left: 14,
       right: 14,
       flexDirection: "row",
@@ -2113,7 +2136,7 @@ const createStyles = (palette, isDark) =>
     },
     recordingBadge: {
       position: "absolute",
-      top: Platform.OS === "ios" ? 102 : 68,
+      top: (insets?.top || 0) + (Platform.OS === "ios" ? 58 : 68),
       alignSelf: "center",
       flexDirection: "row",
       alignItems: "center",
@@ -2142,7 +2165,7 @@ const createStyles = (palette, isDark) =>
     cameraQuickControls: {
       position: "absolute",
       right: 84,
-      bottom: Platform.OS === "ios" ? 46 : 30,
+      bottom: (insets?.bottom || 0) + (Platform.OS === "ios" ? 12 : 30),
       flexDirection: "row",
       alignItems: "center",
       gap: 8,
@@ -2199,7 +2222,7 @@ const createStyles = (palette, isDark) =>
     mediaCountBadge: {
       position: "absolute",
       left: 14,
-      top: Platform.OS === "ios" ? 100 : 66,
+      top: (insets?.top || 0) + (Platform.OS === "ios" ? 56 : 66),
       borderWidth: 1,
       borderColor: "rgba(255,255,255,0.28)",
       backgroundColor: "rgba(15,23,42,0.58)",
@@ -2216,7 +2239,7 @@ const createStyles = (palette, isDark) =>
     captureHintBadge: {
       position: "absolute",
       left: 14,
-      top: Platform.OS === "ios" ? 142 : 108,
+      top: (insets?.top || 0) + (Platform.OS === "ios" ? 98 : 108),
       borderWidth: 1,
       borderColor: "rgba(255,255,255,0.22)",
       backgroundColor: "rgba(15,23,42,0.48)",
@@ -2234,7 +2257,7 @@ const createStyles = (palette, isDark) =>
     photoStackDock: {
       position: "absolute",
       left: 14,
-      bottom: Platform.OS === "ios" ? 154 : 134,
+      bottom: (insets?.bottom || 0) + (Platform.OS === "ios" ? 120 : 134),
       width: 92,
       height: 88,
       justifyContent: "flex-end",
@@ -2303,7 +2326,7 @@ const createStyles = (palette, isDark) =>
     },
     photoPreviewTopBar: {
       position: "absolute",
-      top: Platform.OS === "ios" ? 52 : 18,
+      top: (insets?.top || 0) + (Platform.OS === "ios" ? 8 : 18),
       left: 14,
       right: 14,
       flexDirection: "row",
@@ -2334,8 +2357,8 @@ const createStyles = (palette, isDark) =>
       justifyContent: "center",
       alignItems: "center",
       paddingHorizontal: 10,
-      paddingTop: Platform.OS === "ios" ? 56 : 22,
-      paddingBottom: Platform.OS === "ios" ? 34 : 18,
+      paddingTop: (insets?.top || 0) + (Platform.OS === "ios" ? 12 : 22),
+      paddingBottom: (insets?.bottom || 0) + (Platform.OS === "ios" ? 0 : 18),
     },
     photoPreviewImage: {
       width: "100%",
@@ -2347,8 +2370,8 @@ const createStyles = (palette, isDark) =>
       justifyContent: "center",
       alignItems: "center",
       paddingHorizontal: 10,
-      paddingTop: Platform.OS === "ios" ? 56 : 22,
-      paddingBottom: Platform.OS === "ios" ? 34 : 18,
+      paddingTop: (insets?.top || 0) + (Platform.OS === "ios" ? 12 : 22),
+      paddingBottom: (insets?.bottom || 0) + (Platform.OS === "ios" ? 0 : 18),
     },
     videoPreviewPlayer: {
       width: "100%",
@@ -2360,7 +2383,7 @@ const createStyles = (palette, isDark) =>
       position: "absolute",
       left: 14,
       right: 84,
-      bottom: 24,
+      bottom: (insets?.bottom || 0) + 24,
       gap: 8,
     },
     headlineInput: {
@@ -2375,10 +2398,23 @@ const createStyles = (palette, isDark) =>
       paddingTop: 2,
       paddingBottom: 2,
     },
+    descriptionInput: {
+      color: "rgba(255,255,255,0.94)",
+      fontSize: 15,
+      lineHeight: 21,
+      fontWeight: "600",
+      textShadowColor: "rgba(0,0,0,0.35)",
+      textShadowOffset: { width: 0, height: 1 },
+      textShadowRadius: 4,
+      minHeight: 72,
+      maxHeight: 132,
+      paddingTop: 2,
+      paddingBottom: 2,
+    },
     rightCluster: {
       position: "absolute",
       right: 16,
-      bottom: Platform.OS === "ios" ? 34 : 18,
+      bottom: (insets?.bottom || 0) + (Platform.OS === "ios" ? 0 : 18),
       alignItems: "center",
       gap: 8,
     },
@@ -2481,7 +2517,7 @@ const createStyles = (palette, isDark) =>
       position: "absolute",
       left: 14,
       right: 126,
-      bottom: Platform.OS === "ios" ? 124 : 106,
+      bottom: (insets?.bottom || 0) + (Platform.OS === "ios" ? 90 : 106),
       maxHeight: "56%",
       borderRadius: SIZES.radiusLg,
       borderWidth: 1,

@@ -3429,7 +3429,7 @@ useEffect(() => {
         {
           user_id: activeUserId,
           type: resolvedPostType,
-          content: "",
+          content: String(postData?.content || "").trim(),
           caption: postData.title,
           media_url: primaryPersistedMediaPointer,
           media_type: primaryPersistedMediaType,
