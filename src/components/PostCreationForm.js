@@ -14,6 +14,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import Constants from "expo-constants";
 import * as MediaLibrary from "expo-media-library";
 import { useVideoPlayer, VideoView } from "expo-video";
 import {
@@ -52,11 +53,16 @@ const MEDIA_SOURCE = {
 const SHUTTER_RECORD_LONG_PRESS_DELAY_MS = 220;
 const CAMERA_ZOOM_STEP = 0.12;
 const CAMERA_READY_STABILIZE_MS = 20;
+const CAMERA_MODE_SWITCH_TIMEOUT_MS = 1400;
+const PHOTO_CAPTURE_ANDROID_STABILIZE_MS = 320;
+const PHOTO_CAPTURE_RETRY_DELAY_MS = 220;
 const RECORD_RETRY_DELAY_MS = 160;
 const MIN_VIDEO_RECORDING_MS = 1300;
 const STOP_FINALIZE_TIMEOUT_MS = 12000;
 const SECONDARY_STOP_PULSE_DELAY_MS = 1400;
 const DEBUG_CAPTURE_GESTURES = true;
+const IS_EXPO_GO =
+  Platform.OS === "android" && String(Constants?.appOwnership || "") === "expo";
 
 const POST_AUDIENCE = {
   FRIENDS: "friends",
@@ -172,6 +178,8 @@ const PostCreationForm = ({
   const shutterPressActiveRef = useRef(false);
   const shutterLongPressActiveRef = useRef(false);
   const suppressNextShutterTapRef = useRef(false);
+  const cameraModeRef = useRef("video");
+  const cameraReadyRef = useRef(false);
   const isVideoRecordingRef = useRef(false);
   const isVideoFinalizingRef = useRef(false);
   const pinchStartZoomRef = useRef(0);
@@ -218,6 +226,50 @@ const PostCreationForm = ({
     }
   };
 
+  const waitForCameraReadyInMode = async (
+    targetMode,
+    reason = "unknown",
+    minimumReadyMs = CAMERA_READY_STABILIZE_MS,
+  ) => {
+    const normalizedTargetMode = String(targetMode || "").trim() || "picture";
+    const switchStartedAt = Date.now();
+
+    if (cameraModeRef.current !== normalizedTargetMode) {
+      logCapture("switching camera mode", {
+        reason,
+        from: cameraModeRef.current,
+        to: normalizedTargetMode,
+      });
+      cameraReadyRef.current = false;
+      setCameraReady(false);
+      cameraReadyAtRef.current = 0;
+      cameraModeSwitchAtRef.current = switchStartedAt;
+      setCameraMode(normalizedTargetMode);
+    }
+
+    while (Date.now() - switchStartedAt < CAMERA_MODE_SWITCH_TIMEOUT_MS) {
+      const readyElapsedMs =
+        cameraReadyAtRef.current > 0
+          ? Date.now() - Number(cameraReadyAtRef.current)
+          : null;
+      const modeSettled = cameraModeRef.current === normalizedTargetMode;
+      if (
+        modeSettled &&
+        cameraReadyRef.current &&
+        Number.isFinite(readyElapsedMs) &&
+        Number(readyElapsedMs || 0) >= minimumReadyMs &&
+        cameraRef.current
+      ) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+
+    throw new Error(
+      `Camera did not become ready in ${normalizedTargetMode} mode.`,
+    );
+  };
+
   const clearRecordRetryTimer = () => {
     if (recordRetryTimerRef.current) {
       clearTimeout(recordRetryTimerRef.current);
@@ -228,6 +280,14 @@ const PostCreationForm = ({
   useEffect(() => {
     isVideoRecordingRef.current = isVideoRecording;
   }, [isVideoRecording]);
+
+  useEffect(() => {
+    cameraModeRef.current = cameraMode;
+  }, [cameraMode]);
+
+  useEffect(() => {
+    cameraReadyRef.current = cameraReady;
+  }, [cameraReady]);
 
   useEffect(() => {
     isVideoFinalizingRef.current = isVideoFinalizing;
@@ -556,6 +616,19 @@ const PostCreationForm = ({
     }
   };
 
+  const capturePhotoViaSystemCamera = async () => {
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ["images"],
+      allowsEditing: false,
+      quality: 0.8,
+      base64: false,
+    });
+    if (result.canceled || !Array.isArray(result.assets) || result.assets.length === 0) {
+      return null;
+    }
+    return normalizePickedAsset(result.assets[0], MEDIA_SOURCE.CAMERA);
+  };
+
   const captureFromLiveCamera = async () => {
     if (isCapturing || isVideoRecording || isVideoFinalizing) return;
 
@@ -571,40 +644,48 @@ const PostCreationForm = ({
       return;
     }
 
-    let switchedToPictureForPhoto = false;
     try {
       setIsCapturing(true);
+      await waitForCameraReadyInMode(
+        "picture",
+        "photo_capture",
+        Platform.OS === "android"
+          ? PHOTO_CAPTURE_ANDROID_STABILIZE_MS
+          : CAMERA_READY_STABILIZE_MS,
+      );
       const takePhoto = async () =>
         (await cameraRef.current?.takePictureAsync?.({
           quality: 0.8,
-          base64: true,
+          skipProcessing: false,
         })) ||
         (await cameraRef.current?.takePicture?.({
           quality: 0.8,
-          base64: true,
+          skipProcessing: false,
         }));
 
       let photo = null;
       try {
         photo = await takePhoto();
       } catch (firstError) {
-        const firstMessage = String(firstError?.message || "").toLowerCase();
-        const shouldFallbackToPicture =
-          cameraMode !== "picture" &&
-          (/mode|picture|video/.test(firstMessage) ||
-            firstMessage.includes("not supported"));
-        if (!shouldFallbackToPicture) {
+        const firstMessage = String(firstError?.message || firstError || "");
+        const isRetryableAndroidCaptureFailure =
+          Platform.OS === "android" &&
+          /failed to capture image|capture image/i.test(firstMessage);
+        if (!isRetryableAndroidCaptureFailure) {
           throw firstError;
         }
-        logCapture("photo capture fallback to picture mode", {
-          message: String(firstError?.message || ""),
+
+        logCapture("photo capture retry scheduled", {
+          message: firstMessage,
         });
-        setCameraReady(false);
-        cameraReadyAtRef.current = 0;
-        cameraModeSwitchAtRef.current = Date.now();
-        setCameraMode("picture");
-        switchedToPictureForPhoto = true;
-        await new Promise((resolve) => setTimeout(resolve, 180));
+        await new Promise((resolve) =>
+          setTimeout(resolve, PHOTO_CAPTURE_RETRY_DELAY_MS),
+        );
+        await waitForCameraReadyInMode(
+          "picture",
+          "photo_capture_retry",
+          PHOTO_CAPTURE_ANDROID_STABILIZE_MS,
+        );
         photo = await takePhoto();
       }
 
@@ -612,7 +693,6 @@ const PostCreationForm = ({
       const normalized = normalizePickedAsset(
         {
           uri: photo.uri,
-          base64: photo.base64,
           mimeType: "image/jpeg",
           type: "image",
         },
@@ -623,11 +703,42 @@ const PostCreationForm = ({
       logCapture("photo appended", { uri: String(photo.uri || "").slice(0, 160) });
       persistCapturedMediaLocally(photo.uri, "photo");
     } catch (error) {
+      if (IS_EXPO_GO) {
+        try {
+          logCapture("photo capture fallback to system camera", {
+            message: String(error?.message || error || ""),
+          });
+          const fallbackPhoto = await capturePhotoViaSystemCamera();
+          if (fallbackPhoto) {
+            setMediaItems((prev) => [
+              ...(Array.isArray(prev) ? prev : []),
+              fallbackPhoto,
+            ]);
+            logCapture("system camera photo appended", {
+              uri: String(fallbackPhoto.mediaUrl || "").slice(0, 160),
+            });
+            return;
+          }
+        } catch (fallbackError) {
+          logCapture("system camera fallback failed", {
+            message: String(fallbackError?.message || fallbackError || ""),
+          });
+        }
+      }
+      logCapture("photo capture failed", {
+        cameraMode,
+        cameraReady,
+        readyElapsedMs:
+          cameraReadyAtRef.current > 0
+            ? Date.now() - Number(cameraReadyAtRef.current)
+            : null,
+        message: String(error?.message || error || ""),
+      });
       console.error("Error capturing photo:", error);
       Alert.alert("Capture Failed", "Unable to capture photo right now.");
     } finally {
       setIsCapturing(false);
-      if (switchedToPictureForPhoto || cameraMode !== "video") {
+      if (cameraMode !== "video") {
         setCameraReady(false);
         cameraReadyAtRef.current = 0;
         cameraModeSwitchAtRef.current = Date.now();
@@ -1319,10 +1430,12 @@ const PostCreationForm = ({
                     zoom={cameraZoom}
                     onCameraReady={() => {
                       cameraReadyAtRef.current = Date.now();
+                      cameraReadyRef.current = true;
                       setCameraReady(true);
                       logCapture("camera ready", { cameraFacing, cameraMode });
                     }}
                     onMountError={(event) => {
+                      cameraReadyRef.current = false;
                       logCapture("camera mount error", {
                         message: String(event?.nativeEvent?.message || ""),
                       });
