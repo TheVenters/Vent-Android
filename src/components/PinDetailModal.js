@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   View,
   Modal,
@@ -11,7 +11,9 @@ import {
   Platform,
   Image,
   Alert,
+  Dimensions,
 } from "react-native";
+import { useVideoPlayer, VideoView } from "expo-video";
 import { COLORS, SIZES } from "../constants/theme";
 
 const VISIBILITY_OPTIONS = ["public", "friends", "private"];
@@ -27,6 +29,20 @@ const normalizeVisibility = (value) => {
 
 const visibilityLabel = (value) =>
   String(value || "").charAt(0).toUpperCase() + String(value || "").slice(1);
+
+const isRenderableMediaUrl = (value) => {
+  const uri = String(value || "").trim();
+  if (!uri) return false;
+  return !uri.toLowerCase().startsWith("storage://");
+};
+
+const inferMediaTypeFromUrl = (value) => {
+  const uri = String(value || "").trim().toLowerCase();
+  if (!uri) return "photo";
+  if (uri.startsWith("data:video/")) return "video";
+  if (/\.(mp4|mov|m4v)(\?|#|$)/i.test(uri)) return "video";
+  return "photo";
+};
 
 const PinDetailModal = ({
   visible,
@@ -46,19 +62,64 @@ const PinDetailModal = ({
   onClose,
   onUpdate,
   onDelete,
+  onMediaLoadError,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [content, setContent] = useState("");
   const [caption, setCaption] = useState("");
   const [visibility, setVisibility] = useState("public");
   const [mediaAspectRatio, setMediaAspectRatio] = useState(4 / 3);
+  const [activeMediaIndex, setActiveMediaIndex] = useState(0);
+  const [isPhotoViewerVisible, setIsPhotoViewerVisible] = useState(false);
   const [commentDraft, setCommentDraft] = useState("");
   const [replyToCommentId, setReplyToCommentId] = useState(null);
   const [expandedReplyThreads, setExpandedReplyThreads] = useState({});
+  const modalMediaScrollRef = useRef(null);
+  const photoViewerScrollRef = useRef(null);
+  const viewerWidth = Dimensions.get("window").width;
+  const viewerHeight = Dimensions.get("window").height;
+  const modalMediaWidth = Math.max(1, viewerWidth - SIZES.xl * 2);
 
   const isOwner = pin?.user_id === currentUserId;
+  const mediaUrls = useMemo(() => {
+    const topLevelList = Array.isArray(pin?.media_urls) ? pin.media_urls : [];
+    const geometryList = Array.isArray(pin?.geometry?.media_urls)
+      ? pin.geometry.media_urls
+      : [];
+    const primary = String(pin?.media_url || "").trim();
+
+    // Match the marker/callout precedence so the modal uses the same
+    // freshest hydrated URL instead of preferring stale geometry values.
+    const normalizedList = [...topLevelList, ...geometryList]
+      .map((value) => String(value || "").trim())
+      .filter(isRenderableMediaUrl);
+
+    if (isRenderableMediaUrl(primary)) {
+      normalizedList.unshift(primary);
+    }
+
+    if (normalizedList.length > 0) {
+      return Array.from(new Set(normalizedList));
+    }
+    return isRenderableMediaUrl(primary) ? [primary] : [];
+  }, [pin?.geometry?.media_urls, pin?.media_url, pin?.media_urls]);
+  const mediaTypes = useMemo(() => {
+    const topLevelTypes = Array.isArray(pin?.media_types) ? pin.media_types : [];
+    const geometryTypes = Array.isArray(pin?.geometry?.media_types)
+      ? pin.geometry.media_types
+      : [];
+    const normalized = [...topLevelTypes, ...geometryTypes]
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean);
+    if (normalized.length > 0) return normalized;
+    const primaryType = String(pin?.media_type || "").trim().toLowerCase();
+    return primaryType ? [primaryType] : [];
+  }, [pin?.geometry?.media_types, pin?.media_type, pin?.media_types]);
   const isMediaPin =
-    pin?.type === "media" || pin?.type === "photo" || pin?.type === "video";
+    pin?.type === "media" ||
+    pin?.type === "photo" ||
+    pin?.type === "video" ||
+    mediaUrls.length > 0;
 
   useEffect(() => {
     if (pin) {
@@ -69,17 +130,74 @@ const PinDetailModal = ({
       setReplyToCommentId(null);
       setExpandedReplyThreads({});
       setIsEditing(false);
+      setActiveMediaIndex(0);
+      setIsPhotoViewerVisible(false);
     }
   }, [pin]);
 
+  const activeMediaUrl =
+    mediaUrls[Math.max(0, Math.min(activeMediaIndex, mediaUrls.length - 1))] || null;
+  const mediaTypeForIndex = (index) => {
+    const safeIndex = Math.max(0, Math.min(mediaUrls.length - 1, Number(index) || 0));
+    const fromList = String(mediaTypes[safeIndex] || "")
+      .trim()
+      .toLowerCase();
+    if (fromList) return fromList;
+    if (safeIndex === 0) {
+      const primaryType = String(pin?.media_type || "")
+        .trim()
+        .toLowerCase();
+      if (primaryType) return primaryType;
+    }
+    return inferMediaTypeFromUrl(mediaUrls[safeIndex]);
+  };
+  const activeMediaType = mediaTypeForIndex(activeMediaIndex);
+  const modalVideoSource =
+    !isPhotoViewerVisible && activeMediaType === "video"
+      ? String(activeMediaUrl || "").trim() || null
+      : null;
+  const viewerVideoSource =
+    isPhotoViewerVisible && activeMediaType === "video"
+      ? String(activeMediaUrl || "").trim() || null
+      : null;
+  const modalVideoPlayer = useVideoPlayer(modalVideoSource, (player) => {
+    player.loop = true;
+  });
+  const viewerVideoPlayer = useVideoPlayer(viewerVideoSource, (player) => {
+    player.loop = true;
+  });
+  const hasBodyContent = String(pin?.content || "").trim().length > 0;
+
   useEffect(() => {
-    if (!pin?.media_url || pin?.media_type === "video") {
+    try {
+      if (modalVideoSource) {
+        modalVideoPlayer.play();
+      } else {
+        modalVideoPlayer.pause();
+      }
+    } catch (_error) {}
+  }, [modalVideoPlayer, modalVideoSource]);
+
+  useEffect(() => {
+    try {
+      if (viewerVideoSource) {
+        viewerVideoPlayer.play();
+      } else {
+        viewerVideoPlayer.pause();
+      }
+    } catch (_error) {}
+  }, [viewerVideoPlayer, viewerVideoSource]);
+
+  useEffect(() => {
+    if (!activeMediaUrl || activeMediaType === "video") {
       setMediaAspectRatio(4 / 3);
       return;
     }
 
+    Image.prefetch(activeMediaUrl).catch(() => {});
+
     Image.getSize(
-      pin.media_url,
+      activeMediaUrl,
       (width, height) => {
         if (width > 0 && height > 0) {
           setMediaAspectRatio(width / height);
@@ -89,16 +207,43 @@ const PinDetailModal = ({
       },
       () => setMediaAspectRatio(4 / 3),
     );
-  }, [pin?.media_url, pin?.media_type]);
+  }, [activeMediaType, activeMediaUrl]);
+
+  useEffect(() => {
+    if (mediaUrls.length <= 1) return;
+    const targetX = Math.max(0, activeMediaIndex) * modalMediaWidth;
+    requestAnimationFrame(() => {
+      modalMediaScrollRef.current?.scrollTo?.({
+        x: targetX,
+        y: 0,
+        animated: true,
+      });
+    });
+  }, [activeMediaIndex, mediaUrls.length, modalMediaWidth]);
+
+  useEffect(() => {
+    if (!isPhotoViewerVisible) return;
+    const targetX = Math.max(0, activeMediaIndex) * viewerWidth;
+    requestAnimationFrame(() => {
+      photoViewerScrollRef.current?.scrollTo?.({
+        x: targetX,
+        y: 0,
+        animated: false,
+      });
+    });
+  }, [activeMediaIndex, isPhotoViewerVisible, viewerWidth]);
 
   const handleSave = () => {
-    if (!isMediaPin && !content.trim()) {
-      Alert.alert("Error", "Content cannot be empty");
+    if (!caption.trim()) {
+      Alert.alert("Error", "Title cannot be empty");
       return;
     }
-    const updates = { caption, layer: normalizeVisibility(visibility) };
+    const updates = {
+      caption: caption.trim(),
+      layer: normalizeVisibility(visibility),
+    };
     if (!isMediaPin) {
-      updates.content = content;
+      updates.content = content.trim();
     }
     onUpdate(pin.id, updates);
     setIsEditing(false);
@@ -463,7 +608,7 @@ const PinDetailModal = ({
   return (
     <Modal
       visible={visible}
-      animationType="slide"
+      animationType="fade"
       transparent={true}
       onRequestClose={handleClose}
     >
@@ -493,22 +638,120 @@ const PinDetailModal = ({
 
           <ScrollView style={styles.content}>
             {/* Media Preview */}
-            {isMediaPin && pin.media_url && (
+            {isMediaPin && mediaUrls.length > 0 && (
               <View style={styles.mediaContainer}>
-                {pin.media_type === "video" ? (
-                  <View style={styles.videoPlaceholder}>
-                    <Text style={styles.videoIcon}>🎬</Text>
-                    <Text style={styles.videoText}>Video</Text>
-                  </View>
+                {activeMediaType === "video" ? (
+                  <>
+                    <TouchableOpacity
+                      activeOpacity={0.95}
+                      onPress={() => setIsPhotoViewerVisible(true)}
+                    >
+                      <VideoView
+                        player={modalVideoPlayer}
+                        style={styles.mediaVideo}
+                        nativeControls
+                        contentFit="contain"
+                      />
+                    </TouchableOpacity>
+                    <Text style={styles.mediaZoomHint}>Tap video to open full screen</Text>
+                    {mediaUrls.length > 1 ? (
+                      <View style={styles.mediaPagerRow}>
+                        <TouchableOpacity
+                          style={styles.mediaPagerBtn}
+                          onPress={() =>
+                            setActiveMediaIndex((prev) =>
+                              prev <= 0 ? mediaUrls.length - 1 : prev - 1,
+                            )
+                          }
+                        >
+                          <Text style={styles.mediaPagerBtnText}>Prev</Text>
+                        </TouchableOpacity>
+                        <Text style={styles.mediaPagerLabel}>
+                          {activeMediaIndex + 1} / {mediaUrls.length}
+                        </Text>
+                        <TouchableOpacity
+                          style={styles.mediaPagerBtn}
+                          onPress={() =>
+                            setActiveMediaIndex((prev) =>
+                              prev >= mediaUrls.length - 1 ? 0 : prev + 1,
+                            )
+                          }
+                        >
+                          <Text style={styles.mediaPagerBtnText}>Next</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ) : null}
+                  </>
                 ) : (
-                  <Image
-                    source={{ uri: pin.media_url }}
-                    style={[
-                      styles.mediaImage,
-                      { aspectRatio: mediaAspectRatio },
-                    ]}
-                    resizeMode="contain"
-                  />
+                  <>
+                    <ScrollView
+                      ref={modalMediaScrollRef}
+                      horizontal
+                      pagingEnabled
+                      showsHorizontalScrollIndicator={false}
+                      onMomentumScrollEnd={(event) => {
+                        const offsetX = Number(event?.nativeEvent?.contentOffset?.x || 0);
+                        const nextIndex = Math.round(
+                          offsetX / Math.max(1, modalMediaWidth),
+                        );
+                        if (Number.isFinite(nextIndex)) {
+                          setActiveMediaIndex(
+                            Math.max(0, Math.min(mediaUrls.length - 1, nextIndex)),
+                          );
+                        }
+                      }}
+                    >
+                      {mediaUrls.map((mediaUrl, index) => (
+                        <TouchableOpacity
+                          key={`modal-media-${index}`}
+                          activeOpacity={0.95}
+                          onPress={() => {
+                            setActiveMediaIndex(index);
+                            setIsPhotoViewerVisible(true);
+                          }}
+                          style={[styles.mediaPage, { width: modalMediaWidth }]}
+                        >
+                          <Image
+                            source={{ uri: mediaUrl }}
+                            style={[
+                              styles.mediaImage,
+                              { aspectRatio: mediaAspectRatio },
+                            ]}
+                            resizeMode="contain"
+                            onError={() => onMediaLoadError?.(pin, mediaUrl)}
+                          />
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                    <Text style={styles.mediaZoomHint}>Tap image to zoom</Text>
+                    {mediaUrls.length > 1 ? (
+                      <View style={styles.mediaPagerRow}>
+                        <TouchableOpacity
+                          style={styles.mediaPagerBtn}
+                          onPress={() =>
+                            setActiveMediaIndex((prev) =>
+                              prev <= 0 ? mediaUrls.length - 1 : prev - 1,
+                            )
+                          }
+                        >
+                          <Text style={styles.mediaPagerBtnText}>Prev</Text>
+                        </TouchableOpacity>
+                        <Text style={styles.mediaPagerLabel}>
+                          {activeMediaIndex + 1} / {mediaUrls.length}
+                        </Text>
+                        <TouchableOpacity
+                          style={styles.mediaPagerBtn}
+                          onPress={() =>
+                            setActiveMediaIndex((prev) =>
+                              prev >= mediaUrls.length - 1 ? 0 : prev + 1,
+                            )
+                          }
+                        >
+                          <Text style={styles.mediaPagerBtnText}>Next</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ) : null}
+                  </>
                 )}
               </View>
             )}
@@ -572,9 +815,9 @@ const PinDetailModal = ({
                 <Text style={styles.postTitleText}>
                   {pin.caption || "Untitled"}
                 </Text>
-                <Text style={styles.contentText}>
-                  {pin.content || "No caption"}
-                </Text>
+                {hasBodyContent ? (
+                  <Text style={styles.contentText}>{pin.content}</Text>
+                ) : null}
               </View>
             )}
 
@@ -760,6 +1003,96 @@ const PinDetailModal = ({
             </View>
           )}
         </View>
+
+        <Modal
+          visible={isPhotoViewerVisible}
+          animationType="fade"
+          transparent={false}
+          onRequestClose={() => setIsPhotoViewerVisible(false)}
+        >
+          <View style={styles.photoViewerModal}>
+            <View style={styles.photoViewerTopBar}>
+              <Text style={styles.photoViewerCount}>
+                {activeMediaIndex + 1} / {mediaUrls.length}
+              </Text>
+              <TouchableOpacity
+                style={styles.photoViewerCloseButton}
+                onPress={() => setIsPhotoViewerVisible(false)}
+              >
+                <Text style={styles.photoViewerCloseText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+            <ScrollView
+              ref={photoViewerScrollRef}
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
+              onMomentumScrollEnd={(event) => {
+                const offsetX = Number(event?.nativeEvent?.contentOffset?.x || 0);
+                const nextIndex = Math.round(offsetX / Math.max(1, viewerWidth));
+                if (Number.isFinite(nextIndex)) {
+                  setActiveMediaIndex(
+                    Math.max(0, Math.min(mediaUrls.length - 1, nextIndex)),
+                  );
+                }
+              }}
+            >
+              {mediaUrls.map((mediaUrl, index) => (
+                <View
+                  key={`media-viewer-${index}`}
+                  style={[styles.photoViewerPage, { width: viewerWidth }]}
+                >
+                  {mediaTypeForIndex(index) === "video" ? (
+                    index === activeMediaIndex ? (
+                      <View style={styles.photoViewerVideoContainer}>
+                        <VideoView
+                          player={viewerVideoPlayer}
+                          style={styles.photoViewerVideo}
+                          nativeControls
+                          contentFit="contain"
+                        />
+                      </View>
+                    ) : (
+                      <View style={styles.photoViewerVideoPlaceholder}>
+                        <Text style={styles.videoIcon}>🎬</Text>
+                        <Text style={styles.videoText}>Video</Text>
+                      </View>
+                    )
+                  ) : (
+                    <ScrollView
+                      style={styles.photoViewerZoomScroll}
+                      contentContainerStyle={[
+                        styles.photoViewerZoomContent,
+                        { width: viewerWidth, minHeight: viewerHeight * 0.78 },
+                      ]}
+                      maximumZoomScale={4}
+                      minimumZoomScale={1}
+                      centerContent
+                      showsHorizontalScrollIndicator={false}
+                      showsVerticalScrollIndicator={false}
+                      pinchGestureEnabled
+                    >
+                      <Image
+                        source={{ uri: mediaUrl }}
+                        style={[
+                          styles.photoViewerImage,
+                          { width: viewerWidth, height: viewerHeight * 0.78 },
+                        ]}
+                        resizeMode="contain"
+                        onError={() => onMediaLoadError?.(pin, mediaUrl)}
+                      />
+                    </ScrollView>
+                  )}
+                </View>
+              ))}
+            </ScrollView>
+            <Text style={styles.photoViewerHint}>
+              {activeMediaType === "video"
+                ? "Tap play to preview video. Swipe sideways to move between media."
+                : "Pinch to zoom. Swipe sideways to move between photos."}
+            </Text>
+          </View>
+        </Modal>
       </KeyboardAvoidingView>
     </Modal>
   );
@@ -821,6 +1154,9 @@ const styles = StyleSheet.create({
     borderRadius: SIZES.radiusLg,
     overflow: "hidden",
   },
+  mediaPage: {
+    justifyContent: "center",
+  },
   mediaImage: {
     width: "100%",
     aspectRatio: 4 / 3,
@@ -845,6 +1181,52 @@ const styles = StyleSheet.create({
     color: COLORS.white,
     fontSize: SIZES.lg,
   },
+  videoHintText: {
+    color: "rgba(255,255,255,0.82)",
+    fontSize: SIZES.sm,
+    marginTop: SIZES.sm,
+    textAlign: "center",
+    paddingHorizontal: SIZES.lg,
+  },
+  mediaVideo: {
+    width: "100%",
+    minHeight: 220,
+    maxHeight: 420,
+    borderRadius: SIZES.radiusLg,
+    backgroundColor: COLORS.dark,
+  },
+  mediaZoomHint: {
+    marginTop: SIZES.sm,
+    color: COLORS.gray,
+    fontSize: SIZES.sm,
+    fontWeight: "600",
+    textAlign: "center",
+  },
+  mediaPagerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: SIZES.sm,
+    gap: SIZES.sm,
+  },
+  mediaPagerBtn: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: SIZES.radiusFull,
+    paddingHorizontal: SIZES.md,
+    paddingVertical: SIZES.xs,
+    backgroundColor: COLORS.light,
+  },
+  mediaPagerBtnText: {
+    color: COLORS.dark,
+    fontSize: SIZES.sm,
+    fontWeight: "700",
+  },
+  mediaPagerLabel: {
+    color: COLORS.gray,
+    fontSize: SIZES.sm,
+    fontWeight: "700",
+  },
   contentContainer: {
     marginBottom: SIZES.lg,
   },
@@ -858,6 +1240,76 @@ const styles = StyleSheet.create({
     fontSize: SIZES.lg,
     color: COLORS.dark,
     lineHeight: 30,
+  },
+  photoViewerModal: {
+    flex: 1,
+    backgroundColor: "#05070d",
+  },
+  photoViewerTopBar: {
+    paddingTop: Platform.OS === "ios" ? 56 : 20,
+    paddingHorizontal: SIZES.lg,
+    paddingBottom: SIZES.md,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  photoViewerCount: {
+    color: COLORS.white,
+    fontSize: SIZES.md,
+    fontWeight: "700",
+  },
+  photoViewerCloseButton: {
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.22)",
+    borderRadius: SIZES.radiusFull,
+    paddingHorizontal: SIZES.md,
+    paddingVertical: SIZES.xs,
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
+  photoViewerCloseText: {
+    color: COLORS.white,
+    fontSize: SIZES.sm,
+    fontWeight: "700",
+  },
+  photoViewerPage: {
+    flex: 1,
+    justifyContent: "center",
+  },
+  photoViewerVideoPlaceholder: {
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: 320,
+    paddingHorizontal: SIZES.lg,
+  },
+  photoViewerVideoContainer: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: SIZES.md,
+  },
+  photoViewerVideo: {
+    width: "100%",
+    height: "78%",
+    backgroundColor: "#05070d",
+    borderRadius: SIZES.radiusLg,
+  },
+  photoViewerZoomScroll: {
+    flex: 1,
+  },
+  photoViewerZoomContent: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  photoViewerImage: {
+    backgroundColor: "#05070d",
+  },
+  photoViewerHint: {
+    color: "rgba(255,255,255,0.72)",
+    fontSize: SIZES.sm,
+    fontWeight: "600",
+    textAlign: "center",
+    paddingHorizontal: SIZES.lg,
+    paddingBottom: Platform.OS === "ios" ? 28 : 18,
   },
   editContainer: {
     marginBottom: SIZES.lg,

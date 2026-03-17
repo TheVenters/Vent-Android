@@ -3,7 +3,10 @@ import { View, Text, StyleSheet, Image, Platform } from "react-native";
 import { Marker, Callout } from "react-native-maps";
 import { COLORS } from "../constants/theme";
 
-const CustomMarkerComponent = ({ pin, onPress, onMarkerPress }, ref) => {
+const CustomMarkerComponent = (
+  { pin, onPress, onMarkerPress, onSelect, onDeselect },
+  ref,
+) => {
   const [tracksViewChanges, setTracksViewChanges] = useState(
     Boolean(pin?.author_avatar_url),
   );
@@ -33,6 +36,21 @@ const CustomMarkerComponent = ({ pin, onPress, onMarkerPress }, ref) => {
     return source ? source.charAt(0).toUpperCase() : "?";
   }, [pin.author_name, pin.author_username]);
 
+  const calloutMediaUrl = useMemo(() => {
+    const mediaList = Array.isArray(pin?.media_urls)
+      ? pin.media_urls
+      : Array.isArray(pin?.geometry?.media_urls)
+        ? pin.geometry.media_urls
+        : [];
+    const firstFromList = mediaList
+      .map((value) => String(value || "").trim())
+      .find((value) => value && !value.startsWith("storage://"));
+    if (firstFromList) return firstFromList;
+    const fallback = String(pin?.media_url || "").trim();
+    if (!fallback || fallback.startsWith("storage://")) return null;
+    return fallback;
+  }, [pin?.geometry?.media_urls, pin?.media_url, pin?.media_urls]);
+
   return (
     <Marker
       ref={ref}
@@ -44,9 +62,13 @@ const CustomMarkerComponent = ({ pin, onPress, onMarkerPress }, ref) => {
       description={(pin.author_name || "Anonymous").trim()}
       tappable
       onPress={() => onMarkerPress && onMarkerPress(pin)}
-      onSelect={() => onMarkerPress && onMarkerPress(pin)}
       onCalloutPress={() => onPress && onPress(pin)}
       tracksViewChanges={tracksViewChanges}
+      onSelect={() => {
+        onMarkerPress && onMarkerPress(pin);
+        onSelect && onSelect(pin);
+      }}
+      onDeselect={() => onDeselect && onDeselect(pin)}
     >
       <View collapsable={false} style={styles.markerWrap}>
         {pin.posted_from_current_location && (
@@ -72,13 +94,20 @@ const CustomMarkerComponent = ({ pin, onPress, onMarkerPress }, ref) => {
         </View>
         {pin.posted_from_current_location && (
           <View style={styles.locationFlareBadge}>
-            <Text style={styles.locationFlareBadgeText}>âœ¦</Text>
+            <Text style={styles.locationFlareBadgeText}>{"\u2726"}</Text>
           </View>
         )}
       </View>
       {Platform.OS !== "android" ? (
-        <Callout>
+        <Callout tooltip onPress={() => onPress && onPress(pin)}>
           <View style={styles.callout}>
+            {calloutMediaUrl ? (
+              <Image
+                source={{ uri: calloutMediaUrl }}
+                style={styles.calloutImage}
+                resizeMode="cover"
+              />
+            ) : null}
             <Text style={styles.calloutTitle}>{pin.caption || "Untitled"}</Text>
             <Text style={styles.calloutMeta}>
               {(pin.author_name || "Anonymous").trim()}
@@ -102,6 +131,9 @@ const areMarkerPropsEqual = (prevProps, nextProps) => {
     prevPin.author_name === nextPin.author_name &&
     prevPin.author_username === nextPin.author_username &&
     prevPin.author_avatar_url === nextPin.author_avatar_url &&
+    prevPin.media_url === nextPin.media_url &&
+    JSON.stringify(prevPin.media_urls || []) ===
+      JSON.stringify(nextPin.media_urls || []) &&
     prevPin.layer_emoji === nextPin.layer_emoji &&
     prevPin.posted_from_current_location === nextPin.posted_from_current_location
   );
@@ -177,6 +209,17 @@ const styles = StyleSheet.create({
     maxWidth: 240,
     paddingVertical: 10,
     paddingHorizontal: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(15, 23, 42, 0.14)",
+    backgroundColor: "#ffffff",
+  },
+  calloutImage: {
+    width: "100%",
+    height: 92,
+    borderRadius: 10,
+    marginBottom: 8,
+    backgroundColor: "#d1d5db",
   },
   calloutTitle: {
     fontSize: 15,

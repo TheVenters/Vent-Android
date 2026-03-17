@@ -10,11 +10,13 @@ import {
   StyleSheet,
   TouchableOpacity,
   Text,
+  Image,
   Alert,
   Modal,
   ScrollView,
   Platform,
   StatusBar as RNStatusBar,
+  InteractionManager,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect } from "@react-navigation/native";
@@ -43,6 +45,8 @@ import {
   supabase,
   getCurrentUser,
   getActiveSession,
+  hydratePinsWithSignedMediaUrls,
+  isStorageMediaPointer,
   uploadPostMediaToStorage,
   votePinViaEdgeFunction,
   supabaseWithAccessToken,
@@ -76,7 +80,10 @@ import {
 } from "./map/mapVisualEngine";
 import {
   buildFallbackLayers,
+  MY_POSTS_AUDIENCE_ORDER,
+  MY_POSTS_AUDIENCE_VIRTUAL_LAYER_IDS,
   getEnabledAudienceKeysForMap,
+  getMyPostsAudienceFilterKey,
   ensureCoreSystemLayers,
   getEnabledLayerIdsForMap,
   isUuid,
@@ -85,6 +92,10 @@ import {
 } from "./map/layerRuntime";
 import { resolvePinsForMap } from "./map/pinFeedResolver";
 import { readRemovedLayerIds, setLayerRemovedState } from "../utils/removedLayerIds";
+import {
+  DEFAULT_MAP_CLOUDS_ENABLED,
+  getMapCloudsEnabled,
+} from "../utils/mapPreferences";
 
 const formatUsernameForLayer = (user) => {
   const fromMeta =
@@ -438,6 +449,41 @@ const hasValidCoordinate = (post) =>
   typeof post?.lng === "number" &&
   Number.isFinite(post.lng);
 
+const hasValidMapCoordinate = (coordinate) =>
+  Number.isFinite(coordinate?.latitude) &&
+  Number.isFinite(coordinate?.longitude);
+
+const pinHasUnhydratedMedia = (pin) => {
+  const primary = String(pin?.media_url || "").trim();
+  if (isStorageMediaPointer(primary)) return true;
+
+  const topLevelList = Array.isArray(pin?.media_urls) ? pin.media_urls : [];
+  const geometryList = Array.isArray(pin?.geometry?.media_urls)
+    ? pin.geometry.media_urls
+    : [];
+  return [...topLevelList, ...geometryList].some((value) =>
+    isStorageMediaPointer(String(value || "").trim()),
+  );
+};
+
+const pinHasAnyMedia = (pin) => {
+  if (!pin) return false;
+  if (["media", "photo", "video"].includes(String(pin?.type || "").toLowerCase())) {
+    return true;
+  }
+
+  const primary = String(pin?.media_url || "").trim();
+  if (primary) return true;
+
+  const topLevelList = Array.isArray(pin?.media_urls) ? pin.media_urls : [];
+  const geometryList = Array.isArray(pin?.geometry?.media_urls)
+    ? pin.geometry.media_urls
+    : [];
+  return [...topLevelList, ...geometryList].some((value) =>
+    String(value || "").trim(),
+  );
+};
+
 const normalizeLongitude = (longitude) => {
   if (!Number.isFinite(longitude)) return longitude;
   let next = longitude;
@@ -695,6 +741,98 @@ const toGuestPublicOnlyLayers = (layerRows) => {
   ];
 };
 
+const buildVirtualMyPostsAudienceLayers = ({
+  sourceLayers,
+  resolvedUserId,
+  enabledByAudienceRef,
+}) => {
+  if (!resolvedUserId) return [];
+  const rows = Array.isArray(sourceLayers) ? sourceLayers : [];
+  const fallbackByAudience = new Map();
+  rows.forEach((layer) => {
+    if ((layer?.owner_type || "system") !== "system") return;
+    const key = getPinLayerKeyFromLayer(layer);
+    if (!MY_POSTS_AUDIENCE_ORDER.includes(key)) return;
+    if (!fallbackByAudience.has(key)) {
+      fallbackByAudience.set(key, Boolean(layer?.isEnabled));
+    }
+  });
+
+  return MY_POSTS_AUDIENCE_ORDER.map((audienceKey) => {
+    const persistedMap = enabledByAudienceRef?.current || null;
+    const hasPersisted = Boolean(
+      persistedMap &&
+        typeof persistedMap.has === "function" &&
+        persistedMap.has(audienceKey),
+    );
+    const persistedEnabled = hasPersisted
+      ? Boolean(persistedMap.get(audienceKey))
+      : null;
+    const fallbackEnabled = fallbackByAudience.has(audienceKey)
+      ? Boolean(fallbackByAudience.get(audienceKey))
+      : true;
+    const isEnabled =
+      persistedEnabled === null ? fallbackEnabled : persistedEnabled;
+    const filterKey = getMyPostsAudienceFilterKey(audienceKey);
+
+    return {
+      id: MY_POSTS_AUDIENCE_VIRTUAL_LAYER_IDS[audienceKey],
+      name: `my-posts-${audienceKey}`,
+      display_name:
+        audienceKey.charAt(0).toUpperCase() + audienceKey.slice(1),
+      kind: audienceKey,
+      raw_kind: `my_posts_${audienceKey}`,
+      owner_type: "user",
+      owner_id: resolvedUserId,
+      is_public: audienceKey === "public",
+      enabled: isEnabled,
+      isEnabled,
+      layer_icon: null,
+      ownerCommunityName: null,
+      sourceCommunityIds: [],
+      isCommunityAccessible: true,
+      viewerCanManage: true,
+      isOwnUserPostsLayer: false,
+      isMyPostsAudienceVirtual: true,
+      myPostsAudienceKey: audienceKey,
+      myPostsAudienceFilterKey: filterKey,
+      pref_hidden: false,
+      pref_sort_order: null,
+    };
+  });
+};
+
+const synchronizeSystemAudienceStates = (layerRows) => {
+  const rows = Array.isArray(layerRows) ? layerRows : [];
+  const effectiveEnabledByAudience = new Map();
+  rows.forEach((layer) => {
+    if ((layer?.owner_type || "system") !== "system") return;
+    if (isNamedUserPostsLayer(layer)) return;
+    const key = getPinLayerKeyFromLayer(layer);
+    if (!["public", "friends", "private"].includes(key)) return;
+    if (!effectiveEnabledByAudience.has(key)) {
+      effectiveEnabledByAudience.set(key, Boolean(layer?.isEnabled));
+    }
+  });
+
+  if (effectiveEnabledByAudience.size === 0) {
+    return rows;
+  }
+
+  return rows.map((layer) => {
+    if ((layer?.owner_type || "system") !== "system") return layer;
+    if (isNamedUserPostsLayer(layer)) return layer;
+    const key = getPinLayerKeyFromLayer(layer);
+    if (!effectiveEnabledByAudience.has(key)) return layer;
+    const syncedValue = Boolean(effectiveEnabledByAudience.get(key));
+    if (Boolean(layer?.isEnabled) === syncedValue) return layer;
+    return {
+      ...layer,
+      isEnabled: syncedValue,
+    };
+  });
+};
+
 const collectCommentThreadIds = (comments, rootCommentId) => {
   const byParentId = new Map();
   (Array.isArray(comments) ? comments : []).forEach((comment) => {
@@ -772,6 +910,7 @@ const MapScreen = ({ navigation, route }) => {
   const [selectedCloud, setSelectedCloud] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [mapSize, setMapSize] = useState(DEFAULT_MAP_SIZE);
+  const [cloudsEnabled, setCloudsEnabled] = useState(DEFAULT_MAP_CLOUDS_ENABLED);
   const pins = mapVisuals.pins;
   const clouds = mapVisuals.clouds;
   const persistedShapes = useMemo(
@@ -815,6 +954,7 @@ const MapScreen = ({ navigation, route }) => {
   const markerRefsByIdRef = useRef(new Map());
   const arrowCalloutTimerRef = useRef(null);
   const lastArrowCalloutPinIdRef = useRef(null);
+  const activeCalloutPinIdRef = useRef(null);
   const initialBackgroundLayerRefreshDoneRef = useRef(false);
   const initialAppOpenRefreshDoneRef = useRef(false);
   const lastCommunityMapRefreshIdRef = useRef(null);
@@ -822,6 +962,7 @@ const MapScreen = ({ navigation, route }) => {
   const latestEnabledLayerKeyRef = useRef("");
   const allLoadedPostsRef = useRef([]);
   const localFallbackEnabledByAudienceRef = useRef(new Map());
+  const localMyPostsAudienceEnabledByAudienceRef = useRef(new Map());
 
   useEffect(() => {
     allLoadedPostsRef.current = allLoadedPosts;
@@ -859,14 +1000,37 @@ const MapScreen = ({ navigation, route }) => {
     drawingCoordsRef.current = Array.isArray(drawingCoords) ? drawingCoords : [];
   }, [drawingCoords]);
 
-  useEffect(() => {
-    return () => {
+  const dismissMapCallouts = useCallback(
+    ({ clearArrowFocus = false } = {}) => {
       if (arrowCalloutTimerRef.current) {
         clearTimeout(arrowCalloutTimerRef.current);
         arrowCalloutTimerRef.current = null;
       }
-    };
-  }, []);
+
+      const idsToHide = [
+        String(lastArrowCalloutPinIdRef.current || ""),
+        String(activeCalloutPinIdRef.current || ""),
+      ].filter(Boolean);
+      const uniqueIds = [...new Set(idsToHide)];
+      uniqueIds.forEach((pinId) => {
+        markerRefsByIdRef.current.get(pinId)?.hideCallout?.();
+      });
+
+      lastArrowCalloutPinIdRef.current = null;
+      activeCalloutPinIdRef.current = null;
+      if (clearArrowFocus) {
+        setArrowFocusedPinId(null);
+      }
+    },
+    [],
+  );
+
+  useEffect(
+    () => () => {
+      dismissMapCallouts({ clearArrowFocus: true });
+    },
+    [dismissMapCallouts],
+  );
   useEffect(
     () => () => {
       if (planeRectStopTimerRef.current) {
@@ -1257,12 +1421,7 @@ const MapScreen = ({ navigation, route }) => {
             .filter((row) => {
               const ownerType = row.owner_type || "system";
               if (!(ownerType === "system" || ownerType === "user")) return false;
-              const pinKey = getPinLayerKeyFromLayer({
-                kind: row.kind,
-                name: row.name,
-                owner_type: row.owner_type || "system",
-              });
-              return pinKey !== "private";
+              return true;
             })
             .map((row) => row.id),
           ...allLayerRows
@@ -1447,11 +1606,7 @@ const MapScreen = ({ navigation, route }) => {
           return Boolean(layer.isCommunityAccessible);
         });
 
-        const nonPrivateLayers = collectionScopedLayers.filter(
-          (layer) => getPinLayerKeyFromLayer(layer) !== "private",
-        );
-
-        const ownUserLayersOnly = nonPrivateLayers.filter((layer) => {
+        const ownUserLayersOnly = collectionScopedLayers.filter((layer) => {
           if (!(layer.owner_type === "user" && layer.kind === "user_posts")) {
             return true;
           }
@@ -1543,14 +1698,24 @@ const MapScreen = ({ navigation, route }) => {
               };
             })
           : nextLayersBase;
+        const virtualMyPostsAudienceLayers = buildVirtualMyPostsAudienceLayers({
+          sourceLayers: nextLayersBaseForAudience,
+          resolvedUserId,
+          enabledByAudienceRef: localMyPostsAudienceEnabledByAudienceRef,
+        });
+        const nextLayersWithVirtual = resolvedUserId
+          ? [...virtualMyPostsAudienceLayers, ...nextLayersBaseForAudience]
+          : nextLayersBaseForAudience;
         const nextLayers = resolvedUserId
-          ? nextLayersBaseForAudience
-          : toGuestPublicOnlyLayers(nextLayersBaseForAudience);
+          ? nextLayersWithVirtual
+          : toGuestPublicOnlyLayers(nextLayersWithVirtual);
+        const normalizedNextLayers =
+          synchronizeSystemAudienceStates(nextLayers);
 
         logLayerTrace("refreshAccessibleLayers:finalLayers", {
-          total: nextLayers.length,
-          enabled: nextLayers.filter((layer) => layer.isEnabled).length,
-          layers: nextLayers.map((layer) => ({
+          total: normalizedNextLayers.length,
+          enabled: normalizedNextLayers.filter((layer) => layer.isEnabled).length,
+          layers: normalizedNextLayers.map((layer) => ({
             id: layer.id,
             name: layer.display_name || layer.name,
             owner_type: layer.owner_type,
@@ -1559,21 +1724,21 @@ const MapScreen = ({ navigation, route }) => {
           })),
         });
 
-        setLayers(nextLayers);
+        setLayers(normalizedNextLayers);
         if (effectiveCommunityId) {
-          const firstCommunityLayer = nextLayers.find((layer) =>
+          const firstCommunityLayer = normalizedNextLayers.find((layer) =>
             forcedCommunityLayerIds.has(layer.id),
           );
           logCommunityMapTrace("refreshAccessibleLayers:selectedLayer", {
             communityId: effectiveCommunityId,
             selected: firstCommunityLayer?.id || null,
-            enabledForcedLayers: nextLayers
+            enabledForcedLayers: normalizedNextLayers
               .filter(
                 (layer) =>
                   forcedCommunityLayerIds.has(layer.id) && layer.isEnabled,
               )
               .map((layer) => layer.id),
-            enabledNonCommunityLayers: nextLayers
+            enabledNonCommunityLayers: normalizedNextLayers
               .filter(
                 (layer) =>
                   !forcedCommunityLayerIds.has(layer.id) && layer.isEnabled,
@@ -1583,14 +1748,14 @@ const MapScreen = ({ navigation, route }) => {
           setSelectedLayerId(
             (prev) =>
               firstCommunityLayer?.id ||
-              resolveNextSelectedLayerId(nextLayers, prev),
+              resolveNextSelectedLayerId(normalizedNextLayers, prev),
           );
         } else {
           setSelectedLayerId((prev) =>
-            resolveNextSelectedLayerId(nextLayers, prev),
+            resolveNextSelectedLayerId(normalizedNextLayers, prev),
           );
         }
-        return nextLayers;
+        return normalizedNextLayers;
       } catch (error) {
         const transient = isTransientNetworkError(error);
         if (transient) {
@@ -1925,14 +2090,37 @@ const MapScreen = ({ navigation, route }) => {
 
   useFocusEffect(
     useCallback(() => {
+      let active = true;
+      const loadMapPreferences = async () => {
+        const nextCloudsEnabled = await getMapCloudsEnabled();
+        if (active) {
+          setCloudsEnabled(nextCloudsEnabled);
+        }
+      };
+      loadMapPreferences();
+      return () => {
+        active = false;
+      };
+    }, []),
+  );
+
+  useFocusEffect(
+    useCallback(() => {
       return () => {
         // Ensure map-only overlays never leak across tabs/screens.
+        dismissMapCallouts({ clearArrowFocus: true });
         setLayerPostsModalVisible(false);
         setCloudPostsModalVisible(false);
         setShowDetailModal(false);
       };
-    }, []),
+    }, [dismissMapCallouts]),
   );
+
+  useEffect(() => {
+    if (cloudsEnabled) return;
+    setCloudPostsModalVisible(false);
+    setSelectedCloud(null);
+  }, [cloudsEnabled]);
 
   const clearCommunityMapContext = () => {
     setCommunityMapContext(null);
@@ -1953,6 +2141,7 @@ useEffect(() => {
   if (enabledPinLayerKeys.length === 0 && enabledAudienceKeys.length === 0) {
     // Invalidate any in-flight load so stale responses cannot repopulate pins.
     pinLoadRequestSeqRef.current += 1;
+    dismissMapCallouts({ clearArrowFocus: true });
     const keepPins = shouldKeepPinsWhenNoUuidLayers(layers);
     if (keepPins) {
       // Offline/fallback-only mode: keep cached data.
@@ -1966,9 +2155,18 @@ useEffect(() => {
   }
 
   loadPins(enabledPinLayerKeys, enabledAudienceKeys);
-  const unsubscribe = subscribeToPins(enabledPinLayerKeys);
+  const unsubscribe = subscribeToPins(
+    enabledPinLayerKeys,
+    enabledAudienceKeys,
+  );
   return unsubscribe;
-}, [enabledAudienceKeys, enabledPinLayerKeys, layers, restoreCachedPosts]);
+}, [
+  dismissMapCallouts,
+  enabledAudienceKeys,
+  enabledPinLayerKeys,
+  layers,
+  restoreCachedPosts,
+]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -1977,6 +2175,7 @@ useEffect(() => {
         region,
         mapSize,
         arrowFocusedPinId,
+        { cloudsEnabled },
       );
       setMapVisuals((prev) => {
         const samePins = haveSameEntitySignatures(
@@ -1994,7 +2193,7 @@ useEffect(() => {
       });
     });
     return () => cancelAnimationFrame(frame);
-  }, [allLoadedPosts, arrowFocusedPinId, mapSize, region]);
+  }, [allLoadedPosts, arrowFocusedPinId, cloudsEnabled, mapSize, region]);
 
   const requestLocationPermission = async () => {
     try {
@@ -2127,10 +2326,14 @@ useEffect(() => {
         refreshToken: readRefreshToken,
         resolvedRequestUserId,
       });
+      const hydratedWithSignedMedia = await hydratePinsWithSignedMediaUrls(
+        withLayerIcon,
+        readAccessToken ? { access_token: readAccessToken } : session,
+      );
       logLayerTrace("loadPins:resolvedPins", {
         requestSeq,
-        pinCount: withLayerIcon.length,
-        sample: withLayerIcon.slice(0, 25).map((pin) => ({
+        pinCount: hydratedWithSignedMedia.length,
+        sample: hydratedWithSignedMedia.slice(0, 25).map((pin) => ({
           id: pin.id,
           user_id: pin.user_id,
           caption: pin.caption || null,
@@ -2140,7 +2343,7 @@ useEffect(() => {
         })),
       });
 
-      if (withLayerIcon.length === 0) {
+      if (hydratedWithSignedMedia.length === 0) {
         if (isStaleRequest()) return;
         setAllLoadedPosts([]);
         try {
@@ -2152,9 +2355,12 @@ useEffect(() => {
       }
 
       if (isStaleRequest()) return;
-      setAllLoadedPosts(withLayerIcon);
+      setAllLoadedPosts(hydratedWithSignedMedia);
       try {
-        await AsyncStorage.setItem(MAP_POSTS_CACHE_KEY, JSON.stringify(withLayerIcon));
+        await AsyncStorage.setItem(
+          MAP_POSTS_CACHE_KEY,
+          JSON.stringify(hydratedWithSignedMedia),
+        );
       } catch (_) {
         // Ignore cache write failures.
       }
@@ -2177,41 +2383,56 @@ useEffect(() => {
   };
 
   const handleRefreshLayersAndPins = useCallback(async () => {
+    dismissMapCallouts({ clearArrowFocus: true });
     const refreshedLayers = await fetchAccessibleLayers(
       currentUser?.id,
       communityMapContext?.id,
     );
-    const sourceLayers =
+    const sourceLayersRaw =
       Array.isArray(refreshedLayers) && refreshedLayers.length > 0
         ? refreshedLayers
         : layers;
+    const reconciledLayers = sourceLayersRaw.map((layer) => {
+      if (!layer?.isForcedEnabled) return layer;
+      if (layer?.isEnabled) return layer;
+      return {
+        ...layer,
+        isEnabled: true,
+      };
+    });
+    const forcedLayerReenabled = reconciledLayers.some(
+      (layer, index) =>
+        layer?.isForcedEnabled &&
+        layer?.isEnabled &&
+        !sourceLayersRaw[index]?.isEnabled,
+    );
+    if (forcedLayerReenabled) {
+      setLayers(reconciledLayers);
+    }
+
     const refreshedEnabledLayerIds = getEnabledLayerIdsForMap(
-      sourceLayers,
+      reconciledLayers,
     );
     const refreshedEnabledAudienceKeys = getEnabledAudienceKeysForMap(
-      sourceLayers,
+      reconciledLayers,
     );
     if (
       refreshedEnabledLayerIds.length === 0 &&
       refreshedEnabledAudienceKeys.length === 0
     ) {
-      if (shouldKeepPinsWhenNoUuidLayers(sourceLayers)) {
-        // Offline/fallback-only state.
-        restoreCachedPosts();
-      } else {
-        // User intentionally disabled all layers.
-        setAllLoadedPosts([]);
-        setMapVisuals({ pins: [], clouds: [] });
-      }
+      // Explicit refresh should always honor current layer state. If everything
+      // is off, clear the map instead of restoring cached pins.
+      setAllLoadedPosts([]);
+      setMapVisuals({ pins: [], clouds: [] });
       return;
     }
     await loadPins(refreshedEnabledLayerIds, refreshedEnabledAudienceKeys);
   }, [
     communityMapContext?.id,
     currentUser?.id,
+    dismissMapCallouts,
     fetchAccessibleLayers,
     layers,
-    restoreCachedPosts,
   ]);
 
   useEffect(() => {
@@ -2293,7 +2514,10 @@ useEffect(() => {
     }
   };
 
-  const subscribeToPins = (enabledLayerIds) => {
+  const subscribeToPins = (
+    enabledLayerIds,
+    enabledAudienceKeysInput = enabledAudienceKeys,
+  ) => {
     const idSet = new Set(
       (enabledLayerIds || []).filter((id) => isUuid(String(id || ""))),
     );
@@ -2307,7 +2531,7 @@ useEffect(() => {
           table: "pins",
         },
         () => {
-          loadPins(enabledLayerIds);
+          loadPins(enabledLayerIds, enabledAudienceKeysInput);
         },
       )
       .on(
@@ -2322,8 +2546,8 @@ useEffect(() => {
             payload?.new?.layer_id ||
             payload?.old?.layer_id ||
             payload?.record?.layer_id;
-          if (!eventLayerId || idSet.has(String(eventLayerId))) {
-            loadPins(enabledLayerIds);
+          if (idSet.size === 0 || !eventLayerId || idSet.has(String(eventLayerId))) {
+            loadPins(enabledLayerIds, enabledAudienceKeysInput);
           }
         },
       )
@@ -2341,11 +2565,40 @@ useEffect(() => {
       return;
     }
 
+    const normalizedLayerId = String(layerId || "");
+    if (!normalizedLayerId) return;
+    const targetLayer = layers.find(
+      (layer) => String(layer?.id || "") === normalizedLayerId,
+    );
+    const targetLayerKey = getPinLayerKeyFromLayer(targetLayer);
+    const shouldMirrorSystemAudience =
+      Boolean(targetLayer) &&
+      isUuid(normalizedLayerId) &&
+      (targetLayer?.owner_type || "system") === "system" &&
+      !isNamedUserPostsLayer(targetLayer) &&
+      ["public", "friends", "private"].includes(targetLayerKey);
+    const mirroredSystemLayerIds = shouldMirrorSystemAudience
+      ? layers
+          .filter((layer) => {
+            if (!isUuid(String(layer?.id || ""))) return false;
+            if ((layer?.owner_type || "system") !== "system") return false;
+            return getPinLayerKeyFromLayer(layer) === targetLayerKey;
+          })
+          .map((layer) => String(layer.id))
+      : [normalizedLayerId];
+    const targetLayerIdSet = new Set(
+      mirroredSystemLayerIds.filter(Boolean),
+    );
+
     const previousLayers = layers;
     const previousSelectedLayerId = selectedLayerId;
-    const optimisticLayers = layers.map((layer) =>
-      layer.id === layerId ? { ...layer, isEnabled: nextEnabled } : layer,
-    );
+    const optimisticLayers = layers.map((layer) => {
+      const id = String(layer?.id || "");
+      if (!targetLayerIdSet.has(id)) return layer;
+      if (layer?.isForcedEnabled) return layer;
+      if (Boolean(layer?.isEnabled) === Boolean(nextEnabled)) return layer;
+      return { ...layer, isEnabled: nextEnabled };
+    });
 
     const nextSelected = options.selectAfterToggle
       ? layerId
@@ -2355,10 +2608,24 @@ useEffect(() => {
     setSelectedLayerId(nextSelected);
 
     try {
-      if (!isUuid(String(layerId || ""))) {
+      if (!isUuid(normalizedLayerId)) {
+        const toggledLayer = optimisticLayers.find(
+          (layer) => String(layer?.id || "") === normalizedLayerId,
+        );
+        if (toggledLayer?.isMyPostsAudienceVirtual) {
+          const audienceKey = String(
+            toggledLayer?.myPostsAudienceKey || "",
+          ).toLowerCase();
+          if (MY_POSTS_AUDIENCE_ORDER.includes(audienceKey)) {
+            localMyPostsAudienceEnabledByAudienceRef.current.set(
+              audienceKey,
+              Boolean(nextEnabled),
+            );
+          }
+          return;
+        }
         // Fallback system audiences (`fallback-public` / `fallback-friends`)
         // are local-only toggles when canonical system UUID layers are absent.
-        const toggledLayer = optimisticLayers.find((layer) => layer.id === layerId);
         const key = getPinLayerKeyFromLayer(toggledLayer);
         if (["public", "friends"].includes(key)) {
           localFallbackEnabledByAudienceRef.current.set(key, Boolean(nextEnabled));
@@ -2371,15 +2638,26 @@ useEffect(() => {
       const refreshToken = session?.refresh_token || null;
       const actorUserId = session?.user?.id || userId;
 
-      const edgeResult = await setLayerPreferenceViaEdgeFunction(
-        layerId,
-        !nextEnabled,
-        accessToken,
-        refreshToken,
-        actorUserId,
-      );
-      if (edgeResult.error) {
-        throw edgeResult.error;
+      const persistedTargetLayerIds = optimisticLayers
+        .filter((layer) => {
+          const id = String(layer?.id || "");
+          if (!targetLayerIdSet.has(id)) return false;
+          if (layer?.isForcedEnabled) return false;
+          return isUuid(id);
+        })
+        .map((layer) => layer.id);
+
+      for (const targetId of persistedTargetLayerIds) {
+        const edgeResult = await setLayerPreferenceViaEdgeFunction(
+          targetId,
+          !nextEnabled,
+          accessToken,
+          refreshToken,
+          actorUserId,
+        );
+        if (edgeResult.error) {
+          throw edgeResult.error;
+        }
       }
     } catch (error) {
       setLayers(previousLayers);
@@ -2390,17 +2668,47 @@ useEffect(() => {
   };
 
   const handleMoveLayer = useCallback(
-    async (layerId, direction) => {
+    async (layerId, direction, options = {}) => {
       const userId = await resolveCurrentUserId();
       if (!userId) return;
-      const fromIndex = layers.findIndex((layer) => layer.id === layerId);
-      if (fromIndex < 0) return;
-      const toIndex = fromIndex + direction;
-      if (toIndex < 0 || toIndex >= layers.length) return;
+      const normalizedDirection =
+        Number(direction) > 0 ? 1 : Number(direction) < 0 ? -1 : 0;
+      if (!normalizedDirection) return;
+
+      const candidateIds = Array.isArray(options?.groupLayerIds)
+        ? options.groupLayerIds
+        : [];
+      const moveIdSet = new Set(
+        candidateIds.map((id) => String(id || "")).filter(Boolean),
+      );
+      if (moveIdSet.size === 0) {
+        moveIdSet.add(String(layerId || ""));
+      }
+      if (moveIdSet.size === 0) return;
 
       const next = [...layers];
-      const [moved] = next.splice(fromIndex, 1);
-      next.splice(toIndex, 0, moved);
+      let moved = false;
+
+      if (normalizedDirection < 0) {
+        for (let index = 1; index < next.length; index += 1) {
+          const currentId = String(next[index]?.id || "");
+          const previousId = String(next[index - 1]?.id || "");
+          if (!moveIdSet.has(currentId) || moveIdSet.has(previousId)) continue;
+          [next[index - 1], next[index]] = [next[index], next[index - 1]];
+          moved = true;
+        }
+      } else {
+        for (let index = next.length - 2; index >= 0; index -= 1) {
+          const currentId = String(next[index]?.id || "");
+          const nextId = String(next[index + 1]?.id || "");
+          if (!moveIdSet.has(currentId) || moveIdSet.has(nextId)) continue;
+          [next[index], next[index + 1]] = [next[index + 1], next[index]];
+          moved = true;
+        }
+      }
+
+      if (!moved) return;
+
       const previousLayers = layers;
       setLayers(next);
       try {
@@ -2830,7 +3138,32 @@ useEffect(() => {
       return;
     }
 
-    const mediaSource = String(postData?.mediaSource || "").toLowerCase();
+    const normalizedMediaItems = Array.isArray(postData?.mediaItems)
+      ? postData.mediaItems
+          .map((item) => ({
+            mediaUrl: String(item?.mediaUrl || "").trim(),
+            mediaType: String(item?.mediaType || "photo").toLowerCase(),
+            mediaSource: String(item?.mediaSource || "").toLowerCase(),
+          }))
+          .filter((item) => item.mediaUrl.length > 0)
+      : [];
+    if (
+      normalizedMediaItems.length === 0 &&
+      String(postData?.mediaUrl || "").trim()
+    ) {
+      normalizedMediaItems.push({
+        mediaUrl: String(postData.mediaUrl || "").trim(),
+        mediaType: String(postData?.mediaType || "photo").toLowerCase(),
+        mediaSource: String(postData?.mediaSource || "").toLowerCase(),
+      });
+    }
+
+    const mediaSource =
+      normalizedMediaItems.some((item) => item.mediaSource === "library")
+        ? "library"
+        : normalizedMediaItems.length > 0
+          ? "camera"
+          : "";
 
     const rawDrawingCoords = Array.isArray(drawingCoords) ? drawingCoords : [];
     const finalizedDrawingCoords =
@@ -3056,25 +3389,50 @@ useEffect(() => {
         };
       }
 
-      let persistedMediaUrl = postData.mediaUrl || null;
-      if (persistedMediaUrl) {
+      const persistedMediaPointers = [];
+      const persistedMediaTypes = [];
+      for (const mediaItem of normalizedMediaItems) {
         const uploadResult = await uploadPostMediaToStorage({
           session,
           userId: activeUserId,
-          mediaUrl: persistedMediaUrl,
-          mediaType: postData.mediaType,
+          mediaUrl: mediaItem.mediaUrl,
+          mediaType: mediaItem.mediaType,
         });
-        persistedMediaUrl = uploadResult?.mediaPointer || null;
+        const pointer = String(uploadResult?.mediaPointer || "").trim();
+        if (!pointer) continue;
+        persistedMediaPointers.push(pointer);
+        persistedMediaTypes.push(mediaItem.mediaType || "photo");
+      }
+      const primaryPersistedMediaPointer = persistedMediaPointers[0] || null;
+      const primaryPersistedMediaType = persistedMediaTypes[0] || null;
+      const resolvedPostType =
+        persistedMediaPointers.length === 0
+          ? "text"
+          : persistedMediaPointers.length === 1 &&
+              primaryPersistedMediaType === "video"
+            ? "video"
+            : persistedMediaPointers.length === 1 &&
+                primaryPersistedMediaType === "photo"
+              ? "photo"
+              : "media";
+
+      if (persistedMediaPointers.length > 0) {
+        geometry = {
+          ...geometry,
+          media_urls: persistedMediaPointers,
+          media_types: persistedMediaTypes,
+          media_count: persistedMediaPointers.length,
+        };
       }
 
       const insertRows = [
         {
           user_id: activeUserId,
-          type: postData.mediaUrl ? "media" : "text",
-          content: postData.content,
+          type: resolvedPostType,
+          content: "",
           caption: postData.title,
-          media_url: persistedMediaUrl,
-          media_type: postData.mediaType,
+          media_url: primaryPersistedMediaPointer,
+          media_type: primaryPersistedMediaType,
           lat: storedLat,
           lng: storedLng,
           layer: baseAudience,
@@ -3135,10 +3493,18 @@ useEffect(() => {
         layers.map((layer) => [layer.id, layer.layer_icon || null]),
       );
       const optimisticCreatedAt = new Date().toISOString();
-      const optimisticMediaUrl = postData.mediaUrl || persistedMediaUrl || null;
+      const optimisticMediaUrls = normalizedMediaItems.map((item) => item.mediaUrl);
+      const optimisticMediaTypes = normalizedMediaItems.map(
+        (item) => item.mediaType || "photo",
+      );
+      const optimisticMediaUrl = optimisticMediaUrls[0] || null;
+      const optimisticMediaType = optimisticMediaTypes[0] || null;
       const optimisticRows = insertRows.map((row, index) => ({
         ...row,
         media_url: optimisticMediaUrl,
+        media_type: optimisticMediaType,
+        media_urls: optimisticMediaUrls,
+        media_types: optimisticMediaTypes,
         id: `temp-${crossPostGroupId}-${index}`,
         created_at: optimisticCreatedAt,
         updated_at: optimisticCreatedAt,
@@ -3195,6 +3561,27 @@ useEffect(() => {
     Alert.alert("Search", `Searching for: ${query}`);
   };
 
+  const getPostPreviewMediaUrl = useCallback(
+    (post) => {
+      if (!post) return null;
+      const hydrated =
+        allLoadedPosts.find((item) => item?.id === post?.id) || post;
+      const mediaList = Array.isArray(hydrated?.media_urls)
+        ? hydrated.media_urls
+        : Array.isArray(hydrated?.geometry?.media_urls)
+          ? hydrated.geometry.media_urls
+          : [];
+      const firstFromList = mediaList
+        .map((value) => String(value || "").trim())
+        .find((value) => value && !value.startsWith("storage://"));
+      if (firstFromList) return firstFromList;
+      const fallback = String(hydrated?.media_url || "").trim();
+      if (!fallback || fallback.startsWith("storage://")) return null;
+      return fallback;
+    },
+    [allLoadedPosts],
+  );
+
   const openLayerPosts = async (layer) => {
     const pinLayerKey = getPinLayerKeyFromLayer(layer);
     setLayerPostsTarget({ ...layer, pinLayerKey });
@@ -3222,7 +3609,9 @@ useEffect(() => {
 
       const pinsRes = await supabase
         .from("pins")
-        .select("id,user_id,caption,content,author_name,created_at,layer,geometry")
+        .select(
+          "id,user_id,caption,content,author_name,created_at,layer,geometry,media_url,media_type",
+        )
         .in("id", pinIds)
         .order("created_at", { ascending: false })
         .limit(50);
@@ -3231,7 +3620,17 @@ useEffect(() => {
       const exactLayerPosts = (pinsRes.data || []).filter(
         (post) => !isCloudOnlyPost(post),
       );
-      setLayerPosts(exactLayerPosts);
+      const hydratedById = new Map(
+        (Array.isArray(allLoadedPostsRef.current)
+          ? allLoadedPostsRef.current
+          : []
+        ).map((item) => [String(item?.id || ""), item]),
+      );
+      const mergedLayerPosts = exactLayerPosts.map((post) => {
+        const hydrated = hydratedById.get(String(post?.id || ""));
+        return hydrated ? { ...post, ...hydrated } : post;
+      });
+      setLayerPosts(mergedLayerPosts);
     } catch (error) {
       console.error("Error loading layer posts:", error);
       setLayerPosts([]);
@@ -3473,12 +3872,61 @@ useEffect(() => {
     return await requestPromise;
   };
 
+  const hydrateSinglePinMedia = useCallback(
+    async (targetPin) => {
+      const pinId = String(targetPin?.id || "");
+      if (!pinId) return null;
+
+      let session = await getActiveSession();
+      if (!session?.access_token) {
+        const {
+          data: { session: fallbackSession },
+        } = await supabase.auth.getSession();
+        session = fallbackSession || null;
+      }
+      if (!session?.access_token) return null;
+
+      const sourcePin =
+        (Array.isArray(allLoadedPostsRef.current)
+          ? allLoadedPostsRef.current
+          : []
+        ).find((pin) => String(pin?.id || "") === pinId) || targetPin;
+      if (!sourcePin) return null;
+
+      const [hydratedPin] = await hydratePinsWithSignedMediaUrls(
+        [sourcePin],
+        session,
+      );
+      if (!hydratedPin) return null;
+
+      setAllLoadedPosts((prev) =>
+        (Array.isArray(prev) ? prev : []).map((pin) =>
+          String(pin?.id || "") === pinId ? { ...pin, ...hydratedPin } : pin,
+        ),
+      );
+      setSelectedPin((prev) => {
+        if (!prev || String(prev?.id || "") !== pinId) return prev;
+        return { ...prev, ...hydratedPin };
+      });
+
+      return hydratedPin;
+    },
+    [],
+  );
+
   const handlePinPress = (pin) => {
     setShapePreviewPinId(null);
-    selectedPinIdRef.current = pin.id;
-    setSelectedPin(pin);
-    const cached = pinVoteSummaryCacheRef.current.get(pin.id);
-    const cachedComments = pinCommentsCacheRef.current.get(pin.id);
+    dismissMapCallouts({ clearArrowFocus: false });
+    const pinId = String(pin?.id || "");
+    const latestPin =
+      (Array.isArray(allLoadedPostsRef.current)
+        ? allLoadedPostsRef.current
+        : []
+      ).find((item) => String(item?.id || "") === pinId) || pin;
+    selectedPinIdRef.current = latestPin.id;
+    setSelectedPin(latestPin);
+    const cached = pinVoteSummaryCacheRef.current.get(latestPin.id);
+    const cachedComments = pinCommentsCacheRef.current.get(latestPin.id);
     setPinVoteSummary(
       cached || {
         upvotes: 0,
@@ -3489,19 +3937,133 @@ useEffect(() => {
     setPinComments(cachedComments || []);
     setPinCommentsLoading(!cachedComments);
     setDeletingCommentId(null);
-    loadPinVotes(pin.id, {
+    loadPinVotes(latestPin.id, {
       preferCache: true,
       suppressState: false,
       backgroundRefresh: true,
     }).catch(() => {});
-    loadPinComments(pin.id, {
+    loadPinComments(latestPin.id, {
       preferCache: true,
       suppressState: false,
       backgroundRefresh: true,
     }).catch(() => {});
-    loadPinAssociations(pin);
+    loadPinAssociations(latestPin);
     setShowDetailModal(true);
   };
+
+  const resetSelectedPinDetail = useCallback(() => {
+    selectedPinIdRef.current = null;
+    setShowDetailModal(false);
+    setSelectedPin(null);
+    setSelectedPinLayers([]);
+    setPinVoteSummary({ upvotes: 0, downvotes: 0, userVote: 0 });
+    setPinComments([]);
+    setPinCommentsLoading(false);
+    setIsSubmittingComment(false);
+    setDeletingCommentId(null);
+  }, []);
+
+  useEffect(() => {
+    if (!showDetailModal) return;
+    const selectedId = String(selectedPin?.id || "");
+    if (!selectedId) return;
+    const stillVisible = (Array.isArray(allLoadedPosts) ? allLoadedPosts : []).some(
+      (pin) => String(pin?.id || "") === selectedId,
+    );
+    if (stillVisible) return;
+    resetSelectedPinDetail();
+  }, [allLoadedPosts, resetSelectedPinDetail, selectedPin?.id, showDetailModal]);
+
+  useEffect(() => {
+    if (!showDetailModal) return;
+    const selectedId = String(selectedPin?.id || "");
+    if (!selectedId) return;
+
+    const latestVisiblePin = (Array.isArray(allLoadedPosts) ? allLoadedPosts : []).find(
+      (pin) => String(pin?.id || "") === selectedId,
+    );
+    if (!latestVisiblePin) return;
+
+    setSelectedPin((prev) => {
+      if (!prev || String(prev?.id || "") !== selectedId) return prev;
+
+      const prevMediaUrl = String(prev?.media_url || "").trim();
+      const nextMediaUrl = String(latestVisiblePin?.media_url || "").trim();
+      const prevMediaUrls = JSON.stringify(prev?.media_urls || []);
+      const nextMediaUrls = JSON.stringify(latestVisiblePin?.media_urls || []);
+      const prevGeometryMediaUrls = JSON.stringify(prev?.geometry?.media_urls || []);
+      const nextGeometryMediaUrls = JSON.stringify(
+        latestVisiblePin?.geometry?.media_urls || [],
+      );
+
+      const hasMeaningfulMediaChange =
+        prevMediaUrl !== nextMediaUrl ||
+        prevMediaUrls !== nextMediaUrls ||
+        prevGeometryMediaUrls !== nextGeometryMediaUrls;
+
+      if (!hasMeaningfulMediaChange && prev === latestVisiblePin) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        ...latestVisiblePin,
+      };
+    });
+  }, [allLoadedPosts, selectedPin?.id, showDetailModal]);
+
+  useEffect(() => {
+    if (!showDetailModal || !selectedPin || !pinHasAnyMedia(selectedPin)) {
+      return;
+    }
+
+    let active = true;
+
+    const hydrateSelectedPinMedia = async () => {
+      try {
+        const hydratedPin = await hydrateSinglePinMedia(selectedPin);
+        if (!active || !hydratedPin) return;
+      } catch (error) {
+        console.warn("Failed to hydrate selected pin media:", error);
+      }
+    };
+
+    hydrateSelectedPinMedia();
+    return () => {
+      active = false;
+    };
+  }, [hydrateSinglePinMedia, selectedPin, showDetailModal]);
+
+  const handleSelectedPinMediaLoadError = useCallback(
+    (pin, failedUrl) => {
+      console.warn("Pin media failed to load, retrying hydration:", {
+        pinId: pin?.id,
+        failedUrl,
+      });
+      hydrateSinglePinMedia(pin).catch((error) => {
+        console.warn("Retry pin media hydration failed:", error);
+      });
+    },
+    [hydrateSinglePinMedia],
+  );
+
+  useEffect(() => {
+    const visiblePinIds = new Set(
+      (Array.isArray(pins) ? pins : [])
+        .map((pin) => String(pin?.id || ""))
+        .filter(Boolean),
+    );
+    const activePinId = String(activeCalloutPinIdRef.current || "");
+    if (activePinId && !visiblePinIds.has(activePinId)) {
+      activeCalloutPinIdRef.current = null;
+    }
+
+    const arrowPinId = String(lastArrowCalloutPinIdRef.current || "");
+    if (arrowPinId && !visiblePinIds.has(arrowPinId)) {
+      lastArrowCalloutPinIdRef.current = null;
+      setArrowFocusedPinId((prev) => (String(prev || "") === arrowPinId ? null : prev));
+    }
+  }, [pins]);
 
   useEffect(() => {
     if (!currentUser?.id || !Array.isArray(pins) || pins.length === 0) {
@@ -3548,19 +4110,25 @@ useEffect(() => {
     setCloudPostsModalVisible(true);
   };
 
-  const handleCloudPostPress = (post) => {
+  const openPostFromPreview = (
+    post,
+    { closeCloud = false, closeLayer = false, focusOnMap = false } = {},
+  ) => {
     if (!post) return;
-
-    setCloudPostsModalVisible(false);
-    setSelectedCloud(null);
+    if (closeCloud) {
+      setCloudPostsModalVisible(false);
+      setSelectedCloud(null);
+    }
+    if (closeLayer) {
+      setLayerPostsModalVisible(false);
+    }
 
     const hasCoordinate =
       typeof post?.lat === "number" &&
       Number.isFinite(post.lat) &&
       typeof post?.lng === "number" &&
       Number.isFinite(post.lng);
-
-    if (hasCoordinate) {
+    if (focusOnMap && hasCoordinate) {
       const targetRegion = {
         latitude: post.lat,
         longitude: post.lng,
@@ -3573,13 +4141,36 @@ useEffect(() => {
       }
     }
 
-    const selected = allLoadedPosts.find((item) => item.id === post.id) || post;
-    setTimeout(() => {
-      handlePinPress(selected);
-    }, 180);
+    const candidateId = String(post?.id || "");
+    const selected =
+      (allLoadedPostsRef.current || []).find(
+        (item) => String(item?.id || "") === candidateId,
+      ) || post;
+
+    InteractionManager.runAfterInteractions(() => {
+      const latest =
+        (allLoadedPostsRef.current || []).find(
+          (item) => String(item?.id || "") === candidateId,
+        ) || selected;
+      handlePinPress(latest);
+    });
   };
 
-  const handleRegionChangeComplete = useCallback((nextRegion) => {
+  const handleCloudPostPress = (post) => {
+    openPostFromPreview(post, {
+      closeCloud: true,
+      focusOnMap: true,
+    });
+  };
+
+  const handleLayerPostPress = (post) => {
+    openPostFromPreview(post, {
+      closeLayer: true,
+      focusOnMap: false,
+    });
+  };
+
+  const syncRegionFromMap = useCallback((nextRegion) => {
     const normalizedRegion = {
       latitude: Number(nextRegion?.latitude),
       longitude: Number(nextRegion?.longitude),
@@ -3611,6 +4202,10 @@ useEffect(() => {
       }
       return normalizedRegion;
     });
+  }, []);
+
+  const handleRegionChangeComplete = useCallback((nextRegion) => {
+    syncRegionFromMap(nextRegion);
     if (
       multiTouchGestureLockedRef.current &&
       activeMapTouchCountRef.current <= 1 &&
@@ -3619,9 +4214,10 @@ useEffect(() => {
       multiTouchGestureLockedRef.current = false;
       setIsMapMultiTouchActive(false);
     }
-  }, []);
+  }, [syncRegionFromMap]);
 
-  const handleRegionChange = useCallback(() => {
+  const handleRegionChange = useCallback((nextRegion) => {
+    syncRegionFromMap(nextRegion);
     if (!isDrawingMode) return;
     const hasMultiTouchContext =
       activeMapTouchCountRef.current > 1 || multiTouchGestureLockedRef.current;
@@ -3631,19 +4227,39 @@ useEffect(() => {
     suppressDrawUntilRef.current = Math.max(suppressDrawUntilRef.current, until);
     multiTouchGestureLockedRef.current = true;
     setIsMapMultiTouchActive(true);
-  }, [isDrawingMode]);
+  }, [isDrawingMode, syncRegionFromMap]);
 
   const showArrowPinCallout = useCallback((pinId, attempt = 0) => {
-    const marker = markerRefsByIdRef.current.get(pinId);
+    const normalizedPinId = String(pinId || "");
+    if (!normalizedPinId) return;
+    const marker = markerRefsByIdRef.current.get(normalizedPinId);
     if (marker?.showCallout) {
       marker.showCallout();
-      lastArrowCalloutPinIdRef.current = pinId;
+      lastArrowCalloutPinIdRef.current = normalizedPinId;
+      activeCalloutPinIdRef.current = normalizedPinId;
       return;
     }
     if (attempt >= 6) return;
     arrowCalloutTimerRef.current = setTimeout(() => {
-      showArrowPinCallout(pinId, attempt + 1);
+      showArrowPinCallout(normalizedPinId, attempt + 1);
     }, 120);
+  }, []);
+
+  const handleMarkerSelect = useCallback((pin) => {
+    const pinId = String(pin?.id || "");
+    if (!pinId) return;
+    activeCalloutPinIdRef.current = pinId;
+  }, []);
+
+  const handleMarkerDeselect = useCallback((pin) => {
+    const pinId = String(pin?.id || "");
+    if (!pinId) return;
+    if (String(activeCalloutPinIdRef.current || "") === pinId) {
+      activeCalloutPinIdRef.current = null;
+    }
+    if (String(lastArrowCalloutPinIdRef.current || "") === pinId) {
+      lastArrowCalloutPinIdRef.current = null;
+    }
   }, []);
 
   const handleArrowPinFocus = useCallback(
@@ -3651,24 +4267,14 @@ useEffect(() => {
       const pinId = String(pin?.id || "");
       if (!pinId) return;
 
+      dismissMapCallouts({ clearArrowFocus: false });
       setArrowFocusedPinId(pinId);
-
-      const previousId = String(lastArrowCalloutPinIdRef.current || "");
-      if (previousId && previousId !== pinId) {
-        const previousMarker = markerRefsByIdRef.current.get(previousId);
-        previousMarker?.hideCallout?.();
-      }
-
-      if (arrowCalloutTimerRef.current) {
-        clearTimeout(arrowCalloutTimerRef.current);
-        arrowCalloutTimerRef.current = null;
-      }
 
       arrowCalloutTimerRef.current = setTimeout(() => {
         showArrowPinCallout(pinId, 0);
       }, 420);
     },
-    [showArrowPinCallout],
+    [dismissMapCallouts, showArrowPinCallout],
   );
 
   const handleShapePinPress = useCallback(
@@ -4434,30 +5040,38 @@ useEffect(() => {
             />
           ),
         )}
-        {pins.map((pin) => (
-          <CustomMarker
-            key={pin.id}
-            ref={(markerRef) => {
-              if (markerRef) {
-                markerRefsByIdRef.current.set(String(pin.id), markerRef);
-              } else {
-                markerRefsByIdRef.current.delete(String(pin.id));
-              }
-            }}
-            pin={pin}
-            onPress={handlePinPress}
-          />
-        ))}
-        {clouds.map((cloud) => (
-          <React.Fragment key={cloud.id}>
+        {pins.map((pin) => {
+          if (!hasValidCoordinate(pin)) return null;
+          return (
+            <CustomMarker
+              key={pin.id}
+              ref={(markerRef) => {
+                if (markerRef) {
+                  markerRefsByIdRef.current.set(String(pin.id), markerRef);
+                } else {
+                  markerRefsByIdRef.current.delete(String(pin.id));
+                }
+              }}
+              pin={pin}
+              onPress={handlePinPress}
+              onSelect={handleMarkerSelect}
+              onDeselect={handleMarkerDeselect}
+            />
+          );
+        })}
+        {clouds.flatMap((cloud) => {
+          if (!hasValidMapCoordinate(cloud?.center)) return [];
+          return [
             <Circle
+              key={`cloud-circle-${cloud.id}`}
               center={cloud.center}
               radius={cloud.radiusMeters}
               strokeColor="rgba(129, 140, 248, 0.55)"
               fillColor="rgba(129, 140, 248, 0.16)"
               strokeWidth={2}
-            />
+            />,
             <Marker
+              key={`cloud-marker-${cloud.id}`}
               coordinate={cloud.center}
               onPress={() => handleCloudPress(cloud)}
               tracksViewChanges={false}
@@ -4467,9 +5081,9 @@ useEffect(() => {
                   {cloud.badgeCount || cloud.count}
                 </Text>
               </View>
-            </Marker>
-          </React.Fragment>
-        ))}
+            </Marker>,
+          ];
+        })}
 
         {isDrawingMode &&
           drawingCoords.length >= 2 &&
@@ -4629,13 +5243,14 @@ useEffect(() => {
           userLocation={userLocation}
           onSearch={handleSearch}
           onArrowPinFocus={handleArrowPinFocus}
+          onPrepareOverlay={() => dismissMapCallouts({ clearArrowFocus: true })}
         />
       )}
 
       <Modal
         visible={layerPostsModalVisible}
         transparent
-        animationType="slide"
+        animationType="fade"
         onRequestClose={() => setLayerPostsModalVisible(false)}
       >
         <View style={styles.postsOverlay}>
@@ -4668,22 +5283,41 @@ useEffect(() => {
                   No posts in this layer yet.
                 </Text>
               ) : (
-                layerPosts.map((post) => (
-                  <View key={post.id} style={styles.postRow}>
-                    <Text style={styles.postTitle}>
-                      {post.caption || "Untitled"}
-                    </Text>
-                    <Text style={styles.postMeta}>
-                      {post.author_name || "Anonymous"} •{" "}
-                      {new Date(post.created_at).toLocaleString()}
-                    </Text>
-                    {post.content ? (
-                      <Text style={styles.postContent} numberOfLines={3}>
-                        {post.content}
-                      </Text>
-                    ) : null}
-                  </View>
-                ))
+                layerPosts.map((post) => {
+                  const previewMediaUrl = getPostPreviewMediaUrl(post);
+                  return (
+                    <TouchableOpacity
+                      key={post.id}
+                      style={styles.postRow}
+                      activeOpacity={0.86}
+                      onPress={() => handleLayerPostPress(post)}
+                    >
+                      <View style={styles.postRowInner}>
+                        {previewMediaUrl ? (
+                          <Image
+                            source={{ uri: previewMediaUrl }}
+                            style={styles.postThumb}
+                            resizeMode="cover"
+                          />
+                        ) : null}
+                        <View style={styles.postBody}>
+                          <Text style={styles.postTitle}>
+                            {post.caption || "Untitled"}
+                          </Text>
+                          <Text style={styles.postMeta}>
+                            {post.author_name || "Anonymous"} •{" "}
+                            {new Date(post.created_at).toLocaleString()}
+                          </Text>
+                          {post.content ? (
+                            <Text style={styles.postContent} numberOfLines={3}>
+                              {post.content}
+                            </Text>
+                          ) : null}
+                        </View>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })
               )}
             </ScrollView>
           </View>
@@ -4693,7 +5327,7 @@ useEffect(() => {
       <Modal
         visible={cloudPostsModalVisible}
         transparent
-        animationType="slide"
+        animationType="fade"
         onRequestClose={() => {
           setCloudPostsModalVisible(false);
           setSelectedCloud(null);
@@ -4729,6 +5363,7 @@ useEffect(() => {
               {selectedCloud?.posts?.length ? (
                 selectedCloud.posts.map((post) => {
                   const privacyProtected = isCloudOnlyPost(post);
+                  const previewMediaUrl = getPostPreviewMediaUrl(post);
                   const authorUsername = String(
                     post?.author_username || "",
                   ).trim();
@@ -4748,30 +5383,41 @@ useEffect(() => {
                       activeOpacity={0.85}
                       onPress={() => handleCloudPostPress(post)}
                     >
-                      <View style={styles.cloudPostHeaderRow}>
-                        <Text style={styles.postTitle}>
-                          {post.caption || "Untitled"}
-                        </Text>
-                        <Text
-                          style={[
-                            styles.cloudPrivacyBadge,
-                            privacyProtected
-                              ? styles.cloudPrivacyBadgePrivate
-                              : styles.cloudPrivacyBadgePinned,
-                          ]}
-                        >
-                          {privacyProtected ? "Privacy Protected" : "Pinned"}
-                        </Text>
+                      <View style={styles.postRowInner}>
+                        {previewMediaUrl ? (
+                          <Image
+                            source={{ uri: previewMediaUrl }}
+                            style={styles.postThumb}
+                            resizeMode="cover"
+                          />
+                        ) : null}
+                        <View style={styles.postBody}>
+                          <View style={styles.cloudPostHeaderRow}>
+                            <Text style={styles.postTitle}>
+                              {post.caption || "Untitled"}
+                            </Text>
+                            <Text
+                              style={[
+                                styles.cloudPrivacyBadge,
+                                privacyProtected
+                                  ? styles.cloudPrivacyBadgePrivate
+                                  : styles.cloudPrivacyBadgePinned,
+                              ]}
+                            >
+                              {privacyProtected ? "Privacy Protected" : "Pinned"}
+                            </Text>
+                          </View>
+                          <Text style={styles.cloudPostAuthor}>{authorHandle}</Text>
+                          {post.content ? (
+                            <Text style={styles.postContent} numberOfLines={4}>
+                              {post.content}
+                            </Text>
+                          ) : null}
+                          <Text style={styles.postMeta}>
+                            {new Date(post.created_at).toLocaleString()}
+                          </Text>
+                        </View>
                       </View>
-                      <Text style={styles.cloudPostAuthor}>{authorHandle}</Text>
-                      {post.content ? (
-                        <Text style={styles.postContent} numberOfLines={4}>
-                          {post.content}
-                        </Text>
-                      ) : null}
-                      <Text style={styles.postMeta}>
-                        {new Date(post.created_at).toLocaleString()}
-                      </Text>
                     </TouchableOpacity>
                   );
                 })
@@ -4802,18 +5448,11 @@ useEffect(() => {
         onDeleteComment={handleDeletePinComment}
         onClose={() => {
           setShapePreviewPinId(null);
-          selectedPinIdRef.current = null;
-          setShowDetailModal(false);
-          setSelectedPin(null);
-          setSelectedPinLayers([]);
-          setPinVoteSummary({ upvotes: 0, downvotes: 0, userVote: 0 });
-          setPinComments([]);
-          setPinCommentsLoading(false);
-          setIsSubmittingComment(false);
-          setDeletingCommentId(null);
+          resetSelectedPinDetail();
         }}
         onUpdate={handleUpdatePin}
         onDelete={handleDeletePin}
+        onMediaLoadError={handleSelectedPinMediaLoadError}
       />
     </View>
   );
@@ -5004,6 +5643,21 @@ const createStyles = (palette, insets = { top: 0, bottom: 0 }) =>
       backgroundColor: palette.mutedSurface,
       padding: 10,
       marginBottom: 8,
+    },
+    postRowInner: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: 10,
+    },
+    postThumb: {
+      width: 64,
+      height: 64,
+      borderRadius: SIZES.radius,
+      backgroundColor: "#111827",
+    },
+    postBody: {
+      flex: 1,
+      minWidth: 0,
     },
     postTitle: {
       color: palette.text,

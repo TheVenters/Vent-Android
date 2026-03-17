@@ -2,7 +2,7 @@
   "expo": {
     "name": "Vent",
     "slug": "ventapp-rn",
-    "version": "1.0.1",
+    "version": "1.0.3",
     "orientation": "portrait",
     "icon": "./assets/icons/app-icon.png",
     "userInterfaceStyle": "automatic",
@@ -56,7 +56,9 @@
     "plugins": [
       "expo-location",
       "expo-camera",
-      "expo-image-picker"
+      "expo-image-picker",
+      "expo-video",
+      "expo-media-library"
     ],
     "extra": {
       "eas": {

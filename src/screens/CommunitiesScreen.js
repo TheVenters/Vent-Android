@@ -13,7 +13,9 @@ import {
   ActivityIndicator,
   Modal,
   KeyboardAvoidingView,
+  Image,
 } from "react-native";
+import * as ImagePicker from "expo-image-picker";
 import { useFocusEffect } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SIZES } from "../constants/theme";
@@ -133,7 +135,10 @@ const CommunitiesScreen = ({ navigation }) => {
   const [communityNameInput, setCommunityNameInput] = useState("");
   const [communityDescriptionInput, setCommunityDescriptionInput] =
     useState("");
-  const [communitySlugInput, setCommunitySlugInput] = useState("");
+  const [communityAvatarInput, setCommunityAvatarInput] = useState(null);
+  const [updatingCommunityImage, setUpdatingCommunityImage] = useState(false);
+  const [supportsCommunityAvatarColumn, setSupportsCommunityAvatarColumn] =
+    useState(true);
 
   const [showCreateLayerModal, setShowCreateLayerModal] = useState(false);
   const [newLayerName, setNewLayerName] = useState("");
@@ -173,6 +178,8 @@ const CommunitiesScreen = ({ navigation }) => {
   const canManageSelectedCommunity = isPlatformAdmin || isCommunityAdminMember;
   const canDeleteSelectedCommunity = isPlatformAdmin || isLeadAdminMember;
   const canManageCommunityRoles = isPlatformAdmin || isLeadAdminMember;
+  const canManageCommunityImages =
+    canManageSelectedCommunity && supportsCommunityAvatarColumn;
 
   const formatMemberName = useCallback((member) => {
     if (!member) return "Unknown";
@@ -181,6 +188,46 @@ const CommunitiesScreen = ({ navigation }) => {
     if (member.user_id) return member.user_id.slice(0, 8);
     return "Unknown";
   }, []);
+
+  const isMissingCommunityAvatarColumnError = useCallback((error) => {
+    const code = String(error?.code || "").trim();
+    const message = String(error?.message || "").toLowerCase();
+    return code === "42703" && message.includes("communities.avatar_url");
+  }, []);
+
+  const fetchCommunitiesWithOptionalAvatar = useCallback(async () => {
+    const baseSelect = "id,slug,name,description,lead_admin_user_id,created_at";
+    const selectWithAvatar = `${baseSelect},avatar_url`;
+
+    let communitiesRes =
+      supportsCommunityAvatarColumn !== false
+        ? await supabase
+            .from("communities")
+            .select(selectWithAvatar)
+            .order("created_at", { ascending: false })
+        : await supabase
+            .from("communities")
+            .select(baseSelect)
+            .order("created_at", { ascending: false });
+
+    if (
+      communitiesRes.error &&
+      supportsCommunityAvatarColumn !== false &&
+      isMissingCommunityAvatarColumnError(communitiesRes.error)
+    ) {
+      setSupportsCommunityAvatarColumn(false);
+      communitiesRes = await supabase
+        .from("communities")
+        .select(baseSelect)
+        .order("created_at", { ascending: false });
+    }
+
+    if (communitiesRes.error) throw communitiesRes.error;
+    return (communitiesRes.data || []).map((community) => ({
+      ...community,
+      avatar_url: String(community?.avatar_url || "").trim() || null,
+    }));
+  }, [isMissingCommunityAvatarColumnError, supportsCommunityAvatarColumn]);
 
   const resolveWriteClient = useCallback(
     async ({
@@ -238,12 +285,9 @@ const CommunitiesScreen = ({ navigation }) => {
           })()
         : Promise.resolve({ data: [], error: null });
 
-      const [communitiesRes, communityLayersRes, membershipsRes, profileRes] =
+      const [communitiesRows, communityLayersRes, membershipsRes, profileRes] =
         await Promise.all([
-          supabase
-            .from("communities")
-            .select("id,slug,name,description,lead_admin_user_id,created_at")
-            .order("created_at", { ascending: false }),
+          fetchCommunitiesWithOptionalAvatar(),
           supabase
             .from("community_layers")
             .select("community_id,layer_id,enabled"),
@@ -257,7 +301,6 @@ const CommunitiesScreen = ({ navigation }) => {
             : Promise.resolve({ data: null, error: null }),
         ]);
 
-      if (communitiesRes.error) throw communitiesRes.error;
       if (communityLayersRes.error) throw communityLayersRes.error;
       if (membershipsRes.error) {
         console.warn("Error loading community memberships:", membershipsRes.error);
@@ -277,7 +320,7 @@ const CommunitiesScreen = ({ navigation }) => {
         membershipMap[row.community_id] = normalizeMembershipRow(row);
       });
       if (userId) {
-        (communitiesRes.data || []).forEach((community) => {
+        (communitiesRows || []).forEach((community) => {
           if (community.lead_admin_user_id !== userId) return;
           if (membershipMap[community.id]) return;
           membershipMap[community.id] = normalizeMembershipRow({
@@ -288,7 +331,7 @@ const CommunitiesScreen = ({ navigation }) => {
         });
       }
 
-      setCommunities(communitiesRes.data || []);
+      setCommunities(communitiesRows || []);
       setLayerCountByCommunity(counts);
       setMembershipsByCommunity(membershipMap);
       setIsPlatformAdmin(Boolean(profileRes.data?.is_admin));
@@ -298,7 +341,7 @@ const CommunitiesScreen = ({ navigation }) => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchCommunitiesWithOptionalAvatar]);
 
   const loadCommunityDetail = useCallback(
     async (communityId, userId) => {
@@ -860,6 +903,49 @@ const CommunitiesScreen = ({ navigation }) => {
     }
   };
 
+  const pickCommunityAvatarDataUri = useCallback(async () => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert("Permission Needed", "Please allow photo library access.");
+      return null;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: "images",
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.65,
+      base64: true,
+    });
+
+    if (result.canceled || !result.assets?.[0]) return null;
+    const asset = result.assets[0];
+    if (!asset.base64) {
+      Alert.alert("Error", "Unable to process selected image.");
+      return null;
+    }
+    const mimeType = String(asset.mimeType || "").trim() || "image/jpeg";
+    return `data:${mimeType};base64,${asset.base64}`;
+  }, []);
+
+  const handlePickCommunityAvatarForCreate = useCallback(async () => {
+    if (!supportsCommunityAvatarColumn) {
+      Alert.alert(
+        "Image Unsupported",
+        "This database does not currently support community images.",
+      );
+      return;
+    }
+    try {
+      const nextAvatar = await pickCommunityAvatarDataUri();
+      if (!nextAvatar) return;
+      setCommunityAvatarInput(nextAvatar);
+    } catch (error) {
+      console.error("Error selecting community image:", error);
+      Alert.alert("Error", "Failed to select image.");
+    }
+  }, [pickCommunityAvatarDataUri, supportsCommunityAvatarColumn]);
+
   const handleCreateCommunity = async () => {
     if (!currentUser?.id) {
       Alert.alert("Sign In Required", "Please sign in to create communities.");
@@ -871,7 +957,7 @@ const CommunitiesScreen = ({ navigation }) => {
       return;
     }
 
-    const slug = slugify(communitySlugInput || communityNameInput);
+    const slug = slugify(communityNameInput);
     if (!slug) {
       Alert.alert("Slug Required", "Please enter a valid slug.");
       return;
@@ -898,15 +984,19 @@ const CommunitiesScreen = ({ navigation }) => {
       if (!edgeResult.error) {
         createdCommunityId = edgeResult.data?.community?.id || null;
       } else if (isUnsupportedEdgeActionError(edgeResult.error)) {
+        const baseInsertPayload = {
+          slug,
+          name: communityNameInput.trim(),
+          description: communityDescriptionInput.trim() || null,
+          ...(supportsCommunityAvatarColumn
+            ? { avatar_url: communityAvatarInput || null }
+            : {}),
+          lead_admin_user_id: writeContext.actorUserId,
+          owner_user_id: writeContext.actorUserId,
+        };
         let createRes = await writeContext.client
           .from("communities")
-          .insert({
-            slug,
-            name: communityNameInput.trim(),
-            description: communityDescriptionInput.trim() || null,
-            lead_admin_user_id: writeContext.actorUserId,
-            owner_user_id: writeContext.actorUserId,
-          })
+          .insert(baseInsertPayload)
           .select("id")
           .single();
 
@@ -917,16 +1007,47 @@ const CommunitiesScreen = ({ navigation }) => {
           createCode === "42703" &&
           createMessage.includes("owner_user_id")
         ) {
+          const withoutOwnerPayload = {
+            ...baseInsertPayload,
+          };
+          delete withoutOwnerPayload.owner_user_id;
           createRes = await writeContext.client
             .from("communities")
-            .insert({
-              slug,
-              name: communityNameInput.trim(),
-              description: communityDescriptionInput.trim() || null,
-              lead_admin_user_id: writeContext.actorUserId,
-            })
+            .insert(withoutOwnerPayload)
             .select("id")
             .single();
+        }
+        if (
+          createRes.error &&
+          isMissingCommunityAvatarColumnError(createRes.error)
+        ) {
+          setSupportsCommunityAvatarColumn(false);
+          const withoutAvatarPayload = {
+            ...baseInsertPayload,
+          };
+          delete withoutAvatarPayload.avatar_url;
+          createRes = await writeContext.client
+            .from("communities")
+            .insert(withoutAvatarPayload)
+            .select("id")
+            .single();
+          if (
+            createRes.error &&
+            String(createRes.error?.code || "") === "42703" &&
+            String(createRes.error?.message || "")
+              .toLowerCase()
+              .includes("owner_user_id")
+          ) {
+            const withoutOwnerOrAvatarPayload = {
+              ...withoutAvatarPayload,
+            };
+            delete withoutOwnerOrAvatarPayload.owner_user_id;
+            createRes = await writeContext.client
+              .from("communities")
+              .insert(withoutOwnerOrAvatarPayload)
+              .select("id")
+              .single();
+          }
         }
 
         if (createRes.error) throw createRes.error;
@@ -951,10 +1072,24 @@ const CommunitiesScreen = ({ navigation }) => {
         throw edgeResult.error;
       }
 
+      if (
+        supportsCommunityAvatarColumn &&
+        createdCommunityId &&
+        communityAvatarInput
+      ) {
+        const avatarRes = await writeContext.client
+          .from("communities")
+          .update({
+            avatar_url: communityAvatarInput,
+          })
+          .eq("id", createdCommunityId);
+        if (avatarRes.error) throw avatarRes.error;
+      }
+
       setShowCreateCommunityModal(false);
       setCommunityNameInput("");
       setCommunityDescriptionInput("");
-      setCommunitySlugInput("");
+      setCommunityAvatarInput(null);
 
       await loadCommunitySummary(writeContext.actorUserId);
       if (createdCommunityId) {
@@ -962,6 +1097,14 @@ const CommunitiesScreen = ({ navigation }) => {
       }
     } catch (error) {
       console.error("Error creating community:", error);
+      if (isMissingCommunityAvatarColumnError(error)) {
+        setSupportsCommunityAvatarColumn(false);
+        Alert.alert(
+          "Image Unsupported",
+          "Community images are unavailable on this database right now. The community can still be created without an image.",
+        );
+        return;
+      }
       Alert.alert("Error", error.message || "Failed to create community.");
     }
   };
@@ -1016,6 +1159,80 @@ const CommunitiesScreen = ({ navigation }) => {
       Alert.alert("Error", error.message || "Failed to create layer.");
     }
   };
+
+  const handleUpdateSelectedCommunityImage = useCallback(
+    async (nextAvatarUrl) => {
+      if (!selectedCommunityId) return;
+      if (!supportsCommunityAvatarColumn) {
+        Alert.alert(
+          "Image Unsupported",
+          "This database does not currently support community images.",
+        );
+        return;
+      }
+      if (!canManageSelectedCommunity) {
+        Alert.alert(
+          "Permission Denied",
+          "Only community admins can update community images.",
+        );
+        return;
+      }
+
+      try {
+        setUpdatingCommunityImage(true);
+        const writeContext = await resolveWriteClient({
+          requireSignedInMessage:
+            "Please sign in again to update the community image.",
+          navigateToAccount: true,
+        });
+        if (!writeContext) return;
+
+        const updateRes = await writeContext.client
+          .from("communities")
+          .update({ avatar_url: nextAvatarUrl || null })
+          .eq("id", selectedCommunityId);
+        if (updateRes.error) throw updateRes.error;
+
+        await loadCommunitySummary(currentUser?.id);
+        await loadCommunityDetail(selectedCommunityId, currentUser?.id);
+      } catch (error) {
+        if (isMissingCommunityAvatarColumnError(error)) {
+          setSupportsCommunityAvatarColumn(false);
+          Alert.alert(
+            "Image Unsupported",
+            "Community images are unavailable on this database right now.",
+          );
+          await loadCommunitySummary(currentUser?.id);
+          return;
+        }
+        console.error("Error updating community image:", error);
+        Alert.alert("Error", error.message || "Failed to update image.");
+      } finally {
+        setUpdatingCommunityImage(false);
+      }
+    },
+    [
+      canManageSelectedCommunity,
+      currentUser?.id,
+      loadCommunityDetail,
+      loadCommunitySummary,
+      resolveWriteClient,
+      selectedCommunityId,
+      supportsCommunityAvatarColumn,
+      isMissingCommunityAvatarColumnError,
+    ],
+  );
+
+  const handlePickSelectedCommunityImage = useCallback(async () => {
+    try {
+      const nextAvatar = await pickCommunityAvatarDataUri();
+      if (!nextAvatar) return;
+      await handleUpdateSelectedCommunityImage(nextAvatar);
+    } catch (error) {
+      console.error("Error picking community image:", error);
+      Alert.alert("Error", "Failed to select image.");
+    }
+  }, [handleUpdateSelectedCommunityImage, pickCommunityAvatarDataUri]);
 
   const handleAttachExistingLayer = async (layerId) => {
     if (!selectedCommunityId) return;
@@ -1388,7 +1605,9 @@ const CommunitiesScreen = ({ navigation }) => {
       visible={showCreateCommunityModal}
       transparent
       animationType="slide"
-      onRequestClose={() => setShowCreateCommunityModal(false)}
+      onRequestClose={() => {
+        setShowCreateCommunityModal(false);
+      }}
     >
       <KeyboardAvoidingView
         style={styles.modalOverlay}
@@ -1413,21 +1632,7 @@ const CommunitiesScreen = ({ navigation }) => {
               placeholder="Name"
               placeholderTextColor={palette.subtext}
               value={communityNameInput}
-              onChangeText={(value) => {
-                setCommunityNameInput(value);
-                if (!communitySlugInput) {
-                  setCommunitySlugInput(slugify(value));
-                }
-              }}
-            />
-
-            <TextInput
-              style={styles.modalInput}
-              placeholder="Slug"
-              placeholderTextColor={palette.subtext}
-              value={communitySlugInput}
-              onChangeText={setCommunitySlugInput}
-              autoCapitalize="none"
+              onChangeText={setCommunityNameInput}
             />
 
             <TextInput
@@ -1439,13 +1644,39 @@ const CommunitiesScreen = ({ navigation }) => {
               multiline
             />
 
+            {communityAvatarInput ? (
+              <Image
+                source={{ uri: communityAvatarInput }}
+                style={styles.communityAvatarPreview}
+                resizeMode="cover"
+              />
+            ) : null}
+
             <View style={styles.modalActions}>
               <TouchableOpacity
                 style={styles.modalSecondaryBtn}
-                onPress={() => setCommunitySlugInput(slugify(communityNameInput))}
+                onPress={() => {
+                  setShowCreateCommunityModal(false);
+                }}
               >
-                <Text style={styles.modalSecondaryBtnText}>Auto Slug</Text>
+                <Text style={styles.modalSecondaryBtnText}>Cancel</Text>
               </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.modalSecondaryBtn}
+                onPress={handlePickCommunityAvatarForCreate}
+              >
+                <Text style={styles.modalSecondaryBtnText}>
+                  {communityAvatarInput ? "Change Image" : "Add Image"}
+                </Text>
+              </TouchableOpacity>
+              {communityAvatarInput ? (
+                <TouchableOpacity
+                  style={styles.modalSecondaryBtn}
+                  onPress={() => setCommunityAvatarInput(null)}
+                >
+                  <Text style={styles.modalSecondaryBtnText}>Remove Image</Text>
+                </TouchableOpacity>
+              ) : null}
               <TouchableOpacity
                 style={styles.modalPrimaryBtn}
                 onPress={handleCreateCommunity}
@@ -1650,6 +1881,13 @@ const CommunitiesScreen = ({ navigation }) => {
           showsVerticalScrollIndicator={false}
         >
           <View style={styles.detailCard}>
+            {String(selectedCommunity.avatar_url || "").trim() ? (
+              <Image
+                source={{ uri: selectedCommunity.avatar_url }}
+                style={styles.detailCommunityImage}
+                resizeMode="cover"
+              />
+            ) : null}
             <Text style={styles.detailName}>{selectedCommunity.name}</Text>
             <Text style={styles.detailDescription}>
               {selectedCommunity.description || "No description yet."}
@@ -1845,6 +2083,30 @@ const CommunitiesScreen = ({ navigation }) => {
             <>
               <Text style={styles.sectionHeading}>Manage Community</Text>
               <View style={styles.manageActionsRow}>
+                {canManageCommunityImages ? (
+                  <TouchableOpacity
+                    style={styles.manageActionBtn}
+                    disabled={updatingCommunityImage}
+                    onPress={handlePickSelectedCommunityImage}
+                  >
+                    <Text style={styles.manageActionBtnText}>
+                      {updatingCommunityImage
+                        ? "Saving..."
+                        : selectedCommunity?.avatar_url
+                          ? "Change Image"
+                          : "Add Image"}
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
+                {canManageCommunityImages && selectedCommunity?.avatar_url ? (
+                  <TouchableOpacity
+                    style={styles.manageActionBtn}
+                    disabled={updatingCommunityImage}
+                    onPress={() => handleUpdateSelectedCommunityImage(null)}
+                  >
+                    <Text style={styles.manageActionBtnText}>Remove Image</Text>
+                  </TouchableOpacity>
+                ) : null}
                 <TouchableOpacity
                   style={styles.manageActionBtn}
                   onPress={() => setShowCreateLayerModal(true)}
@@ -2001,6 +2263,19 @@ const CommunitiesScreen = ({ navigation }) => {
                 onPress={() => setSelectedCommunityId(community.id)}
               >
                 <View style={styles.cardTopRow}>
+                  {String(community.avatar_url || "").trim() ? (
+                    <Image
+                      source={{ uri: community.avatar_url }}
+                      style={styles.communityCardImage}
+                      resizeMode="cover"
+                    />
+                  ) : (
+                    <View style={styles.communityCardImagePlaceholder}>
+                      <Text style={styles.communityCardImagePlaceholderText}>
+                        {String(community.name || "C").trim().charAt(0).toUpperCase()}
+                      </Text>
+                    </View>
+                  )}
                   <View style={styles.cardTitleWrap}>
                     <Text style={styles.cardName}>{community.name}</Text>
                     <Text style={styles.cardDescription}>
@@ -2141,6 +2416,30 @@ const createStyles = (palette, isDark, topInset = 0) =>
     cardTopRow: {
       flexDirection: "row",
       gap: 10,
+      alignItems: "flex-start",
+    },
+    communityCardImage: {
+      width: 54,
+      height: 54,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.mutedSurface,
+    },
+    communityCardImagePlaceholder: {
+      width: 54,
+      height: 54,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.mutedSurface,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    communityCardImagePlaceholderText: {
+      color: palette.text,
+      fontSize: 20,
+      fontWeight: "800",
     },
     cardTitleWrap: {
       flex: 1,
@@ -2213,6 +2512,15 @@ const createStyles = (palette, isDark, topInset = 0) =>
       borderRadius: SIZES.radiusLg,
       padding: 14,
       backgroundColor: isDark ? "#202632" : "#f9fbff",
+      marginBottom: 12,
+    },
+    detailCommunityImage: {
+      width: "100%",
+      height: 184,
+      borderRadius: SIZES.radius,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.mutedSurface,
       marginBottom: 12,
     },
     detailName: {
@@ -2385,9 +2693,11 @@ const createStyles = (palette, isDark, topInset = 0) =>
       flexDirection: "row",
       gap: 8,
       marginBottom: 8,
+      flexWrap: "wrap",
     },
     manageActionBtn: {
-      flex: 1,
+      minWidth: 120,
+      flexGrow: 1,
       backgroundColor: palette.mutedSurface,
       borderRadius: SIZES.radius,
       paddingVertical: 10,
@@ -2575,6 +2885,7 @@ const createStyles = (palette, isDark, topInset = 0) =>
       flexDirection: "row",
       gap: 8,
       marginTop: 6,
+      flexWrap: "wrap",
     },
     modalSecondaryBtn: {
       flex: 1,
@@ -2601,6 +2912,15 @@ const createStyles = (palette, isDark, topInset = 0) =>
       fontSize: 13,
       fontWeight: "700",
       color: palette.onPrimary,
+    },
+    communityAvatarPreview: {
+      width: "100%",
+      height: 170,
+      borderRadius: SIZES.radius,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.mutedSurface,
+      marginTop: 6,
     },
     modalList: {
       marginTop: 4,

@@ -3,9 +3,16 @@ import { AppState, Platform } from 'react-native';
 import { createClient } from '@supabase/supabase-js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// Load from environment variables (set in .env file)
-const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+// Support both the standard Expo public keys and the repo's *_DEV variants.
+const SUPABASE_URL =
+  process.env.EXPO_PUBLIC_SUPABASE_URL ||
+  process.env.EXPO_PUBLIC_SUPABASE_URL_DEV;
+const SUPABASE_ANON_KEY =
+  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ||
+  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY_DEV;
+const POST_MEDIA_BUCKET =
+  process.env.EXPO_PUBLIC_POST_MEDIA_BUCKET ||
+  process.env.EXPO_PUBLIC_POST_MEDIA_BUCKET_DEV;
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   console.error('Missing Supabase environment variables. Check your .env file.');
@@ -514,9 +521,8 @@ const socialAction = async (action, payload, accessToken, refreshToken = null) =
 };
 
 const STORAGE_MEDIA_SCHEME = 'storage://';
-const POST_MEDIA_BUCKET_ENV_KEY = 'EXPO_PUBLIC_POST_MEDIA_BUCKET';
 const DEFAULT_POST_MEDIA_BUCKET_CANDIDATES = [
-  process.env[POST_MEDIA_BUCKET_ENV_KEY],
+  POST_MEDIA_BUCKET,
   'post-images',
 ]
   .map((value) => String(value || '').trim())
@@ -727,7 +733,48 @@ export const hydratePinsWithSignedMediaUrls = async (
   if (rows.length === 0) return [];
 
   const accessToken = session?.access_token || null;
-  if (!accessToken) return rows;
+  const readCandidateMediaList = (pin) => {
+    const geometryList = Array.isArray(pin?.geometry?.media_urls)
+      ? pin.geometry.media_urls
+      : [];
+    const topLevelList = Array.isArray(pin?.media_urls) ? pin.media_urls : [];
+    const primary = String(pin?.media_url || '').trim();
+
+    const normalized = [
+      ...topLevelList,
+      ...geometryList,
+    ]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean);
+
+    if (!primary) {
+      return dedupeStrings(normalized);
+    }
+
+    // Preserve already-renderable primary media URLs from edge responses or
+    // cached hydrated rows; otherwise we can accidentally downgrade a valid
+    // signed URL back to a raw storage pointer.
+    if (!isStorageMediaPointer(primary)) {
+      normalized.unshift(primary);
+      return dedupeStrings(normalized);
+    }
+
+    if (!normalized.includes(primary)) {
+      normalized.unshift(primary);
+    }
+    return dedupeStrings(normalized);
+  };
+
+  if (!accessToken) {
+    return rows.map((pin) => {
+      const mediaUrls = readCandidateMediaList(pin);
+      return {
+        ...pin,
+        media_urls: mediaUrls,
+        media_url: mediaUrls[0] || pin?.media_url || null,
+      };
+    });
+  }
 
   const clampedTtl = Number.isFinite(Number(ttlSec))
     ? Math.max(60, Math.min(60 * 60 * 24 * 7, Math.floor(Number(ttlSec))))
@@ -735,41 +782,51 @@ export const hydratePinsWithSignedMediaUrls = async (
   const storageClient = supabaseWithAccessToken(accessToken);
   const keyByPointer = new Map();
   rows.forEach((pin) => {
-    const pointer = String(pin?.media_url || '').trim();
-    const parsed = parseStorageMediaPointer(pointer);
-    if (!parsed) return;
-    const key = `${parsed.bucket}::${parsed.path}`;
-    if (!keyByPointer.has(key)) {
-      keyByPointer.set(key, parsed);
-    }
+    const candidates = readCandidateMediaList(pin);
+    candidates.forEach((value) => {
+      const parsed = parseStorageMediaPointer(value);
+      if (!parsed) return;
+      const key = `${parsed.bucket}::${parsed.path}`;
+      if (!keyByPointer.has(key)) {
+        keyByPointer.set(key, parsed);
+      }
+    });
   });
 
-  if (keyByPointer.size === 0) return rows;
-
   const signedUrlByKey = new Map();
-  await Promise.all(
-    Array.from(keyByPointer.entries()).map(async ([key, parsed]) => {
-      const signedRes = await storageClient.storage
-        .from(parsed.bucket)
-        .createSignedUrl(parsed.path, clampedTtl);
-      if (!signedRes.error && signedRes.data?.signedUrl) {
-        signedUrlByKey.set(key, signedRes.data.signedUrl);
-      }
-    }),
-  );
+  if (keyByPointer.size > 0) {
+    await Promise.all(
+      Array.from(keyByPointer.entries()).map(async ([key, parsed]) => {
+        const signedRes = await storageClient.storage
+          .from(parsed.bucket)
+          .createSignedUrl(parsed.path, clampedTtl);
+        if (!signedRes.error && signedRes.data?.signedUrl) {
+          signedUrlByKey.set(key, signedRes.data.signedUrl);
+        }
+      }),
+    );
+  }
 
   return rows.map((pin) => {
-    const pointer = String(pin?.media_url || '').trim();
-    const parsed = parseStorageMediaPointer(pointer);
-    if (!parsed) return pin;
-    const key = `${parsed.bucket}::${parsed.path}`;
-    const signedUrl = signedUrlByKey.get(key);
-    if (!signedUrl) return pin;
+    const mediaValues = readCandidateMediaList(pin);
+    const resolvedUrls = dedupeStrings(
+      mediaValues.map((value) => {
+        const parsed = parseStorageMediaPointer(value);
+        if (!parsed) return value;
+        const key = `${parsed.bucket}::${parsed.path}`;
+        return String(signedUrlByKey.get(key) || value);
+      }),
+    );
+    const firstPointer = mediaValues
+      .map((value) => parseStorageMediaPointer(value))
+      .find(Boolean);
+
     return {
       ...pin,
-      media_url: signedUrl,
-      media_storage_bucket: parsed.bucket,
-      media_storage_path: parsed.path,
+      media_urls: resolvedUrls,
+      media_url: resolvedUrls[0] || null,
+      media_storage_bucket: firstPointer?.bucket || pin?.media_storage_bucket || null,
+      media_storage_path: firstPointer?.path || pin?.media_storage_path || null,
     };
   });
 };

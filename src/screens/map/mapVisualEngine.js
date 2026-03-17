@@ -2,8 +2,9 @@ const CLOUD_MIN_POST_COUNT = 2;
 const CLOUD_RADIUS_PADDING_METERS = 40;
 const CLOUD_MIN_RADIUS_METERS = 120;
 const CLOUD_MAX_RADIUS_METERS = 1000;
-const CLUSTER_DISTANCE_PX = 52;
-const CLUSTER_MERGE_DISTANCE_PX = 58;
+// Reduced sensitivity so nearby pins stay separate longer before becoming clouds.
+const CLUSTER_DISTANCE_PX = 44;
+const CLUSTER_MERGE_DISTANCE_PX = 50;
 const CLUSTER_VIEWPORT_PADDING_PX = 160;
 
 const toRadians = (degrees) => (degrees * Math.PI) / 180;
@@ -330,10 +331,21 @@ const mergeNearbyClouds = (clouds, mapRegion, mapSize) => {
   return merged;
 };
 
-export const computeMapVisuals = (posts, mapRegion, mapSize, focusedPinId = null) => {
+export const computeMapVisuals = (
+  posts,
+  mapRegion,
+  mapSize,
+  focusedPinId = null,
+  options = {},
+) => {
   const normalizedPosts = (Array.isArray(posts) ? posts : []).filter(
     hasValidCoordinate,
   );
+  const cloudsEnabled = options?.cloudsEnabled !== false;
+
+  if (!cloudsEnabled) {
+    return { visiblePins: normalizedPosts, visibleClouds: [] };
+  }
 
   const baseClusters = buildCloudsFromPosts(
     normalizedPosts,
