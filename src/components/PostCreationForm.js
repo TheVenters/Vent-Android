@@ -54,16 +54,18 @@ const MEDIA_SOURCE = {
 const SHUTTER_RECORD_LONG_PRESS_DELAY_MS = 220;
 const CAMERA_ZOOM_STEP = 0.12;
 const CAMERA_READY_STABILIZE_MS = 20;
-const CAMERA_MODE_SWITCH_TIMEOUT_MS = 1400;
-const PHOTO_CAPTURE_ANDROID_STABILIZE_MS = 320;
+const VIDEO_READY_STABILIZE_MS = 450;
+const CAMERA_READY_TIMEOUT_MS = 3200;
 const PHOTO_CAPTURE_RETRY_DELAY_MS = 220;
 const RECORD_RETRY_DELAY_MS = 160;
-const MIN_VIDEO_RECORDING_MS = 1300;
+const MIN_VIDEO_CLIP_AFTER_START_MS = 700;
 const STOP_FINALIZE_TIMEOUT_MS = 12000;
 const SECONDARY_STOP_PULSE_DELAY_MS = 1400;
 const DEBUG_CAPTURE_GESTURES = true;
 const IS_EXPO_GO =
   Platform.OS === "android" && String(Constants?.appOwnership || "") === "expo";
+const SHOULD_USE_SYSTEM_CAMERA_FALLBACK =
+  Platform.OS === "android" || IS_EXPO_GO;
 
 const POST_AUDIENCE = {
   FRIENDS: "friends",
@@ -132,7 +134,8 @@ const PostCreationForm = ({
   const insets = useSafeAreaInsets();
   const styles = createStyles(palette, isDark, insets);
   const brandAssets = useMemo(() => getBrandAssetsForTheme(isDark), [isDark]);
-  const cameraRef = useRef(null);
+  const pictureCameraRef = useRef(null);
+  const videoCameraRef = useRef(null);
   const optionsExpandProgress = useSharedValue(0);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [microphonePermission, requestMicrophonePermission] =
@@ -151,9 +154,12 @@ const PostCreationForm = ({
   const [activeOptionsTab, setActiveOptionsTab] = useState("settings");
   const [cameraFacing, setCameraFacing] = useState("back");
   const [cameraFlashMode, setCameraFlashMode] = useState("off");
-  const [cameraMode, setCameraMode] = useState("video");
+  const [cameraMode, setCameraMode] = useState("picture");
+  const [renderedCameraMode, setRenderedCameraMode] = useState("picture");
   const [cameraZoom, setCameraZoom] = useState(0);
   const [cameraReady, setCameraReady] = useState(false);
+  const [pictureCameraSessionKey, setPictureCameraSessionKey] = useState(0);
+  const [videoCameraSessionKey, setVideoCameraSessionKey] = useState(0);
   const [isCapturing, setIsCapturing] = useState(false);
   const [isVideoRecording, setIsVideoRecording] = useState(false);
   const [isVideoFinalizing, setIsVideoFinalizing] = useState(false);
@@ -171,18 +177,20 @@ const PostCreationForm = ({
   const shutterHoldTimerRef = useRef(null);
   const recordRetryTimerRef = useRef(null);
   const recordStartInFlightRef = useRef(false);
-  const cameraReadyAtRef = useRef(0);
-  const cameraModeSwitchAtRef = useRef(0);
+  const pictureCameraReadyAtRef = useRef(0);
+  const videoCameraReadyAtRef = useRef(0);
   const recordingStartedAtRef = useRef(0);
   const activeRecordPromiseRef = useRef(null);
   const stopRecordingRequestedRef = useRef(false);
   const forceStopFinalizeTimerRef = useRef(null);
   const scheduledStopTimerRef = useRef(null);
+  const cameraModeSwapTimerRef = useRef(null);
   const shutterPressActiveRef = useRef(false);
   const shutterLongPressActiveRef = useRef(false);
   const suppressNextShutterTapRef = useRef(false);
-  const cameraModeRef = useRef("video");
-  const cameraReadyRef = useRef(false);
+  const pendingStopAfterRecordingStartsRef = useRef(false);
+  const pictureCameraReadyRef = useRef(false);
+  const videoCameraReadyRef = useRef(false);
   const isVideoRecordingRef = useRef(false);
   const isVideoFinalizingRef = useRef(false);
   const pinchStartZoomRef = useRef(0);
@@ -229,48 +237,30 @@ const PostCreationForm = ({
     }
   };
 
-  const waitForCameraReadyInMode = async (
-    targetMode,
+  const waitForCameraReady = async (
     reason = "unknown",
     minimumReadyMs = CAMERA_READY_STABILIZE_MS,
   ) => {
-    const normalizedTargetMode = String(targetMode || "").trim() || "picture";
-    const switchStartedAt = Date.now();
-
-    if (cameraModeRef.current !== normalizedTargetMode) {
-      logCapture("switching camera mode", {
-        reason,
-        from: cameraModeRef.current,
-        to: normalizedTargetMode,
-      });
-      cameraReadyRef.current = false;
-      setCameraReady(false);
-      cameraReadyAtRef.current = 0;
-      cameraModeSwitchAtRef.current = switchStartedAt;
-      setCameraMode(normalizedTargetMode);
-    }
-
-    while (Date.now() - switchStartedAt < CAMERA_MODE_SWITCH_TIMEOUT_MS) {
+    const waitStartedAt = Date.now();
+    while (Date.now() - waitStartedAt < CAMERA_READY_TIMEOUT_MS) {
+      const isVideoCamera = reason.startsWith("video");
+      const readyAt = isVideoCamera
+        ? videoCameraReadyAtRef.current
+        : pictureCameraReadyAtRef.current;
       const readyElapsedMs =
-        cameraReadyAtRef.current > 0
-          ? Date.now() - Number(cameraReadyAtRef.current)
-          : null;
-      const modeSettled = cameraModeRef.current === normalizedTargetMode;
+        readyAt > 0 ? Date.now() - Number(readyAt) : null;
       if (
-        modeSettled &&
-        cameraReadyRef.current &&
+        (isVideoCamera ? videoCameraReadyRef.current : pictureCameraReadyRef.current) &&
         Number.isFinite(readyElapsedMs) &&
         Number(readyElapsedMs || 0) >= minimumReadyMs &&
-        cameraRef.current
+        (isVideoCamera ? videoCameraRef.current : pictureCameraRef.current)
       ) {
         return true;
       }
       await new Promise((resolve) => setTimeout(resolve, 40));
     }
 
-    throw new Error(
-      `Camera did not become ready in ${normalizedTargetMode} mode.`,
-    );
+    throw new Error(`Camera did not become ready for ${reason}.`);
   };
 
   const clearRecordRetryTimer = () => {
@@ -283,14 +273,6 @@ const PostCreationForm = ({
   useEffect(() => {
     isVideoRecordingRef.current = isVideoRecording;
   }, [isVideoRecording]);
-
-  useEffect(() => {
-    cameraModeRef.current = cameraMode;
-  }, [cameraMode]);
-
-  useEffect(() => {
-    cameraReadyRef.current = cameraReady;
-  }, [cameraReady]);
 
   useEffect(() => {
     isVideoFinalizingRef.current = isVideoFinalizing;
@@ -310,6 +292,47 @@ const PostCreationForm = ({
     }
   };
 
+  const clearCameraModeSwapTimer = () => {
+    if (cameraModeSwapTimerRef.current) {
+      clearTimeout(cameraModeSwapTimerRef.current);
+      cameraModeSwapTimerRef.current = null;
+    }
+  };
+
+  const remountCameraForMode = (nextMode) => {
+    clearCameraModeSwapTimer();
+    setRenderedCameraMode(null);
+    setCameraReady(false);
+    cameraModeSwapTimerRef.current = setTimeout(() => {
+      cameraModeSwapTimerRef.current = null;
+      setRenderedCameraMode(nextMode);
+    }, 80);
+  };
+
+  const switchCameraMode = (nextMode) => {
+    setPendingHoldRecordStart(false);
+    clearRecordRetryTimer();
+    clearScheduledStopTimer();
+    clearForceStopFinalizeTimer();
+    stopRecordingRequestedRef.current = false;
+    setIsVideoRecording(false);
+    setIsVideoFinalizing(false);
+    isVideoRecordingRef.current = false;
+    isVideoFinalizingRef.current = false;
+    if (nextMode === "picture") {
+      pictureCameraReadyRef.current = false;
+      pictureCameraReadyAtRef.current = 0;
+      setPictureCameraSessionKey((value) => value + 1);
+    } else {
+      videoCameraReadyRef.current = false;
+      videoCameraReadyAtRef.current = 0;
+      setVideoCameraSessionKey((value) => value + 1);
+    }
+    setCameraReady(false);
+    setCameraMode(nextMode);
+    remountCameraForMode(nextMode);
+  };
+
   const scheduleRecordRetry = (reason) => {
     if (recordRetryTimerRef.current) return;
     const shouldRetry =
@@ -327,13 +350,13 @@ const PostCreationForm = ({
   };
 
   const safelyStopRecording = () => {
-    const stopRecording = cameraRef.current?.stopRecording;
+    const stopRecording = videoCameraRef.current?.stopRecording;
     if (typeof stopRecording !== "function") {
       logCapture("stopRecording function missing");
       return false;
     }
     try {
-      const stopResult = cameraRef.current.stopRecording();
+      const stopResult = videoCameraRef.current.stopRecording();
       if (stopResult && typeof stopResult.then === "function") {
         stopResult.catch(() => {});
       }
@@ -407,9 +430,12 @@ const PostCreationForm = ({
     setActiveOptionsTab("settings");
     setCameraFacing("back");
     setCameraFlashMode("off");
-    setCameraMode("video");
+    setCameraMode("picture");
+    setRenderedCameraMode("picture");
     setCameraZoom(0);
     setCameraReady(false);
+    setPictureCameraSessionKey(0);
+    setVideoCameraSessionKey(0);
     setIsVideoRecording(false);
     setIsVideoFinalizing(false);
     setPendingHoldRecordStart(false);
@@ -424,6 +450,9 @@ const PostCreationForm = ({
     if (!microphonePermission?.granted) {
       requestMicrophonePermission().catch(() => {});
     }
+    return () => {
+      clearCameraModeSwapTimer();
+    };
   }, [
     visible,
     cameraPermission?.granted,
@@ -480,6 +509,7 @@ const PostCreationForm = ({
     clearRecordRetryTimer();
     clearForceStopFinalizeTimer();
     clearScheduledStopTimer();
+    clearCameraModeSwapTimer();
     setTitle("");
     setDescription("");
     setGeometryType(GEOMETRY_TYPES.POINT);
@@ -492,9 +522,12 @@ const PostCreationForm = ({
     setActiveOptionsTab("settings");
     setCameraFacing("back");
     setCameraFlashMode("off");
-    setCameraMode("video");
+    setCameraMode("picture");
+    setRenderedCameraMode("picture");
     setCameraZoom(0);
     setCameraReady(false);
+    setPictureCameraSessionKey(0);
+    setVideoCameraSessionKey(0);
     setIsVideoRecording(false);
     setPendingHoldRecordStart(false);
     setIsPhotoPreviewVisible(false);
@@ -507,8 +540,8 @@ const PostCreationForm = ({
     pendingVentHoldRecordRef.current = false;
     recordStartInFlightRef.current = false;
     pinchStartZoomRef.current = 0;
-    cameraReadyAtRef.current = 0;
-    cameraModeSwitchAtRef.current = 0;
+    pictureCameraReadyAtRef.current = 0;
+    videoCameraReadyAtRef.current = 0;
     recordingStartedAtRef.current = 0;
     activeRecordPromiseRef.current = null;
     stopRecordingRequestedRef.current = false;
@@ -646,26 +679,20 @@ const PostCreationForm = ({
         return;
       }
     }
-    if (!cameraRef.current) {
+    if (!pictureCameraRef.current) {
       Alert.alert("Camera Not Ready", "Camera is still initializing.");
       return;
     }
 
     try {
       setIsCapturing(true);
-      await waitForCameraReadyInMode(
-        "picture",
-        "photo_capture",
-        Platform.OS === "android"
-          ? PHOTO_CAPTURE_ANDROID_STABILIZE_MS
-          : CAMERA_READY_STABILIZE_MS,
-      );
+      await waitForCameraReady("photo_capture");
       const takePhoto = async () =>
-        (await cameraRef.current?.takePictureAsync?.({
+        (await pictureCameraRef.current?.takePictureAsync?.({
           quality: 0.8,
           skipProcessing: false,
         })) ||
-        (await cameraRef.current?.takePicture?.({
+        (await pictureCameraRef.current?.takePicture?.({
           quality: 0.8,
           skipProcessing: false,
         }));
@@ -688,11 +715,7 @@ const PostCreationForm = ({
         await new Promise((resolve) =>
           setTimeout(resolve, PHOTO_CAPTURE_RETRY_DELAY_MS),
         );
-        await waitForCameraReadyInMode(
-          "picture",
-          "photo_capture_retry",
-          PHOTO_CAPTURE_ANDROID_STABILIZE_MS,
-        );
+        await waitForCameraReady("photo_capture_retry");
         photo = await takePhoto();
       }
 
@@ -710,10 +733,12 @@ const PostCreationForm = ({
       logCapture("photo appended", { uri: String(photo.uri || "").slice(0, 160) });
       persistCapturedMediaLocally(photo.uri, "photo");
     } catch (error) {
-      if (IS_EXPO_GO) {
+      if (SHOULD_USE_SYSTEM_CAMERA_FALLBACK) {
         try {
           logCapture("photo capture fallback to system camera", {
             message: String(error?.message || error || ""),
+            platform: Platform.OS,
+            expoOwnership: String(Constants?.appOwnership || ""),
           });
           const fallbackPhoto = await capturePhotoViaSystemCamera();
           if (fallbackPhoto) {
@@ -733,11 +758,10 @@ const PostCreationForm = ({
         }
       }
       logCapture("photo capture failed", {
-        cameraMode,
         cameraReady,
         readyElapsedMs:
-          cameraReadyAtRef.current > 0
-            ? Date.now() - Number(cameraReadyAtRef.current)
+          pictureCameraReadyAtRef.current > 0
+            ? Date.now() - Number(pictureCameraReadyAtRef.current)
             : null,
         message: String(error?.message || error || ""),
       });
@@ -745,12 +769,9 @@ const PostCreationForm = ({
       Alert.alert("Capture Failed", "Unable to capture photo right now.");
     } finally {
       setIsCapturing(false);
-      if (cameraMode !== "video") {
-        setCameraReady(false);
-        cameraReadyAtRef.current = 0;
-        cameraModeSwitchAtRef.current = Date.now();
-        setCameraMode("video");
-      }
+      pictureCameraReadyAtRef.current = Date.now();
+      pictureCameraReadyRef.current = true;
+      setCameraReady(true);
     }
   };
 
@@ -792,10 +813,7 @@ const PostCreationForm = ({
         setIsVideoFinalizing(false);
         isVideoRecordingRef.current = false;
         isVideoFinalizingRef.current = false;
-        setCameraReady(false);
-        cameraReadyAtRef.current = 0;
-        cameraModeSwitchAtRef.current = Date.now();
-        setCameraMode("video");
+        switchCameraMode("picture");
       }, STOP_FINALIZE_TIMEOUT_MS);
     };
 
@@ -807,10 +825,7 @@ const PostCreationForm = ({
       setIsVideoFinalizing(false);
       isVideoRecordingRef.current = false;
       isVideoFinalizingRef.current = false;
-      setCameraReady(false);
-      cameraReadyAtRef.current = 0;
-      cameraModeSwitchAtRef.current = Date.now();
-      setCameraMode("video");
+      switchCameraMode("picture");
       return;
     }
 
@@ -818,11 +833,15 @@ const PostCreationForm = ({
       recordingStartedAtRef.current > 0
         ? Date.now() - Number(recordingStartedAtRef.current)
         : null;
-    const needsDelay =
-      Number.isFinite(elapsedMs) && Number(elapsedMs) < MIN_VIDEO_RECORDING_MS;
-    if (needsDelay) {
-      const waitMs = Math.max(0, MIN_VIDEO_RECORDING_MS - Number(elapsedMs));
-      logCapture("delaying stop for minimum video duration", {
+    if (
+      Number.isFinite(elapsedMs) &&
+      Number(elapsedMs || 0) < MIN_VIDEO_CLIP_AFTER_START_MS
+    ) {
+      const waitMs = Math.max(
+        0,
+        MIN_VIDEO_CLIP_AFTER_START_MS - Number(elapsedMs || 0),
+      );
+      logCapture("delaying stop for minimum clip", {
         elapsedMs,
         waitMs,
       });
@@ -877,41 +896,29 @@ const PostCreationForm = ({
       }
     }
 
-    if (!cameraRef.current) {
+    if (!videoCameraRef.current) {
       logCapture("camera ref missing", { source });
       setPendingHoldRecordStart(true);
       scheduleRecordRetry("camera_ref_missing");
       return;
     }
 
-    if (cameraMode !== "video") {
-      logCapture("switching mode to video for recording", { source, cameraMode });
-      setCameraReady(false);
-      cameraReadyAtRef.current = 0;
-      cameraModeSwitchAtRef.current = Date.now();
-      setCameraMode("video");
-      setPendingHoldRecordStart(true);
-      scheduleRecordRetry("switch_mode_video");
-      return;
-    }
-
     const readyElapsedMs =
-      cameraReadyAtRef.current > 0
-        ? Date.now() - Number(cameraReadyAtRef.current)
+      videoCameraReadyAtRef.current > 0
+        ? Date.now() - Number(videoCameraReadyAtRef.current)
         : null;
+    const minimumReadyMs =
+      cameraMode === "video" ? VIDEO_READY_STABILIZE_MS : CAMERA_READY_STABILIZE_MS;
     if (
-      !cameraReady ||
+      !videoCameraReadyRef.current ||
       !Number.isFinite(readyElapsedMs) ||
-      Number(readyElapsedMs || 0) < CAMERA_READY_STABILIZE_MS
+      Number(readyElapsedMs || 0) < minimumReadyMs
     ) {
       logCapture("waiting for camera ready", {
         source,
-        cameraReady,
+        cameraReady: videoCameraReadyRef.current,
         readyElapsedMs,
-        sinceModeSwitchMs:
-          cameraModeSwitchAtRef.current > 0
-            ? Date.now() - Number(cameraModeSwitchAtRef.current)
-            : null,
+        minimumReadyMs,
       });
       setPendingHoldRecordStart(true);
       scheduleRecordRetry("await_camera_ready");
@@ -919,7 +926,7 @@ const PostCreationForm = ({
     }
     logCapture("attempt record start", {
       source,
-      cameraReady,
+      cameraReady: videoCameraReadyRef.current,
       readyElapsedMs,
     });
 
@@ -935,13 +942,13 @@ const PostCreationForm = ({
         ...(Platform.OS === "ios" ? { codec: "avc1" } : {}),
       };
       const recordPromise =
-        (typeof cameraRef.current?.recordAsync === "function"
-          ? cameraRef.current.recordAsync({
+        (typeof videoCameraRef.current?.recordAsync === "function"
+          ? videoCameraRef.current.recordAsync({
               ...recordOptions,
             })
           : null) ||
-        (typeof cameraRef.current?.record === "function"
-          ? cameraRef.current.record({
+        (typeof videoCameraRef.current?.record === "function"
+          ? videoCameraRef.current.record({
               ...recordOptions,
             })
           : null);
@@ -953,6 +960,14 @@ const PostCreationForm = ({
       setIsVideoRecording(true);
       isVideoRecordingRef.current = true;
       logCapture("recording started", { source });
+      if (
+        pendingStopAfterRecordingStartsRef.current &&
+        !stopRecordingRequestedRef.current
+      ) {
+        logCapture("stopping immediately after recording start");
+        pendingStopAfterRecordingStartsRef.current = false;
+        stopVideoRecording();
+      }
       const video = await recordPromise;
       logCapture("record promise resolved", {
         source,
@@ -988,6 +1003,7 @@ const PostCreationForm = ({
     } finally {
       clearForceStopFinalizeTimer();
       clearScheduledStopTimer();
+      pendingStopAfterRecordingStartsRef.current = false;
       activeRecordPromiseRef.current = null;
       recordingStartedAtRef.current = 0;
       recordStartInFlightRef.current = false;
@@ -997,19 +1013,11 @@ const PostCreationForm = ({
       setIsVideoFinalizing(false);
       isVideoFinalizingRef.current = false;
       if (shouldStayInVideoMode) {
-        logCapture("record finalize keep video mode", { source });
+        logCapture("record finalize keep camera ready", { source });
         return;
       }
-      if (cameraMode !== "video") {
-        setCameraReady(false);
-        cameraReadyAtRef.current = 0;
-        cameraModeSwitchAtRef.current = Date.now();
-        setCameraMode("video");
-      } else {
-        cameraReadyAtRef.current = Date.now();
-        setCameraReady(true);
-      }
-      logCapture("record finalize keep camera video-ready", { source });
+      logCapture("record finalize restore picture mode", { source });
+      switchCameraMode("picture");
     }
   };
 
@@ -1089,15 +1097,38 @@ const PostCreationForm = ({
       shutterLongPressActiveRef.current = true;
       suppressNextShutterTapRef.current = true;
       logCapture("shutter hold threshold reached");
+      if (cameraMode !== "video" || renderedCameraMode !== "video") {
+        logCapture("switching to video for hold record");
+        setCameraMode("video");
+        setPendingHoldRecordStart(true);
+        videoCameraReadyRef.current = false;
+        videoCameraReadyAtRef.current = 0;
+        setVideoCameraSessionKey((value) => value + 1);
+        setCameraReady(false);
+        remountCameraForMode("video");
+        return;
+      }
       startVideoRecording({ source: "shutter_hold" });
     }, SHUTTER_RECORD_LONG_PRESS_DELAY_MS);
   };
 
   const handleShutterPressOut = () => {
+    const isVideoGesture =
+      shutterLongPressActiveRef.current ||
+      pendingHoldRecordStart ||
+      isVideoRecordingRef.current ||
+      renderedCameraMode === "video";
     logCapture("shutter press out", {
       isVideoRecording: isVideoRecordingRef.current,
       isLongPress: shutterLongPressActiveRef.current,
+      isVideoGesture,
     });
+    if (!isVideoGesture) {
+      shutterPressActiveRef.current = false;
+      void captureFromLiveCamera();
+      shutterLongPressActiveRef.current = false;
+      return;
+    }
     shutterPressActiveRef.current = false;
     setPendingHoldRecordStart(false);
     if (shutterHoldTimerRef.current) {
@@ -1113,11 +1144,15 @@ const PostCreationForm = ({
       isVideoRecordingRef.current
     ) {
       suppressNextShutterTapRef.current = true;
+      if (!isVideoRecordingRef.current) {
+        pendingStopAfterRecordingStartsRef.current = true;
+        shutterLongPressActiveRef.current = false;
+        return;
+      }
       stopVideoRecording();
       shutterLongPressActiveRef.current = false;
       return;
     }
-    void captureFromLiveCamera();
     shutterLongPressActiveRef.current = false;
   };
 
@@ -1426,7 +1461,7 @@ const PostCreationForm = ({
           style={styles.overlay}
         >
           <View style={styles.stage}>
-          {showLiveCamera ? (
+          {showLiveCamera && renderedCameraMode === "picture" ? (
             cameraPermission?.granted ? (
               <PinchGestureHandler
                 onGestureEvent={handlePinchGestureEvent}
@@ -1434,23 +1469,32 @@ const PostCreationForm = ({
               >
                 <View style={styles.cameraGestureSurface}>
                   <CameraView
-                    key={`camera-${cameraFacing}-${cameraMode}`}
-                    ref={cameraRef}
+                    key={`picture-camera-${cameraFacing}-${pictureCameraSessionKey}`}
+                    ref={pictureCameraRef}
                     style={styles.cameraFill}
                     facing={cameraFacing}
                     flash={cameraFlashMode}
-                    mode={cameraMode}
+                    mode="picture"
                     zoom={cameraZoom}
                     onCameraReady={() => {
-                      cameraReadyAtRef.current = Date.now();
-                      cameraReadyRef.current = true;
-                      setCameraReady(true);
-                      logCapture("camera ready", { cameraFacing, cameraMode });
+                      pictureCameraReadyAtRef.current = Date.now();
+                      pictureCameraReadyRef.current = true;
+                      if (renderedCameraMode === "picture") {
+                        setCameraReady(true);
+                      }
+                      logCapture("camera ready", {
+                        cameraFacing,
+                        cameraMode: "picture",
+                      });
                     }}
                     onMountError={(event) => {
-                      cameraReadyRef.current = false;
+                      pictureCameraReadyRef.current = false;
+                      if (renderedCameraMode === "picture") {
+                        setCameraReady(false);
+                      }
                       logCapture("camera mount error", {
                         message: String(event?.nativeEvent?.message || ""),
+                        cameraMode: "picture",
                       });
                     }}
                   />
@@ -1470,6 +1514,38 @@ const PostCreationForm = ({
                 </TouchableOpacity>
               </View>
             )
+          ) : null}
+
+          {showLiveCamera && renderedCameraMode === "video" ? (
+            <View style={styles.videoRecorderOverlay}>
+              <CameraView
+                key={`video-camera-${cameraFacing}-${videoCameraSessionKey}`}
+                ref={videoCameraRef}
+                style={styles.cameraFill}
+                facing={cameraFacing}
+                flash={cameraFlashMode}
+                mode="video"
+                zoom={cameraZoom}
+                onCameraReady={() => {
+                  videoCameraReadyAtRef.current = Date.now();
+                  videoCameraReadyRef.current = true;
+                  setCameraReady(true);
+                  logCapture("camera ready", {
+                    cameraFacing,
+                    cameraMode: "video",
+                  });
+                }}
+                onMountError={(event) => {
+                  videoCameraReadyRef.current = false;
+                  setCameraReady(false);
+                  logCapture("camera mount error", {
+                    message: String(event?.nativeEvent?.message || ""),
+                    cameraMode: "video",
+                  });
+                }}
+              />
+              <View style={styles.videoRecorderShade} pointerEvents="none" />
+            </View>
           ) : null}
 
           <View style={styles.shade} pointerEvents="none" />
@@ -1518,8 +1594,14 @@ const PostCreationForm = ({
               style={styles.cameraQuickControlBtn}
               onPress={() => {
                 setCameraReady(false);
-                cameraReadyAtRef.current = 0;
+                pictureCameraReadyRef.current = false;
+                videoCameraReadyRef.current = false;
+                pictureCameraReadyAtRef.current = 0;
+                videoCameraReadyAtRef.current = 0;
+                setPictureCameraSessionKey((value) => value + 1);
+                setVideoCameraSessionKey((value) => value + 1);
                 setCameraFacing((prev) => (prev === "back" ? "front" : "back"));
+                remountCameraForMode(cameraMode);
               }}
             >
               <Text style={styles.cameraQuickControlText}>⇄</Text>
@@ -1545,7 +1627,9 @@ const PostCreationForm = ({
 
           <View style={styles.captureHintBadge}>
             <Text style={styles.captureHintText}>
-              Tap for photo. Hold for video. Pinch to zoom.
+              {renderedCameraMode === "video"
+                ? "Release to save video. Pinch to zoom."
+                : "Tap for photo, hold for video. Pinch to zoom."}
             </Text>
           </View>
 
@@ -2040,6 +2124,15 @@ const createStyles = (palette, isDark, insets = { top: 0, bottom: 0 }) =>
     },
     cameraFill: {
       ...StyleSheet.absoluteFillObject,
+    },
+    videoRecorderOverlay: {
+      ...StyleSheet.absoluteFillObject,
+      zIndex: 2,
+      backgroundColor: "#050816",
+    },
+    videoRecorderShade: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: "rgba(2, 6, 23, 0.14)",
     },
     cameraFallback: {
       ...StyleSheet.absoluteFillObject,
