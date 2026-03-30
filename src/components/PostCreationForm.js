@@ -53,6 +53,7 @@ const MEDIA_SOURCE = {
 
 const SHUTTER_RECORD_LONG_PRESS_DELAY_MS = 220;
 const CAMERA_ZOOM_STEP = 0.12;
+const CAMERA_VISIBLE_ZOOM_FLOOR = 0.1;
 const CAMERA_READY_STABILIZE_MS = 20;
 const VIDEO_READY_STABILIZE_MS = 450;
 const CAMERA_READY_TIMEOUT_MS = 3200;
@@ -61,7 +62,7 @@ const RECORD_RETRY_DELAY_MS = 160;
 const MIN_VIDEO_CLIP_AFTER_START_MS = 700;
 const STOP_FINALIZE_TIMEOUT_MS = 12000;
 const SECONDARY_STOP_PULSE_DELAY_MS = 1400;
-const DEBUG_CAPTURE_GESTURES = true;
+const DEBUG_CAPTURE_GESTURES = false;
 const IS_EXPO_GO =
   Platform.OS === "android" && String(Constants?.appOwnership || "") === "expo";
 const SHOULD_USE_SYSTEM_CAMERA_FALLBACK =
@@ -121,6 +122,15 @@ const clampNormalizedZoom = (value) => {
   return Math.max(0, Math.min(1, value));
 };
 
+const applyVisibleZoomFloor = (value) => {
+  const normalized = clampNormalizedZoom(value);
+  if (normalized <= 0) return 0;
+  if (normalized < CAMERA_VISIBLE_ZOOM_FLOOR) {
+    return CAMERA_VISIBLE_ZOOM_FLOOR;
+  }
+  return normalized;
+};
+
 const PostCreationForm = ({
   visible,
   onClose,
@@ -142,7 +152,6 @@ const PostCreationForm = ({
     useMicrophonePermissions();
 
   const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
   const [geometryType, setGeometryType] = useState(GEOMETRY_TYPES.POINT);
   const [selectedCommunityLayerId, setSelectedCommunityLayerId] =
     useState(null);
@@ -192,6 +201,9 @@ const PostCreationForm = ({
   const videoCameraReadyRef = useRef(false);
   const isVideoRecordingRef = useRef(false);
   const isVideoFinalizingRef = useRef(false);
+  const cameraZoomRef = useRef(0);
+  const zoomAnimationFrameRef = useRef(null);
+  const pendingZoomRef = useRef(0);
   const pinchStartZoomRef = useRef(0);
   const pinchLastLogAtRef = useRef(0);
 
@@ -415,7 +427,6 @@ const PostCreationForm = ({
   useEffect(() => {
     if (!visible) return;
     setTitle("");
-    setDescription("");
     setBaseAudience(POST_AUDIENCE.FRIENDS);
     setSelectedCommunityLayerId(null);
     setOpenDropdown(null);
@@ -504,6 +515,38 @@ const PostCreationForm = ({
     return MEDIA_SOURCE.CAMERA;
   }, [normalizedMediaItems]);
 
+  useEffect(() => {
+    cameraZoomRef.current = Number(cameraZoom || 0);
+    pendingZoomRef.current = Number(cameraZoom || 0);
+  }, [cameraZoom]);
+
+  useEffect(
+    () => () => {
+      if (zoomAnimationFrameRef.current != null) {
+        cancelAnimationFrame(zoomAnimationFrameRef.current);
+        zoomAnimationFrameRef.current = null;
+      }
+    },
+    [],
+  );
+
+  const flushZoomUpdate = (nextZoom) => {
+    const clampedZoom = clampNormalizedZoom(Number(nextZoom || 0));
+    pendingZoomRef.current = clampedZoom;
+    if (zoomAnimationFrameRef.current != null) return;
+    zoomAnimationFrameRef.current = requestAnimationFrame(() => {
+      zoomAnimationFrameRef.current = null;
+      const committedZoom = clampNormalizedZoom(Number(pendingZoomRef.current || 0));
+      cameraZoomRef.current = committedZoom;
+      setCameraZoom((prev) => {
+        if (Math.abs(Number(prev || 0) - committedZoom) < 0.001) {
+          return prev;
+        }
+        return committedZoom;
+      });
+    });
+  };
+
   const resetForm = () => {
     safelyStopRecording();
     if (shutterHoldTimerRef.current) {
@@ -515,7 +558,6 @@ const PostCreationForm = ({
     clearScheduledStopTimer();
     clearCameraModeSwapTimer();
     setTitle("");
-    setDescription("");
     setGeometryType(GEOMETRY_TYPES.POINT);
     setSelectedCommunityLayerId(null);
     setLocationMode(LOCATION_MODES.CURRENT);
@@ -590,7 +632,7 @@ const PostCreationForm = ({
 
     onSubmit({
       title: title.trim(),
-      content: description.trim(),
+      content: "",
       geometryType,
       locationMode,
       location:
@@ -1167,18 +1209,24 @@ const PostCreationForm = ({
   };
 
   const adjustCameraZoom = (direction) => {
-    setCameraZoom((prev) => {
-      const delta = direction === "in" ? CAMERA_ZOOM_STEP : -CAMERA_ZOOM_STEP;
-      const next = Number(prev || 0) + delta;
-      return clampNormalizedZoom(next);
-    });
+    const delta = direction === "in" ? CAMERA_ZOOM_STEP : -CAMERA_ZOOM_STEP;
+    const rawNext = Number(cameraZoomRef.current || 0) + delta;
+    const next =
+      rawNext <= 0 ? 0 : applyVisibleZoomFloor(rawNext);
+    cameraZoomRef.current = next;
+    pendingZoomRef.current = next;
+    setCameraZoom(next);
   };
 
   const handlePinchGestureEvent = (event) => {
     const scale = Number(event?.nativeEvent?.scale || 1);
     const nextZoom = pinchStartZoomRef.current + (scale - 1) * 0.35;
-    const clampedZoom = clampNormalizedZoom(nextZoom);
-    setCameraZoom(clampedZoom);
+    const clampedZoom =
+      nextZoom <= 0 ? 0 : applyVisibleZoomFloor(nextZoom);
+    if (Math.abs(clampedZoom - Number(cameraZoomRef.current || 0)) < 0.003) {
+      return;
+    }
+    flushZoomUpdate(clampedZoom);
     const now = Date.now();
     if (now - pinchLastLogAtRef.current >= 180) {
       pinchLastLogAtRef.current = now;
@@ -1190,8 +1238,8 @@ const PostCreationForm = ({
     const nextState = Number(event?.nativeEvent?.state);
     const scale = Number(event?.nativeEvent?.scale || 1);
     if (nextState === State.BEGAN) {
-      pinchStartZoomRef.current = cameraZoom;
-      logCapture("pinch began", { cameraZoom });
+      pinchStartZoomRef.current = Number(cameraZoomRef.current || 0);
+      logCapture("pinch began", { cameraZoom: cameraZoomRef.current });
       return;
     }
     if (
@@ -1200,8 +1248,13 @@ const PostCreationForm = ({
       nextState === State.FAILED
     ) {
       const nextZoom = pinchStartZoomRef.current + (scale - 1) * 0.35;
-      pinchStartZoomRef.current = clampNormalizedZoom(nextZoom);
-      logCapture("pinch ended", { nextZoom: pinchStartZoomRef.current });
+      const clampedZoom =
+        nextZoom <= 0 ? 0 : applyVisibleZoomFloor(nextZoom);
+      pinchStartZoomRef.current = clampedZoom;
+      cameraZoomRef.current = clampedZoom;
+      pendingZoomRef.current = clampedZoom;
+      setCameraZoom(clampedZoom);
+      logCapture("pinch ended", { nextZoom: clampedZoom });
     }
   };
 
@@ -1531,7 +1584,7 @@ const PostCreationForm = ({
     >
       <GestureHandlerRootView style={styles.gestureRoot}>
         <KeyboardAvoidingView
-          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
           style={styles.overlay}
         >
           <View style={styles.stage}>
@@ -1707,16 +1760,6 @@ const PostCreationForm = ({
               value={title}
               onChangeText={setTitle}
               maxLength={90}
-            />
-            <TextInput
-              style={styles.descriptionInput}
-              placeholder="Description"
-              placeholderTextColor="rgba(255,255,255,0.7)"
-              value={description}
-              onChangeText={setDescription}
-              maxLength={500}
-              multiline
-              textAlignVertical="top"
             />
           </View>
 
@@ -2605,19 +2648,6 @@ const createStyles = (palette, isDark, insets = { top: 0, bottom: 0 }) =>
       textShadowOffset: { width: 0, height: 2 },
       textShadowRadius: 5,
       minHeight: 34,
-      paddingTop: 2,
-      paddingBottom: 2,
-    },
-    descriptionInput: {
-      color: "rgba(255,255,255,0.94)",
-      fontSize: 15,
-      lineHeight: 21,
-      fontWeight: "600",
-      textShadowColor: "rgba(0,0,0,0.35)",
-      textShadowOffset: { width: 0, height: 1 },
-      textShadowRadius: 4,
-      minHeight: 72,
-      maxHeight: 132,
       paddingTop: 2,
       paddingBottom: 2,
     },
