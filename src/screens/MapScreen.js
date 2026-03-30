@@ -97,7 +97,7 @@ import {
   getMapCloudsEnabled,
 } from "../utils/mapPreferences";
 import {
-  hydrateAvatarUrl,
+  getProfileAvatarUrl,
   hydrateAvatarUrlsInRows,
 } from "../utils/avatarUrls";
 
@@ -3503,8 +3503,8 @@ useEffect(() => {
       );
       const optimisticMediaUrl = optimisticMediaUrls[0] || null;
       const optimisticMediaType = optimisticMediaTypes[0] || null;
-      const resolvedAuthorAvatarUrl = await hydrateAvatarUrl(
-        activeUser?.user_metadata?.avatar_url || null,
+      const resolvedAuthorAvatarUrl = await getProfileAvatarUrl(
+        activeUser?.id,
         session,
       );
       const optimisticRows = insertRows.map((row, index) => ({
@@ -4463,10 +4463,8 @@ useEffect(() => {
       }
     }
 
-    const optimisticAuthorAvatarUrl = await hydrateAvatarUrl(
-      session?.user?.user_metadata?.avatar_url ||
-        currentUser?.user_metadata?.avatar_url ||
-        null,
+    const optimisticAuthorAvatarUrl = await getProfileAvatarUrl(
+      session?.user?.id || currentUser?.id || null,
       session,
     );
     const optimisticComment = normalizePinComment({

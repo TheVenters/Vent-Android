@@ -8,6 +8,7 @@ import {
   TouchableOpacity,
   ScrollView,
   KeyboardAvoidingView,
+  Keyboard,
   Platform,
   Image,
   Alert,
@@ -74,6 +75,7 @@ const PinDetailModal = ({
   const [commentDraft, setCommentDraft] = useState("");
   const [replyToCommentId, setReplyToCommentId] = useState(null);
   const [expandedReplyThreads, setExpandedReplyThreads] = useState({});
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const modalMediaScrollRef = useRef(null);
   const photoViewerScrollRef = useRef(null);
   const lastInitializedPinIdRef = useRef(null);
@@ -241,6 +243,28 @@ const PinDetailModal = ({
       });
     });
   }, [activeMediaIndex, isPhotoViewerVisible, viewerWidth]);
+
+  useEffect(() => {
+    const showEvent =
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent =
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+
+    const handleKeyboardShow = (event) => {
+      setKeyboardHeight(Number(event?.endCoordinates?.height || 0));
+    };
+    const handleKeyboardHide = () => {
+      setKeyboardHeight(0);
+    };
+
+    const showSub = Keyboard.addListener(showEvent, handleKeyboardShow);
+    const hideSub = Keyboard.addListener(hideEvent, handleKeyboardHide);
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   const handleSave = () => {
     if (!caption.trim()) {
@@ -622,7 +646,8 @@ const PinDetailModal = ({
       onRequestClose={handleClose}
     >
       <KeyboardAvoidingView
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 18 : 0}
         style={styles.overlay}
       >
         <TouchableOpacity
@@ -913,104 +938,116 @@ const PinDetailModal = ({
                     : renderThreadToggle(row),
                 )
               )}
-
-              {canComment ? (
-                <View style={styles.commentComposer}>
-                  {replyingToComment && (
-                    <View style={styles.replyingBanner}>
-                      <Text style={styles.replyingBannerText}>
-                        Replying to{" "}
-                        {replyingToComment.author_username
-                          ? `@${replyingToComment.author_username}`
-                          : replyingToComment.author_name || "Anonymous"}
-                      </Text>
-                      <TouchableOpacity
-                        onPress={() => setReplyToCommentId(null)}
-                        disabled={isSubmittingComment}
-                      >
-                        <Text style={styles.replyingBannerCancel}>Cancel</Text>
-                      </TouchableOpacity>
-                    </View>
-                  )}
-                  <View style={styles.commentComposerRow}>
-                    <TextInput
-                      style={styles.commentInput}
-                      value={commentDraft}
-                      onChangeText={setCommentDraft}
-                      placeholder={
-                        replyingToComment ? "Write a reply..." : "Add a comment..."
-                      }
-                      editable={!isSubmittingComment}
-                      maxLength={500}
-                    />
-                    <TouchableOpacity
-                      style={[
-                        styles.commentSubmitButton,
-                        (!commentDraft.trim() || isSubmittingComment) &&
-                          styles.commentSubmitButtonDisabled,
-                      ]}
-                      disabled={!commentDraft.trim() || isSubmittingComment}
-                      onPress={handleSubmitComment}
-                    >
-                      <Text style={styles.commentSubmitText}>
-                        {isSubmittingComment
-                          ? "Posting..."
-                          : replyingToComment
-                            ? "Reply"
-                            : "Comment"}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              ) : !currentUserId ? (
-                <Text style={styles.commentHint}>Sign in to add comments</Text>
-              ) : null}
             </View>
           </ScrollView>
 
-          {/* Actions */}
-          {(isOwner || isAdmin) && (
-            <View style={styles.actions}>
-              {isEditing ? (
-                <>
-                  <TouchableOpacity
-                    style={styles.cancelButton}
-                    onPress={() => {
-                      setContent(pin.content || "");
-                      setCaption(pin.caption || "");
-                      setVisibility(normalizeVisibility(pin.layer));
-                      setIsEditing(false);
-                    }}
-                  >
-                    <Text style={styles.cancelText}>Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.saveButton}
-                    onPress={handleSave}
-                  >
-                    <Text style={styles.saveText}>Save</Text>
-                  </TouchableOpacity>
-                </>
-              ) : (
-                <>
-                  <TouchableOpacity
-                    style={styles.deleteButton}
-                    onPress={handleDelete}
-                  >
-                    <Text style={styles.deleteText}>Delete</Text>
-                  </TouchableOpacity>
-                  {isOwner && (
+          <View
+            style={[
+              styles.footer,
+              keyboardHeight > 0 && {
+                paddingBottom: Math.max(SIZES.sm, keyboardHeight - 24),
+              },
+            ]}
+          >
+            {canComment ? (
+              <View style={styles.commentComposer}>
+                {replyingToComment && (
+                  <View style={styles.replyingBanner}>
+                    <Text style={styles.replyingBannerText}>
+                      Replying to{" "}
+                      {replyingToComment.author_username
+                        ? `@${replyingToComment.author_username}`
+                        : replyingToComment.author_name || "Anonymous"}
+                    </Text>
                     <TouchableOpacity
-                      style={styles.editButton}
-                      onPress={() => setIsEditing(true)}
+                      onPress={() => setReplyToCommentId(null)}
+                      disabled={isSubmittingComment}
                     >
-                      <Text style={styles.editText}>Edit</Text>
+                      <Text style={styles.replyingBannerCancel}>Cancel</Text>
                     </TouchableOpacity>
-                  )}
-                </>
-              )}
-            </View>
-          )}
+                  </View>
+                )}
+                <View style={styles.commentComposerRow}>
+                  <TextInput
+                    style={styles.commentInput}
+                    value={commentDraft}
+                    onChangeText={setCommentDraft}
+                    placeholder={
+                      replyingToComment ? "Write a reply..." : "Add a comment..."
+                    }
+                    editable={!isSubmittingComment}
+                    maxLength={500}
+                    multiline
+                    textAlignVertical="top"
+                  />
+                  <TouchableOpacity
+                    style={[
+                      styles.commentSubmitButton,
+                      (!commentDraft.trim() || isSubmittingComment) &&
+                        styles.commentSubmitButtonDisabled,
+                    ]}
+                    disabled={!commentDraft.trim() || isSubmittingComment}
+                    onPress={handleSubmitComment}
+                  >
+                    <Text style={styles.commentSubmitText}>
+                      {isSubmittingComment
+                        ? "Posting..."
+                        : replyingToComment
+                          ? "Reply"
+                          : "Comment"}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ) : !currentUserId ? (
+              <View style={styles.footerHintWrap}>
+                <Text style={styles.commentHint}>Sign in to add comments</Text>
+              </View>
+            ) : null}
+
+            {(isOwner || isAdmin) && (
+              <View style={styles.actions}>
+                {isEditing ? (
+                  <>
+                    <TouchableOpacity
+                      style={styles.cancelButton}
+                      onPress={() => {
+                        setContent(pin.content || "");
+                        setCaption(pin.caption || "");
+                        setVisibility(normalizeVisibility(pin.layer));
+                        setIsEditing(false);
+                      }}
+                    >
+                      <Text style={styles.cancelText}>Cancel</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.saveButton}
+                      onPress={handleSave}
+                    >
+                      <Text style={styles.saveText}>Save</Text>
+                    </TouchableOpacity>
+                  </>
+                ) : (
+                  <>
+                    <TouchableOpacity
+                      style={styles.deleteButton}
+                      onPress={handleDelete}
+                    >
+                      <Text style={styles.deleteText}>Delete</Text>
+                    </TouchableOpacity>
+                    {isOwner && (
+                      <TouchableOpacity
+                        style={styles.editButton}
+                        onPress={() => setIsEditing(true)}
+                      >
+                        <Text style={styles.editText}>Edit</Text>
+                      </TouchableOpacity>
+                    )}
+                  </>
+                )}
+              </View>
+            )}
+          </View>
         </View>
 
         <Modal
@@ -1121,6 +1158,7 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: SIZES.radiusXl,
     borderTopRightRadius: SIZES.radiusXl,
     maxHeight: "88%",
+    overflow: "hidden",
   },
   header: {
     flexDirection: "row",
@@ -1157,6 +1195,11 @@ const styles = StyleSheet.create({
   content: {
     paddingHorizontal: SIZES.xl,
     paddingTop: SIZES.lg,
+  },
+  footer: {
+    backgroundColor: COLORS.white,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
   },
   mediaContainer: {
     marginBottom: SIZES.lg,
@@ -1578,13 +1621,15 @@ const styles = StyleSheet.create({
     lineHeight: 22,
   },
   commentComposer: {
-    marginTop: SIZES.md,
+    paddingHorizontal: SIZES.xl,
+    paddingTop: SIZES.md,
+    paddingBottom: SIZES.md,
     gap: SIZES.sm,
   },
   commentComposerRow: {
     flexDirection: "row",
     gap: SIZES.sm,
-    alignItems: "center",
+    alignItems: "flex-end",
   },
   replyingBanner: {
     paddingHorizontal: SIZES.md,
@@ -1619,6 +1664,8 @@ const styles = StyleSheet.create({
     fontSize: SIZES.md,
     color: COLORS.dark,
     backgroundColor: COLORS.white,
+    minHeight: 44,
+    maxHeight: 120,
   },
   commentSubmitButton: {
     paddingHorizontal: SIZES.md,
@@ -1636,10 +1683,15 @@ const styles = StyleSheet.create({
   },
   actions: {
     flexDirection: "row",
-    padding: SIZES.xl,
+    paddingHorizontal: SIZES.xl,
+    paddingTop: 0,
+    paddingBottom: SIZES.xl,
     gap: SIZES.md,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.border,
+  },
+  footerHintWrap: {
+    paddingHorizontal: SIZES.xl,
+    paddingTop: SIZES.md,
+    paddingBottom: SIZES.sm,
   },
   deleteButton: {
     flex: 1,

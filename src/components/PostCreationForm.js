@@ -167,7 +167,6 @@ const PostCreationForm = ({
   const [recordRetryTick, setRecordRetryTick] = useState(0);
   const [isPhotoPreviewVisible, setIsPhotoPreviewVisible] = useState(false);
   const [photoPreviewIndex, setPhotoPreviewIndex] = useState(0);
-  const [videoPreviewItem, setVideoPreviewItem] = useState(null);
   const [stackTopIndex, setStackTopIndex] = useState(0);
   const photoPreviewScrollRef = useRef(null);
   const prevMediaCountRef = useRef(0);
@@ -200,12 +199,6 @@ const PostCreationForm = ({
     if (!DEBUG_CAPTURE_GESTURES) return;
     console.log("[CaptureFlow]", ...args);
   };
-
-  const previewVideoSource = String(videoPreviewItem?.mediaUrl || "").trim() || null;
-  const videoPreviewPlayer = useVideoPlayer(previewVideoSource, (player) => {
-    player.loop = true;
-    player.play();
-  });
 
   const ensureMediaLibraryPermission = async () => {
     try {
@@ -442,7 +435,6 @@ const PostCreationForm = ({
     setRecordRetryTick(0);
     setIsPhotoPreviewVisible(false);
     setPhotoPreviewIndex(0);
-    setVideoPreviewItem(null);
     setStackTopIndex(0);
     if (!cameraPermission?.granted) {
       requestCameraPermission().catch(() => {});
@@ -480,10 +472,22 @@ const PostCreationForm = ({
     [mediaItems],
   );
   const previewableMediaItems = useMemo(
-    () => normalizedMediaItems.filter((item) => item.mediaType === "photo"),
+    () => normalizedMediaItems,
     [normalizedMediaItems],
   );
   const stackMediaItems = useMemo(() => normalizedMediaItems, [normalizedMediaItems]);
+  const previewActiveItem =
+    previewableMediaItems[
+      Math.max(0, Math.min(previewableMediaItems.length - 1, photoPreviewIndex))
+    ] || null;
+  const previewVideoSource =
+    isPhotoPreviewVisible && previewActiveItem?.mediaType === "video"
+      ? String(previewActiveItem?.mediaUrl || "").trim() || null
+      : null;
+  const videoPreviewPlayer = useVideoPlayer(previewVideoSource, (player) => {
+    player.loop = true;
+    player.play();
+  });
 
   const primaryMediaItem = normalizedMediaItems[0] || null;
   const primaryMediaUrl = primaryMediaItem?.mediaUrl || null;
@@ -532,7 +536,6 @@ const PostCreationForm = ({
     setPendingHoldRecordStart(false);
     setIsPhotoPreviewVisible(false);
     setPhotoPreviewIndex(0);
-    setVideoPreviewItem(null);
     setStackTopIndex(0);
     shutterPressActiveRef.current = false;
     shutterLongPressActiveRef.current = false;
@@ -1257,12 +1260,6 @@ const PostCreationForm = ({
   const geometryLabel =
     geometryType.charAt(0).toUpperCase() + geometryType.slice(1);
   const postButtonLabel = "Post";
-  const mediaCountLabel =
-    normalizedMediaItems.length > 0
-      ? `${normalizedMediaItems.length} media item${
-          normalizedMediaItems.length === 1 ? "" : "s"
-        } selected`
-      : "No media selected";
   const isPickOnMap = locationMode === LOCATION_MODES.PICK_ON_MAP;
   const audienceOptions = [
     { label: "Friends", value: POST_AUDIENCE.FRIENDS },
@@ -1324,6 +1321,12 @@ const PostCreationForm = ({
 
   const showLiveCamera = true;
   const screenWidth = Dimensions.get("window").width;
+  const screenHeight = Dimensions.get("window").height;
+  const previewVideoFrameWidth = Math.max(1, screenWidth - 20);
+  const previewVideoFrameHeight = Math.max(
+    260,
+    Math.min(screenHeight * 0.72, screenHeight - 140),
+  );
 
   useEffect(() => {
     if (stackMediaItems.length === 0) {
@@ -1361,26 +1364,14 @@ const PostCreationForm = ({
   }, [stackMediaItems, stackTopIndex]);
 
   useEffect(() => {
-    if (!isPhotoPreviewVisible) return;
-    const targetX = Math.max(0, photoPreviewIndex) * screenWidth;
-    requestAnimationFrame(() => {
-      photoPreviewScrollRef.current?.scrollTo?.({
-        x: targetX,
-        y: 0,
-        animated: false,
-      });
-    });
-  }, [isPhotoPreviewVisible, photoPreviewIndex, screenWidth]);
-
-  useEffect(() => {
     try {
-      if (videoPreviewItem) {
+      if (previewVideoSource) {
         videoPreviewPlayer.play();
       } else {
         videoPreviewPlayer.pause();
       }
     } catch (_error) {}
-  }, [videoPreviewItem, videoPreviewPlayer]);
+  }, [previewVideoSource, videoPreviewPlayer]);
 
   const openMediaPreviewFromStack = (index = 0) => {
     if (stackMediaItems.length === 0) return;
@@ -1392,20 +1383,11 @@ const PostCreationForm = ({
     if (!stackItem) {
       return;
     }
-    if (stackItem.mediaType === "video") {
-      setIsPhotoPreviewVisible(false);
-      setVideoPreviewItem(stackItem);
-      return;
-    }
-    if (stackItem.mediaType !== "photo") {
-      return;
-    }
-    const photoIndex = previewableMediaItems.findIndex(
+    const previewIndex = previewableMediaItems.findIndex(
       (item) => String(item.id || "") === String(stackItem.id || ""),
     );
-    if (photoIndex < 0) return;
-    setVideoPreviewItem(null);
-    setPhotoPreviewIndex(photoIndex);
+    if (previewIndex < 0) return;
+    setPhotoPreviewIndex(previewIndex);
     setIsPhotoPreviewVisible(true);
   };
 
@@ -1447,6 +1429,98 @@ const PostCreationForm = ({
     [stackMediaItems, previewableMediaItems, stackTopIndex],
   );
 
+  const previewPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => previewableMediaItems.length > 1,
+        onMoveShouldSetPanResponder: (_evt, gestureState) =>
+          previewableMediaItems.length > 1 &&
+          Math.abs(Number(gestureState?.dx || 0)) > 8 &&
+          Math.abs(Number(gestureState?.dx || 0)) >
+            Math.abs(Number(gestureState?.dy || 0)),
+        onPanResponderTerminationRequest: () => true,
+        onPanResponderRelease: (_evt, gestureState) => {
+          const dx = Number(gestureState?.dx || 0);
+          const count = previewableMediaItems.length;
+          if (count <= 1 || Math.abs(dx) < 36) return;
+          setPhotoPreviewIndex((prev) => {
+            const current = Math.max(0, Math.min(count - 1, Number(prev) || 0));
+            if (dx < 0) return (current + 1) % count;
+            return (current - 1 + count) % count;
+          });
+        },
+      }),
+    [previewableMediaItems.length],
+  );
+  const goToPrevPreviewItem = () => {
+    const count = previewableMediaItems.length;
+    if (count <= 1) return;
+    setPhotoPreviewIndex((prev) => {
+      const current = Math.max(0, Math.min(count - 1, Number(prev) || 0));
+      return (current - 1 + count) % count;
+    });
+  };
+  const goToNextPreviewItem = () => {
+    const count = previewableMediaItems.length;
+    if (count <= 1) return;
+    setPhotoPreviewIndex((prev) => {
+      const current = Math.max(0, Math.min(count - 1, Number(prev) || 0));
+      return (current + 1) % count;
+    });
+  };
+  const removeMediaItemById = (mediaId) => {
+    const normalizedId = String(mediaId || "");
+    if (!normalizedId) return;
+
+    const currentItems = Array.isArray(normalizedMediaItems) ? normalizedMediaItems : [];
+    const currentIndex = currentItems.findIndex(
+      (item) => String(item?.id || "") === normalizedId,
+    );
+    const remainingCount =
+      currentIndex >= 0 ? Math.max(0, currentItems.length - 1) : currentItems.length;
+
+    setMediaItems((prev) =>
+      (Array.isArray(prev) ? prev : []).filter(
+        (entry) => String(entry?.id || "") !== normalizedId,
+      ),
+    );
+
+    if (currentIndex < 0) return;
+    if (remainingCount <= 0) {
+      setIsPhotoPreviewVisible(false);
+      setPhotoPreviewIndex(0);
+      setStackTopIndex(0);
+      return;
+    }
+
+    setPhotoPreviewIndex((prev) =>
+      Math.max(0, Math.min(remainingCount - 1, Number(prev) || 0)),
+    );
+    setStackTopIndex((prev) =>
+      Math.max(0, Math.min(remainingCount - 1, Number(prev) || 0)),
+    );
+  };
+  const confirmRemoveMediaItem = (mediaItem) => {
+    const item = mediaItem || null;
+    const itemId = String(item?.id || "");
+    if (!itemId) return;
+    const itemLabel =
+      String(item?.mediaType || "").toLowerCase() === "video" ? "video" : "photo";
+
+    Alert.alert(
+      "Delete Media",
+      `Remove this ${itemLabel} from the post?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => removeMediaItemById(itemId),
+        },
+      ],
+    );
+  };
+
   return (
     <Modal
       visible={visible}
@@ -1461,7 +1535,9 @@ const PostCreationForm = ({
           style={styles.overlay}
         >
           <View style={styles.stage}>
-          {showLiveCamera && renderedCameraMode === "picture" ? (
+          {showLiveCamera &&
+          !isPhotoPreviewVisible &&
+          renderedCameraMode === "picture" ? (
             cameraPermission?.granted ? (
               <PinchGestureHandler
                 onGestureEvent={handlePinchGestureEvent}
@@ -1516,7 +1592,9 @@ const PostCreationForm = ({
             )
           ) : null}
 
-          {showLiveCamera && renderedCameraMode === "video" ? (
+          {showLiveCamera &&
+          !isPhotoPreviewVisible &&
+          renderedCameraMode === "video" ? (
             <View style={styles.videoRecorderOverlay}>
               <CameraView
                 key={`video-camera-${cameraFacing}-${videoCameraSessionKey}`}
@@ -1619,18 +1697,6 @@ const PostCreationForm = ({
                 {cameraFlashMode === "on" ? "⚡" : "⚡︎"}
               </Text>
             </TouchableOpacity>
-          </View>
-
-          <View style={styles.mediaCountBadge}>
-            <Text style={styles.mediaCountBadgeText}>{mediaCountLabel}</Text>
-          </View>
-
-          <View style={styles.captureHintBadge}>
-            <Text style={styles.captureHintText}>
-              {renderedCameraMode === "video"
-                ? "Release to save video. Pinch to zoom."
-                : "Tap for photo, hold for video. Pinch to zoom."}
-            </Text>
           </View>
 
           <View style={styles.composerText}>
@@ -1824,8 +1890,15 @@ const PostCreationForm = ({
                                 <TouchableOpacity
                                   style={styles.videoThumbPlaceholder}
                                   onPress={() => {
-                                    setIsPhotoPreviewVisible(false);
-                                    setVideoPreviewItem(item);
+                                    const previewIndex =
+                                      previewableMediaItems.findIndex(
+                                        (previewItem) =>
+                                          String(previewItem.id || "") ===
+                                          String(item.id || ""),
+                                      );
+                                    if (previewIndex < 0) return;
+                                    setPhotoPreviewIndex(previewIndex);
+                                    setIsPhotoPreviewVisible(true);
                                   }}
                                 >
                                   <Text style={styles.videoThumbPlaceholderText}>
@@ -1946,73 +2019,89 @@ const PostCreationForm = ({
               </ScrollView>
           </Animated.View>
 
-          {videoPreviewItem ? (
-            <View style={styles.photoPreviewOverlay}>
-              <View style={styles.photoPreviewTopBar}>
-                <Text style={styles.photoPreviewCount}>Video preview</Text>
-                <TouchableOpacity
-                  style={styles.photoPreviewCloseBtn}
-                  onPress={() => setVideoPreviewItem(null)}
-                >
-                  <Text style={styles.photoPreviewCloseText}>Close</Text>
-                </TouchableOpacity>
-              </View>
-              <View style={styles.videoPreviewBody}>
-                <VideoView
-                  player={videoPreviewPlayer}
-                  style={styles.videoPreviewPlayer}
-                  nativeControls
-                  contentFit="contain"
-                />
-              </View>
-            </View>
-          ) : null}
-
           {isPhotoPreviewVisible ? (
             <View style={styles.photoPreviewOverlay}>
               <View style={styles.photoPreviewTopBar}>
                 <Text style={styles.photoPreviewCount}>
                   {photoPreviewIndex + 1} / {previewableMediaItems.length}
                 </Text>
-                <TouchableOpacity
-                  style={styles.photoPreviewCloseBtn}
-                  onPress={() => setIsPhotoPreviewVisible(false)}
-                >
-                  <Text style={styles.photoPreviewCloseText}>Close</Text>
-                </TouchableOpacity>
-              </View>
-              <ScrollView
-                ref={photoPreviewScrollRef}
-                horizontal
-                pagingEnabled
-                showsHorizontalScrollIndicator={false}
-                directionalLockEnabled
-                onMomentumScrollEnd={(event) => {
-                  const offsetX = Number(event?.nativeEvent?.contentOffset?.x || 0);
-                  const nextIndex = Math.round(offsetX / Math.max(1, screenWidth));
-                  if (Number.isFinite(nextIndex)) {
-                    setPhotoPreviewIndex(
-                      Math.max(
-                        0,
-                        Math.min(previewableMediaItems.length - 1, nextIndex),
-                      ),
-                    );
-                  }
-                }}
-              >
-                {previewableMediaItems.map((item, index) => (
-                  <View
-                    key={`preview-${item.id || "media"}-${index}`}
-                    style={[styles.photoPreviewPage, { width: screenWidth }]}
+                <View style={styles.photoPreviewTopActions}>
+                  {previewActiveItem?.id ? (
+                    <TouchableOpacity
+                      style={styles.photoPreviewDeleteBtn}
+                      onPress={() => confirmRemoveMediaItem(previewActiveItem)}
+                    >
+                      <Text style={styles.photoPreviewDeleteText}>Delete</Text>
+                    </TouchableOpacity>
+                  ) : null}
+                  {previewableMediaItems.length > 1 ? (
+                    <>
+                      <TouchableOpacity
+                        style={styles.photoPreviewNavBtn}
+                        onPress={goToPrevPreviewItem}
+                      >
+                        <Text style={styles.photoPreviewNavText}>Prev</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.photoPreviewNavBtn}
+                        onPress={goToNextPreviewItem}
+                      >
+                        <Text style={styles.photoPreviewNavText}>Next</Text>
+                      </TouchableOpacity>
+                    </>
+                  ) : null}
+                  <TouchableOpacity
+                    style={styles.photoPreviewCloseBtn}
+                    onPress={() => setIsPhotoPreviewVisible(false)}
                   >
+                    <Text style={styles.photoPreviewCloseText}>Close</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+              <View
+                style={styles.photoPreviewPager}
+                {...previewPanResponder.panHandlers}
+              >
+                <View
+                  style={[
+                    styles.photoPreviewPage,
+                    { width: screenWidth, height: screenHeight },
+                  ]}
+                >
+                  {previewActiveItem?.mediaType === "video" ? (
+                    <View style={styles.videoPreviewBody}>
+                      <View style={styles.videoPreviewFrame}>
+                        <VideoView
+                          key={previewVideoSource || "preview-video"}
+                          player={videoPreviewPlayer}
+                          style={[
+                            styles.videoPreviewPlayer,
+                            {
+                              width: previewVideoFrameWidth,
+                              height: previewVideoFrameHeight,
+                            },
+                          ]}
+                          nativeControls
+                          contentFit="contain"
+                          surfaceType={Platform.OS === "android" ? "textureView" : undefined}
+                        />
+                        {previewableMediaItems.length > 1 ? (
+                          <View
+                            style={styles.previewSwipeOverlay}
+                            {...previewPanResponder.panHandlers}
+                          />
+                        ) : null}
+                      </View>
+                    </View>
+                  ) : previewActiveItem?.mediaUrl ? (
                     <Image
-                      source={{ uri: item.mediaUrl }}
+                      source={{ uri: previewActiveItem.mediaUrl }}
                       style={styles.photoPreviewImage}
                       resizeMode="contain"
                     />
-                  </View>
-                ))}
-              </ScrollView>
+                  ) : null}
+                </View>
+              </View>
             </View>
           ) : null}
 
@@ -2312,41 +2401,6 @@ const createStyles = (palette, isDark, insets = { top: 0, bottom: 0 }) =>
       fontSize: 14,
       fontWeight: "800",
     },
-    mediaCountBadge: {
-      position: "absolute",
-      left: 14,
-      top: (insets?.top || 0) + (Platform.OS === "ios" ? 56 : 66),
-      borderWidth: 1,
-      borderColor: "rgba(255,255,255,0.28)",
-      backgroundColor: "rgba(15,23,42,0.58)",
-      borderRadius: 999,
-      paddingHorizontal: 10,
-      paddingVertical: 6,
-      maxWidth: "70%",
-    },
-    mediaCountBadgeText: {
-      color: "#f8fafc",
-      fontSize: 11,
-      fontWeight: "700",
-    },
-    captureHintBadge: {
-      position: "absolute",
-      left: 14,
-      top: (insets?.top || 0) + (Platform.OS === "ios" ? 98 : 108),
-      borderWidth: 1,
-      borderColor: "rgba(255,255,255,0.22)",
-      backgroundColor: "rgba(15,23,42,0.48)",
-      borderRadius: 12,
-      paddingHorizontal: 10,
-      paddingVertical: 7,
-      maxWidth: 220,
-    },
-    captureHintText: {
-      color: "rgba(248,250,252,0.84)",
-      fontSize: 10,
-      fontWeight: "700",
-      lineHeight: 14,
-    },
     photoStackDock: {
       position: "absolute",
       left: 14,
@@ -2417,6 +2471,12 @@ const createStyles = (palette, isDark, insets = { top: 0, bottom: 0 }) =>
       zIndex: 30,
       justifyContent: "center",
     },
+    photoPreviewPager: {
+      flex: 1,
+    },
+    photoPreviewPagerContent: {
+      alignItems: "stretch",
+    },
     photoPreviewTopBar: {
       position: "absolute",
       top: (insets?.top || 0) + (Platform.OS === "ios" ? 8 : 18),
@@ -2427,8 +2487,39 @@ const createStyles = (palette, isDark, insets = { top: 0, bottom: 0 }) =>
       justifyContent: "space-between",
       zIndex: 31,
     },
+    photoPreviewTopActions: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+    },
     photoPreviewCount: {
       color: "#f8fafc",
+      fontSize: 12,
+      fontWeight: "800",
+    },
+    photoPreviewNavBtn: {
+      borderWidth: 1,
+      borderColor: "rgba(255,255,255,0.28)",
+      borderRadius: 999,
+      paddingHorizontal: 12,
+      paddingVertical: 7,
+      backgroundColor: "rgba(15,23,42,0.45)",
+    },
+    photoPreviewNavText: {
+      color: "#f8fafc",
+      fontSize: 12,
+      fontWeight: "800",
+    },
+    photoPreviewDeleteBtn: {
+      borderWidth: 1,
+      borderColor: "rgba(248,113,113,0.55)",
+      borderRadius: 999,
+      paddingHorizontal: 12,
+      paddingVertical: 7,
+      backgroundColor: "rgba(127,29,29,0.34)",
+    },
+    photoPreviewDeleteText: {
+      color: "#fecaca",
       fontSize: 12,
       fontWeight: "800",
     },
@@ -2466,11 +2557,37 @@ const createStyles = (palette, isDark, insets = { top: 0, bottom: 0 }) =>
       paddingTop: (insets?.top || 0) + (Platform.OS === "ios" ? 12 : 22),
       paddingBottom: (insets?.bottom || 0) + (Platform.OS === "ios" ? 0 : 18),
     },
+    videoPreviewFrame: {
+      position: "relative",
+      alignItems: "center",
+      justifyContent: "center",
+    },
     videoPreviewPlayer: {
       width: "100%",
       height: "86%",
       backgroundColor: "#020617",
       borderRadius: 14,
+    },
+    previewSwipeOverlay: {
+      position: "absolute",
+      top: 0,
+      right: 0,
+      bottom: 0,
+      left: 0,
+      zIndex: 2,
+    },
+    videoPreviewPlaceholder: {
+      width: "100%",
+      height: "86%",
+      borderRadius: 14,
+      backgroundColor: "#020617",
+      justifyContent: "center",
+      alignItems: "center",
+    },
+    videoPreviewPlaceholderEmoji: {
+      color: "#f8fafc",
+      fontSize: 22,
+      fontWeight: "800",
     },
     composerText: {
       position: "absolute",

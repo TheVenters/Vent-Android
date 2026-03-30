@@ -100,3 +100,27 @@ export const hydrateAvatarUrl = async (value, sessionOverride = null) => {
   );
   return row?.avatar_url || null;
 };
+
+export const getProfileAvatarUrl = async (userId, sessionOverride = null) => {
+  const resolvedUserId = String(userId || "").trim();
+  if (!resolvedUserId) return null;
+
+  try {
+    const accessToken =
+      sessionOverride?.access_token ||
+      (await getActiveSession())?.access_token ||
+      null;
+    const client = accessToken ? supabaseWithAccessToken(accessToken) : supabase;
+
+    const { data, error } = await client
+      .from("profiles")
+      .select("avatar_url")
+      .eq("id", resolvedUserId)
+      .maybeSingle();
+
+    if (error) throw error;
+    return hydrateAvatarUrl(data?.avatar_url || null, sessionOverride);
+  } catch (_) {
+    return null;
+  }
+};

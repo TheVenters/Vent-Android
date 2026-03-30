@@ -31,7 +31,7 @@ import { SIZES } from "../constants/theme";
 import { useAppTheme } from "../context/ThemeContext";
 import { getBrandAssetsForTheme } from "../constants/brandAssets";
 import {
-  hydrateAvatarUrl,
+  getProfileAvatarUrl,
   hydrateAvatarUrlsInRows,
 } from "../utils/avatarUrls";
 
@@ -179,9 +179,7 @@ const AccountScreen = ({ navigation, route }) => {
     const user = await scrubAvatarFromAuthMetadata(rawUser);
     setCurrentUser(user);
     if (user?.id) {
-      const resolvedAvatarUrl = await hydrateAvatarUrl(
-        user?.user_metadata?.avatar_url || null,
-      );
+      const resolvedAvatarUrl = await getProfileAvatarUrl(user.id);
       setAvatarUrl(resolvedAvatarUrl);
     } else {
       setAvatarUrl(null);
@@ -214,7 +212,7 @@ const AccountScreen = ({ navigation, route }) => {
           "User"
         : "User";
       const fallbackAvatar = isOwnProfile
-        ? await hydrateAvatarUrl(currentUser?.user_metadata?.avatar_url || null)
+        ? await getProfileAvatarUrl(currentUser?.id)
         : null;
 
       const normalizedProfile = {
@@ -239,7 +237,7 @@ const AccountScreen = ({ navigation, route }) => {
       }
       const isOwnProfile = Boolean(currentUser?.id && userId === currentUser.id);
       const fallbackAvatar = isOwnProfile
-        ? await hydrateAvatarUrl(currentUser?.user_metadata?.avatar_url || null)
+        ? await getProfileAvatarUrl(currentUser?.id)
         : null;
       setViewedProfile({
         id: userId,
