@@ -658,7 +658,10 @@ const ActionButtonCluster = ({
         />
       )}
 
-      <Animated.View style={[styles.column, keyboardShiftStyle]}>
+      <Animated.View
+        style={[styles.column, keyboardShiftStyle]}
+        pointerEvents="box-none"
+      >
         <Animated.View
           style={[styles.menuColumn, menuStyle]}
           pointerEvents={isMenuInteractive ? "auto" : "none"}
@@ -696,7 +699,7 @@ const ActionButtonCluster = ({
           </TouchableOpacity>
         </Animated.View>
 
-        <View style={styles.aRow}>
+        <View style={styles.aRow} pointerEvents="box-none">
           <Animated.View
             style={[styles.searchBar, searchBarStyle]}
             pointerEvents={expanded ? "auto" : "none"}
