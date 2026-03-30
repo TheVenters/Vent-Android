@@ -243,6 +243,24 @@ const ActionButtonCluster = ({
     }
   }, [nearestPinTargets, mapRef, onArrowPinFocus]);
 
+  const centerOnUserLocation = useCallback(() => {
+    const latitude = Number(userLocation?.latitude);
+    const longitude = Number(userLocation?.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+
+    if (mapRef?.current?.animateToRegion) {
+      mapRef.current.animateToRegion(
+        {
+          latitude,
+          longitude,
+          latitudeDelta: 0.01,
+          longitudeDelta: 0.01,
+        },
+        500,
+      );
+    }
+  }, [mapRef, userLocation]);
+
   const handleMenuPress = useCallback(
     (item) => {
       onPrepareOverlay?.();
@@ -517,8 +535,15 @@ const ActionButtonCluster = ({
   }, [toggleExpand]);
 
   const screenWidth = Dimensions.get("window").width;
+  const rowButtonCount = 2;
   const searchBarMaxWidth =
-    screenWidth - ACTION_BUTTON.MARGIN * 2 - ACTION_BUTTON.SIZE - ACTION_BUTTON.GAP;
+    screenWidth -
+    ACTION_BUTTON.MARGIN * 2 -
+    ACTION_BUTTON.SIZE * rowButtonCount -
+    ACTION_BUTTON.GAP * rowButtonCount;
+  const hasUserLocation =
+    Number.isFinite(Number(userLocation?.latitude)) &&
+    Number.isFinite(Number(userLocation?.longitude));
 
   const searchBarStyle = useAnimatedStyle(() => {
     const width = interpolate(
@@ -689,6 +714,28 @@ const ActionButtonCluster = ({
           </Animated.View>
 
           <TouchableOpacity
+            style={[
+              styles.button,
+              styles.aButton,
+              styles.secondaryActionButton,
+              !hasUserLocation && styles.buttonDisabled,
+            ]}
+            onPress={centerOnUserLocation}
+            disabled={!hasUserLocation}
+            accessibilityRole="button"
+            accessibilityLabel="Go to current location"
+          >
+            <View style={styles.locationIcon}>
+              <View style={styles.locationIconRing} />
+              <View style={styles.locationIconCenter} />
+              <View style={[styles.locationIconTick, styles.locationIconTickTop]} />
+              <View style={[styles.locationIconTick, styles.locationIconTickRight]} />
+              <View style={[styles.locationIconTick, styles.locationIconTickBottom]} />
+              <View style={[styles.locationIconTick, styles.locationIconTickLeft]} />
+            </View>
+          </TouchableOpacity>
+
+          <TouchableOpacity
             style={[styles.button, styles.aButton]}
             onPress={() => {
               if (expanded) {
@@ -815,6 +862,61 @@ const createStyles = (palette) =>
     aButtonLogo: {
       width: 34,
       height: 34,
+    },
+    secondaryActionButton: {
+      marginRight: ACTION_BUTTON.GAP,
+    },
+    buttonDisabled: {
+      opacity: 0.45,
+    },
+    locationIcon: {
+      width: 28,
+      height: 28,
+      alignItems: "center",
+      justifyContent: "center",
+      position: "relative",
+    },
+    locationIconRing: {
+      position: "absolute",
+      width: 24,
+      height: 24,
+      borderRadius: 12,
+      borderWidth: 3,
+      borderColor: palette.primary,
+    },
+    locationIconCenter: {
+      width: 10,
+      height: 10,
+      borderRadius: 5,
+      backgroundColor: palette.primary,
+    },
+    locationIconTick: {
+      position: "absolute",
+      backgroundColor: palette.primary,
+    },
+    locationIconTickTop: {
+      width: 4,
+      height: 7,
+      top: -1,
+      borderRadius: 2,
+    },
+    locationIconTickRight: {
+      width: 7,
+      height: 4,
+      right: -1,
+      borderRadius: 2,
+    },
+    locationIconTickBottom: {
+      width: 4,
+      height: 7,
+      bottom: -1,
+      borderRadius: 2,
+    },
+    locationIconTickLeft: {
+      width: 7,
+      height: 4,
+      left: -1,
+      borderRadius: 2,
     },
     searchBar: {
       height: ACTION_BUTTON.SIZE,
