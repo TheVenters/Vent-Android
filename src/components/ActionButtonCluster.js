@@ -24,6 +24,7 @@ import PostCreationForm from "./PostCreationForm";
 import LayersControlPanel from "./LayersControlPanel";
 import { useAppTheme } from "../context/ThemeContext";
 import { getBrandAssetsForTheme } from "../constants/brandAssets";
+import { isCoordinateWithinRegionBounds } from "../screens/map/mapVisualEngine";
 
 const HOLD_DRAG_OPEN_THRESHOLD = 34;
 const HOLD_RECORD_DELAY_MS = 700;
@@ -48,6 +49,10 @@ const ActionButtonCluster = ({
   onRefreshLayers,
   onPostSubmit,
   userLocation,
+  mapCenter,
+  mapRegion,
+  focusedPinId,
+  arrowNavigationResetToken = 0,
   onSearch,
   onArrowPinFocus,
   onPrepareOverlay,
@@ -95,6 +100,8 @@ const ActionButtonCluster = ({
   const [holdRecordStartToken, setHoldRecordStartToken] = useState(0);
   const [holdRecordStopToken, setHoldRecordStopToken] = useState(0);
   const lastArrowTargetIdRef = useRef(null);
+  const visitedArrowPinIdsRef = useRef(new Set());
+  const visitedArrowLocationKeysRef = useRef(new Set());
   const suppressActionPressRef = useRef(false);
   const longPressTimerRef = useRef(null);
   const autoOpenTimerRef = useRef(null);
@@ -174,33 +181,70 @@ const ActionButtonCluster = ({
     setExpanded(true);
   }, [collapse, expanded, expandProgress, showLayersPanel, showPostForm]);
 
+  const distanceOrigin = useMemo(() => {
+    const hasMapCenter =
+      Number.isFinite(Number(mapCenter?.latitude)) &&
+      Number.isFinite(Number(mapCenter?.longitude));
+    return hasMapCenter ? mapCenter : userLocation;
+  }, [mapCenter, userLocation]);
+
   const nearestPinTargets = useMemo(() => {
-    const sourcePins =
-      Array.isArray(pins) && pins.length > 0
-        ? pins
-        : Array.isArray(allPins)
-          ? allPins
-          : [];
+    const sourcePins = Array.isArray(pins)
+      ? pins
+      : Array.isArray(allPins)
+        ? allPins
+        : [];
+    const focusedPinIdText = String(focusedPinId || "");
     const validPins = sourcePins.filter((pin) => {
       const lat = Number(pin?.lat);
       const lng = Number(pin?.lng);
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+      if (focusedPinIdText && String(pin?.id || "") === focusedPinIdText) {
+        return false;
+      }
       return pin?.geometry?.visibility_mode !== "cloud_only";
     });
+    const regionVisiblePins =
+      mapRegion &&
+      Number.isFinite(Number(mapRegion?.latitude)) &&
+      Number.isFinite(Number(mapRegion?.longitude)) &&
+      Number.isFinite(Number(mapRegion?.latitudeDelta)) &&
+      Number.isFinite(Number(mapRegion?.longitudeDelta))
+        ? validPins.filter((pin) =>
+            isCoordinateWithinRegionBounds(
+              { latitude: Number(pin?.lat), longitude: Number(pin?.lng) },
+              mapRegion,
+            ),
+          )
+        : validPins;
     const dedupedById = [];
     const seenIds = new Set();
-    validPins.forEach((pin) => {
+    regionVisiblePins.forEach((pin) => {
       const id = String(pin?.id || "");
       if (!id || seenIds.has(id)) return;
       seenIds.add(id);
       dedupedById.push(pin);
     });
 
-    const sorted = [...dedupedById];
-    if (Number.isFinite(Number(userLocation?.latitude))) {
+    const dedupedByLocation = [];
+    const seenLocations = new Set();
+    dedupedById.forEach((pin) => {
+      const lat = Number(pin?.lat);
+      const lng = Number(pin?.lng);
+      const locationKey = `${lat.toFixed(5)}:${lng.toFixed(5)}`;
+      if (seenLocations.has(locationKey)) return;
+      seenLocations.add(locationKey);
+      dedupedByLocation.push(pin);
+    });
+
+    const sorted = [...dedupedByLocation];
+    if (
+      Number.isFinite(Number(distanceOrigin?.latitude)) &&
+      Number.isFinite(Number(distanceOrigin?.longitude))
+    ) {
       sorted.sort((left, right) => {
         const delta =
-          distanceMeters(userLocation, left) - distanceMeters(userLocation, right);
+          distanceMeters(distanceOrigin, left) - distanceMeters(distanceOrigin, right);
         if (Math.abs(delta) > 0.001) return delta;
         return String(left?.id || "").localeCompare(String(right?.id || ""));
       });
@@ -211,21 +255,42 @@ const ActionButtonCluster = ({
       String(left?.id || "").localeCompare(String(right?.id || "")),
     );
     return sorted;
-  }, [allPins, pins, userLocation, distanceMeters]);
+  }, [allPins, pins, focusedPinId, mapRegion, distanceOrigin, distanceMeters]);
+
+  useEffect(() => {
+    visitedArrowPinIdsRef.current = new Set();
+    visitedArrowLocationKeysRef.current = new Set();
+    lastArrowTargetIdRef.current = null;
+  }, [arrowNavigationResetToken]);
 
   const goToNearestPin = useCallback(() => {
     if (!nearestPinTargets.length) return;
-    const lastTargetId = lastArrowTargetIdRef.current;
-    const currentIndex = nearestPinTargets.findIndex(
-      (pin) => String(pin?.id || "") === String(lastTargetId || ""),
-    );
-    const nextIndex =
-      currentIndex >= 0
-        ? (currentIndex + 1) % nearestPinTargets.length
-        : 0;
-    const targetPin = nearestPinTargets[nextIndex];
+    let targetPin =
+      nearestPinTargets.find(
+        (pin) => {
+          const pinId = String(pin?.id || "");
+          const lat = Number(pin?.lat);
+          const lng = Number(pin?.lng);
+          const locationKey = `${lat.toFixed(5)}:${lng.toFixed(5)}`;
+          return (
+            !visitedArrowPinIdsRef.current.has(pinId) &&
+            !visitedArrowLocationKeysRef.current.has(locationKey)
+          );
+        },
+      ) || null;
+    if (!targetPin) {
+      visitedArrowPinIdsRef.current = new Set();
+      visitedArrowLocationKeysRef.current = new Set();
+      targetPin = nearestPinTargets[0] || null;
+    }
     if (!targetPin) return;
-    lastArrowTargetIdRef.current = String(targetPin?.id || "");
+    const targetPinId = String(targetPin?.id || "");
+    const targetLocationKey = `${Number(targetPin?.lat).toFixed(5)}:${Number(
+      targetPin?.lng,
+    ).toFixed(5)}`;
+    lastArrowTargetIdRef.current = targetPinId;
+    visitedArrowPinIdsRef.current.add(targetPinId);
+    visitedArrowLocationKeysRef.current.add(targetLocationKey);
 
     if (mapRef?.current) {
       mapRef.current.animateToRegion(

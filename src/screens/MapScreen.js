@@ -909,6 +909,7 @@ const MapScreen = ({ navigation, route }) => {
   const [selectedPinLayers, setSelectedPinLayers] = useState([]);
   const [allLoadedPosts, setAllLoadedPosts] = useState([]);
   const [arrowFocusedPinId, setArrowFocusedPinId] = useState(null);
+  const [arrowNavigationResetToken, setArrowNavigationResetToken] = useState(0);
   const [shapePreviewPinId, setShapePreviewPinId] = useState(null);
   const [cloudPostsModalVisible, setCloudPostsModalVisible] = useState(false);
   const [selectedCloud, setSelectedCloud] = useState(null);
@@ -959,6 +960,7 @@ const MapScreen = ({ navigation, route }) => {
   const arrowCalloutTimerRef = useRef(null);
   const lastArrowCalloutPinIdRef = useRef(null);
   const activeCalloutPinIdRef = useRef(null);
+  const manualPanDismissedRef = useRef(false);
   const initialBackgroundLayerRefreshDoneRef = useRef(false);
   const initialAppOpenRefreshDoneRef = useRef(false);
   const lastCommunityMapRefreshIdRef = useRef(null);
@@ -2875,6 +2877,11 @@ useEffect(() => {
       touchCount = previousTouchCount - 1;
     }
     activeMapTouchCountRef.current = touchCount;
+    if (previousTouchCount === 0 && touchCount > 0) {
+      manualPanDismissedRef.current = false;
+    } else if (touchCount === 0) {
+      manualPanDismissedRef.current = false;
+    }
     if (touchCount > 1) {
       multiTouchGestureLockedRef.current = true;
     } else if (touchCount === 0) {
@@ -3013,6 +3020,14 @@ useEffect(() => {
       return;
     }
   };
+
+  const handleManualMapPan = useCallback(() => {
+    if (activeMapTouchCountRef.current <= 0) return;
+    if (manualPanDismissedRef.current) return;
+    manualPanDismissedRef.current = true;
+    dismissMapCallouts({ clearArrowFocus: true });
+    setArrowNavigationResetToken((value) => value + 1);
+  }, [dismissMapCallouts]);
 
   const handlePlaneCornerDragStart = () => {
     if (planeMergeHoldTimerRef.current) {
@@ -5022,13 +5037,16 @@ useEffect(() => {
         userInterfaceStyle={mapProvider ? undefined : appleMapInterfaceStyle}
         onPress={isPickingPostLocation ? handleMapPress : undefined}
         onLongPress={undefined}
-        onPanDrag={
-          isDrawingMode &&
-          (drawingType === GEOMETRY_TYPES.LINE ||
-            drawingType === GEOMETRY_TYPES.PLANE)
-            ? handleMapPanDrag
-            : undefined
-        }
+        onPanDrag={(event) => {
+          handleManualMapPan();
+          if (
+            isDrawingMode &&
+            (drawingType === GEOMETRY_TYPES.LINE ||
+              drawingType === GEOMETRY_TYPES.PLANE)
+          ) {
+            handleMapPanDrag(event);
+          }
+        }}
         onTouchStart={(event) => updateMapTouchState(event, "start")}
         onTouchMove={(event) => updateMapTouchState(event, "move")}
         onTouchEnd={(event) => updateMapTouchState(event, "end")}
@@ -5265,6 +5283,10 @@ useEffect(() => {
           onRefreshLayers={handleRefreshLayersAndPins}
           onPostSubmit={handlePostSubmit}
           userLocation={userLocation}
+          mapCenter={region}
+          mapRegion={region}
+          focusedPinId={arrowFocusedPinId}
+          arrowNavigationResetToken={arrowNavigationResetToken}
           onSearch={handleSearch}
           onArrowPinFocus={handleArrowPinFocus}
           onPrepareOverlay={() => dismissMapCallouts({ clearArrowFocus: true })}
