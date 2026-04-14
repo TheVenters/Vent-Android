@@ -3,6 +3,7 @@ import {
   View,
   Modal,
   StyleSheet,
+  StatusBar,
   Text,
   TextInput,
   TouchableOpacity,
@@ -15,6 +16,7 @@ import {
   Dimensions,
 } from "react-native";
 import { useVideoPlayer, VideoView } from "expo-video";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { COLORS, SIZES } from "../constants/theme";
 
 const VISIBILITY_OPTIONS = ["public", "friends", "private"];
@@ -79,6 +81,7 @@ const PinDetailModal = ({
   const modalMediaScrollRef = useRef(null);
   const photoViewerScrollRef = useRef(null);
   const lastInitializedPinIdRef = useRef(null);
+  const insets = useSafeAreaInsets();
   const viewerWidth = Dimensions.get("window").width;
   const viewerHeight = Dimensions.get("window").height;
   const modalMediaWidth = Math.max(1, viewerWidth - SIZES.xl * 2);
@@ -944,8 +947,11 @@ const PinDetailModal = ({
           <View
             style={[
               styles.footer,
-              keyboardHeight > 0 && {
-                paddingBottom: Math.max(SIZES.sm, keyboardHeight - 24),
+              {
+                paddingBottom:
+                  keyboardHeight > 0
+                    ? Math.max((insets.bottom || 0) + SIZES.sm, keyboardHeight - 24)
+                    : Math.max(insets.bottom || 0, SIZES.md),
               },
             ]}
           >
@@ -960,6 +966,7 @@ const PinDetailModal = ({
                         : replyingToComment.author_name || "Anonymous"}
                     </Text>
                     <TouchableOpacity
+                      style={styles.replyingBannerCancelButton}
                       onPress={() => setReplyToCommentId(null)}
                       disabled={isSubmittingComment}
                     >
@@ -1298,7 +1305,10 @@ const styles = StyleSheet.create({
     backgroundColor: "#05070d",
   },
   photoViewerTopBar: {
-    paddingTop: Platform.OS === "ios" ? 56 : 20,
+    paddingTop:
+      Platform.OS === "ios"
+        ? 56
+        : Math.max(20, Number(StatusBar.currentHeight || 0) + 12),
     paddingHorizontal: SIZES.lg,
     paddingBottom: SIZES.md,
     flexDirection: "row",
@@ -1415,7 +1425,8 @@ const styles = StyleSheet.create({
     borderTopColor: COLORS.border,
   },
   metaText: {
-    fontSize: SIZES.md,
+    fontSize: SIZES.lg,
+    fontWeight: "600",
     color: COLORS.gray,
   },
   locationFlareMeta: {
@@ -1569,17 +1580,18 @@ const styles = StyleSheet.create({
     color: COLORS.dark,
   },
   commentDate: {
-    fontSize: SIZES.xs,
+    fontSize: SIZES.sm,
+    fontWeight: "600",
     color: COLORS.gray,
   },
   commentReplyButton: {
-    paddingHorizontal: SIZES.sm,
-    paddingVertical: 4,
+    paddingHorizontal: SIZES.md + 2,
+    paddingVertical: SIZES.sm,
     borderRadius: SIZES.radiusSm,
     backgroundColor: `${COLORS.primary}20`,
   },
   commentReplyText: {
-    fontSize: SIZES.xs,
+    fontSize: SIZES.md,
     fontWeight: "700",
     color: COLORS.primary,
   },
@@ -1649,8 +1661,14 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     color: COLORS.primary,
   },
+  replyingBannerCancelButton: {
+    paddingHorizontal: SIZES.md,
+    paddingVertical: SIZES.xs,
+    borderRadius: SIZES.radiusMd,
+    backgroundColor: `${COLORS.white}90`,
+  },
   replyingBannerCancel: {
-    fontSize: SIZES.xs,
+    fontSize: SIZES.sm,
     fontWeight: "700",
     color: COLORS.gray,
   },

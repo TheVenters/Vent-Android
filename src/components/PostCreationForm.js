@@ -3,6 +3,7 @@ import {
   Alert,
   Dimensions,
   Image,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   PanResponder,
@@ -177,6 +178,7 @@ const PostCreationForm = ({
   const [isPhotoPreviewVisible, setIsPhotoPreviewVisible] = useState(false);
   const [photoPreviewIndex, setPhotoPreviewIndex] = useState(0);
   const [stackTopIndex, setStackTopIndex] = useState(0);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const photoPreviewScrollRef = useRef(null);
   const prevMediaCountRef = useRef(0);
   const lastHoldStartTokenRef = useRef(0);
@@ -282,6 +284,30 @@ const PostCreationForm = ({
   useEffect(() => {
     isVideoFinalizingRef.current = isVideoFinalizing;
   }, [isVideoFinalizing]);
+
+  useEffect(() => {
+    const showEvent =
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent =
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+
+    const handleKeyboardShow = (event) => {
+      const nextHeight = Number(event?.endCoordinates?.height || 0);
+      setKeyboardHeight(nextHeight);
+    };
+
+    const handleKeyboardHide = () => {
+      setKeyboardHeight(0);
+    };
+
+    const showSubscription = Keyboard.addListener(showEvent, handleKeyboardShow);
+    const hideSubscription = Keyboard.addListener(hideEvent, handleKeyboardHide);
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
 
   const clearForceStopFinalizeTimer = () => {
     if (forceStopFinalizeTimerRef.current) {
@@ -1321,6 +1347,13 @@ const PostCreationForm = ({
   ];
   const activeAudienceVisual =
     AUDIENCE_VISUALS[baseAudience] || AUDIENCE_VISUALS[POST_AUDIENCE.FRIENDS];
+  const composerKeyboardLift =
+    keyboardHeight > 0
+      ? Math.max(
+          0,
+          keyboardHeight - (insets?.bottom || 0) + (Platform.OS === "ios" ? 0 : 24),
+        )
+      : 0;
 
   const toggleOptionsPanel = () => {
     setOpenDropdown(null);
@@ -1752,7 +1785,14 @@ const PostCreationForm = ({
             </TouchableOpacity>
           </View>
 
-          <View style={styles.composerText}>
+          <View
+            style={[
+              styles.composerText,
+              {
+                transform: [{ translateY: -composerKeyboardLift }],
+              },
+            ]}
+          >
             <TextInput
               style={styles.headlineInput}
               placeholder="Title"
@@ -2636,8 +2676,9 @@ const createStyles = (palette, isDark, insets = { top: 0, bottom: 0 }) =>
       position: "absolute",
       left: 14,
       right: 84,
-      bottom: (insets?.bottom || 0) + 24,
+      bottom: (insets?.bottom || 0) + (Platform.OS === "ios" ? 108 : 122),
       gap: 8,
+      zIndex: 11,
     },
     headlineInput: {
       color: "#ffffff",
