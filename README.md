@@ -80,7 +80,6 @@ adb install -r Vent-Adnriod.apk
 - `npm run start:android`: starts Metro and targets Android.
 - `npm run start:clear`: starts Metro with a cleared cache.
 - `npm run android`: builds and installs the Android dev client.
-- `npm run web`: starts the Expo web version for browser testing.
 
 ## Local Supabase
 
@@ -99,16 +98,6 @@ npm run db:schema:pull
 ```
 
 This updates `supabase/main_schema_snapshot.sql` and writes a dated `supabase/remote_schema_schema-sync-YYYYMMDD.sql` copy.
-
-## Password Reset Smoke Test
-
-Use a fresh OTP code from a reset email:
-
-```sh
-npm run smoke:reset -- --email you@example.com --token 123456 --password NewPass123
-```
-
-The command calls the `reset-password-with-otp` Supabase edge function directly and prints the backend result.
 
 ## Notes About File Comments
 
