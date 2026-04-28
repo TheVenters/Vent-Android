@@ -80,7 +80,6 @@ adb install -r Vent-Adnriod.apk
 - `npm run start:android`: starts Metro and targets Android.
 - `npm run start:clear`: starts Metro with a cleared cache.
 - `npm run android`: builds and installs the Android dev client.
-- `npm run ios`: builds and installs the iOS dev client.
 - `npm run web`: starts the Expo web version for browser testing.
 
 ## Local Supabase
