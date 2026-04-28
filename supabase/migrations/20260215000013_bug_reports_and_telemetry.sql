@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000013_bug_reports_and_telemetry.sql.
+
 -- ============================================================================
 -- Client telemetry + bug reports
 -- ============================================================================

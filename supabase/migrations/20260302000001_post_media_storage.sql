@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260302000001_post_media_storage.sql.
+
 -- ============================================================================
 -- Post media storage bucket + write policies
 -- ============================================================================

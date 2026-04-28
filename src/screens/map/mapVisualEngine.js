@@ -1,3 +1,5 @@
+// File purpose: Map visualization helpers that group nearby pins into clouds and convert geo coordinates to screen positions.
+
 const CLOUD_MIN_POST_COUNT = 2;
 const CLOUD_RADIUS_PADDING_METERS = 40;
 const CLOUD_MIN_RADIUS_METERS = 120;
@@ -7,8 +9,10 @@ const CLUSTER_DISTANCE_PX = 44;
 const CLUSTER_MERGE_DISTANCE_PX = 50;
 const CLUSTER_VIEWPORT_PADDING_PX = 160;
 
+// Converts degrees to radians for geographic distance calculations.
 const toRadians = (degrees) => (degrees * Math.PI) / 180;
 
+// Calculates the approximate distance in meters between two coordinates.
 const haversineMeters = (a, b) => {
   const earthRadiusMeters = 6371000;
   const deltaLat = toRadians(b.latitude - a.latitude);
@@ -26,12 +30,14 @@ const haversineMeters = (a, b) => {
   return earthRadiusMeters * y;
 };
 
+// Checks whether a pin has usable latitude and longitude values.
 export const hasValidCoordinate = (post) =>
   typeof post?.lat === "number" &&
   Number.isFinite(post.lat) &&
   typeof post?.lng === "number" &&
   Number.isFinite(post.lng);
 
+// Wraps longitude values into the -180 to 180 range.
 const normalizeLongitude = (longitude) => {
   if (!Number.isFinite(longitude)) return longitude;
   let next = longitude;
@@ -40,6 +46,7 @@ const normalizeLongitude = (longitude) => {
   return next;
 };
 
+// Checks whether a longitude falls inside map bounds, including dateline wrapping.
 const isLongitudeWithinBounds = (longitude, minLng, maxLng) => {
   if (minLng <= maxLng) {
     return longitude >= minLng && longitude <= maxLng;
@@ -94,6 +101,7 @@ export const isCoordinateWithinRegionBounds = (
   return isLongitudeWithinBounds(longitude, minLng, maxLng);
 };
 
+// Projects a map coordinate into approximate screen coordinates for clustering.
 const toScreenPoint = (coordinate, mapRegion, mapSize) => {
   const width = Number(mapSize?.width || 0);
   const height = Number(mapSize?.height || 0);
@@ -141,9 +149,11 @@ const isScreenPointWithinClusterViewport = (
   );
 };
 
+// Checks whether cloud only post is true.
 export const isCloudOnlyPost = (pin) =>
   pin?.geometry?.visibility_mode === "cloud_only";
 
+// Builds one visual cloud model from a group of nearby posts.
 const buildCloudFromPosts = (groupPosts) => {
   if (!Array.isArray(groupPosts) || groupPosts.length === 0) {
     return null;
@@ -189,6 +199,7 @@ const buildCloudFromPosts = (groupPosts) => {
   };
 };
 
+// Groups posts by screen position into visual map clouds.
 const buildCloudsFromPosts = (posts, mapRegion, mapSize) => {
   const candidates = (posts || []).filter(hasValidCoordinate);
   if (candidates.length < CLOUD_MIN_POST_COUNT) return [];
@@ -196,7 +207,9 @@ const buildCloudsFromPosts = (posts, mapRegion, mapSize) => {
   const clusterDistancePx = CLUSTER_DISTANCE_PX;
   const clusterDistancePxSq = clusterDistancePx * clusterDistancePx;
   const cellSize = clusterDistancePx;
+// Converts a value to cell.
   const toCell = (value) => Math.floor(value / cellSize);
+// Supports the cellKey workflow in this file.
   const cellKey = (x, y) => `${x}:${y}`;
 
   const points = candidates
@@ -274,6 +287,7 @@ const buildCloudsFromPosts = (posts, mapRegion, mapSize) => {
   return clouds;
 };
 
+// Combines nearby visual clouds to reduce map clutter.
 const mergeNearbyClouds = (clouds, mapRegion, mapSize) => {
   if (!Array.isArray(clouds) || clouds.length < 2) return clouds || [];
 
@@ -422,6 +436,7 @@ export const computeMapVisuals = (
   return { visiblePins, visibleClouds };
 };
 
+// Supports the haveSameEntitySignatures workflow in this file.
 export const haveSameEntitySignatures = (left, right, getSignature) => {
   if (left === right) return true;
   if (!Array.isArray(left) || !Array.isArray(right)) return false;
@@ -435,6 +450,7 @@ export const haveSameEntitySignatures = (left, right, getSignature) => {
   return true;
 };
 
+// Gets pin visual signature for the caller.
 export const getPinVisualSignature = (pin) =>
   [
     String(pin?.id || ""),
@@ -445,6 +461,7 @@ export const getPinVisualSignature = (pin) =>
     String(pin?.posted_from_current_location ? "1" : "0"),
   ].join("|");
 
+// Gets cloud visual signature for the caller.
 export const getCloudVisualSignature = (cloud) =>
   [
     String(cloud?.id || ""),

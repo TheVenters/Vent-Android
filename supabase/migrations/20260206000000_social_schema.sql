@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260206000000_social_schema.sql.
+
 -- ============================================================================
 -- Social Features Schema: profiles, pins, friends
 -- ============================================================================

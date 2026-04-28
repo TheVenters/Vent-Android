@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260206000002_messages.sql.
+
 -- ============================================================================
 -- Messages Table for Direct Messaging between Friends
 -- ============================================================================

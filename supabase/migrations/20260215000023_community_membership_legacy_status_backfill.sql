@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000023_community_membership_legacy_status_backfill.sql.
+
 -- Backfill legacy community membership values so chat/membership RLS checks work
 -- consistently for older rows.
 

@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000012_pin_comment_replies_and_self_comments.sql.
+
 -- ============================================================================
 -- Pin comments: threaded replies + allow commenting on own pins
 -- ============================================================================

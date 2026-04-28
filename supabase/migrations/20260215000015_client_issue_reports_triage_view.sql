@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000015_client_issue_reports_triage_view.sql.
+
 -- ============================================================================
 -- Convenience view for bug triage
 -- ============================================================================

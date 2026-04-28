@@ -1,3 +1,5 @@
+// File purpose: Google Maps dark-mode style rules used by the map screen.
+
 export const MAP_DARK_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#1d2c4d' }] },
   { elementType: 'labels.text.fill', stylers: [{ color: '#8ec3b9' }] },

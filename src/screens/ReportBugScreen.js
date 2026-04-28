@@ -1,3 +1,5 @@
+// File purpose: Issue reporting screen that lets users submit bug reports with optional screenshot context.
+
 import React, { useEffect, useState } from 'react';
 import {
   Alert,
@@ -21,6 +23,7 @@ import { getCurrentTelemetryScreen, submitBugReport } from '../services/telemetr
 
 const MIN_REPORT_LENGTH = 8;
 
+// Converts unknown errors into readable messages for alerts and reports.
 const formatErrorMessage = (error) => {
   if (!error) return 'Unknown error';
   const message = String(error?.message || '').trim();
@@ -32,6 +35,7 @@ const formatErrorMessage = (error) => {
   }
 };
 
+// Renders the issue report form and submits telemetry reports.
 const ReportBugScreen = ({ navigation, route }) => {
   const { palette } = useAppTheme();
   const insets = useSafeAreaInsets();
@@ -47,6 +51,7 @@ const ReportBugScreen = ({ navigation, route }) => {
 
   useEffect(() => {
     let active = true;
+// Loads user from storage or the backend.
     const loadUser = async () => {
       const user = await getCurrentUser();
       if (!active) return;
@@ -58,6 +63,7 @@ const ReportBugScreen = ({ navigation, route }) => {
     };
   }, []);
 
+// Supports the pickScreenshot workflow in this file.
   const pickScreenshot = async () => {
     try {
       const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -94,6 +100,7 @@ const ReportBugScreen = ({ navigation, route }) => {
     }
   };
 
+// Handles submit interactions or requests.
   const handleSubmit = async () => {
     const trimmed = String(description || '').trim();
     if (trimmed.length < MIN_REPORT_LENGTH) {
@@ -234,6 +241,7 @@ const ReportBugScreen = ({ navigation, route }) => {
   );
 };
 
+// Builds StyleSheet values from the current theme palette and safe-area inputs.
 const createStyles = (palette, topInset = 0) =>
   StyleSheet.create({
     container: {

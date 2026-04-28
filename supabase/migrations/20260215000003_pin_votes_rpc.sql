@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000003_pin_votes_rpc.sql.
+
 -- ==========================================================================
 -- Pin Votes RPC helpers
 -- Provide stable vote summary reads + writes using auth.uid() server-side.

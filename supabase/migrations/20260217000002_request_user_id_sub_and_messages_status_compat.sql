@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260217000002_request_user_id_sub_and_messages_status_compat.sql.
+
 -- ============================================================================
 -- Auth identity fallback hardening + legacy friendship status compatibility.
 -- ============================================================================

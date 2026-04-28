@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260201000000_user_overlay.sql.
+
 create extension if not exists pgcrypto;
 do $$
 begin

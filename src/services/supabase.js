@@ -1,3 +1,5 @@
+// File purpose: Supabase client and API wrapper for auth, social actions, storage uploads, and resilient network calls.
+
 import 'react-native-url-polyfill/auto';
 import { AppState, Platform } from 'react-native';
 import { createClient } from '@supabase/supabase-js';
@@ -25,9 +27,11 @@ const DEBUG_SUPABASE_NETWORK = ['1', 'true', 'yes', 'on'].includes(
   String(process.env.EXPO_PUBLIC_DEBUG_SUPABASE_NETWORK || '').toLowerCase(),
 );
 
+// Waits for a number of milliseconds before retrying a network request.
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const NON_OK_BODY_LOG_LIMIT = 320;
 
+// Reads a response/request header value across Headers and plain-object shapes.
 const getHeaderValue = (headers, key) => {
   if (!headers) return '';
   const target = String(key || '').toLowerCase();
@@ -58,6 +62,7 @@ const getHeaderValue = (headers, key) => {
   return '';
 };
 
+// Extracts URL and method metadata for logging resilient fetch attempts.
 const getRequestMeta = (input, init) => {
   const url = typeof input === 'string' ? input : String(input?.url || '');
   let host = '';
@@ -86,6 +91,7 @@ const getRequestMeta = (input, init) => {
   };
 };
 
+// Classifies network errors that are worth retrying.
 const isRetryableNetworkError = (error) => {
   const message = String(
     error?.message || error?.details || error || '',
@@ -100,6 +106,7 @@ const isRetryableNetworkError = (error) => {
   );
 };
 
+// Wraps fetch with retry behavior for transient Supabase/network failures.
 const resilientFetch = async (input, init) => {
   let lastError = null;
   const requestMeta = getRequestMeta(input, init);
@@ -169,6 +176,7 @@ const resilientFetch = async (input, init) => {
   throw lastError || new Error('Network request failed');
 };
 
+// Creates the configured Supabase client used throughout the app.
 const createSupabaseClient = () =>
   createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     global: {
@@ -269,6 +277,7 @@ export const getCurrentUser = async () => {
   }
 };
 
+// Decodes a JWT payload without validating the signature.
 const parseJwtPayload = (token) => {
   if (!token || typeof token !== 'string') return null;
   const parts = token.split('.');
@@ -289,6 +298,7 @@ const parseJwtPayload = (token) => {
   }
 };
 
+// Checks whether a Supabase session includes a currently usable access token.
 const isSessionJwtUsable = (session) => {
   const userId = session?.user?.id;
   const token = session?.access_token;
@@ -303,6 +313,7 @@ const isSessionJwtUsable = (session) => {
   return exp > nowSeconds + tokenSkewBufferSeconds;
 };
 
+// Detects Supabase errors caused by a missing auth session.
 const isAuthSessionMissingError = (error) => {
   const name = String(error?.name || '').toLowerCase();
   const message = String(error?.message || '').toLowerCase();
@@ -319,6 +330,7 @@ export const getActiveSession = async () => {
     return globalThis.__VENT_ACTIVE_SESSION_PROMISE__;
   }
 
+// Supports the resolver workflow in this file.
   const resolver = (async () => {
     let currentSession = null;
     let serverValidated = false;
@@ -379,6 +391,7 @@ export const getActiveSession = async () => {
   }
 };
 
+// Supports the signIn workflow in this file.
 export const signIn = async (email, password) => {
   const { data, error } = await supabase.auth.signInWithPassword({
     email,
@@ -387,6 +400,7 @@ export const signIn = async (email, password) => {
   return { data, error };
 };
 
+// Supports the signUp workflow in this file.
 export const signUp = async (email, password, username, displayName) => {
   const { data, error } = await supabase.auth.signUp({
     email,
@@ -401,16 +415,19 @@ export const signUp = async (email, password, username, displayName) => {
   return { data, error };
 };
 
+// Supports the signOut workflow in this file.
 export const signOut = async () => {
   const { error } = await supabase.auth.signOut();
   return { error };
 };
 
+// Supports the resetPassword workflow in this file.
 export const resetPassword = async (email) => {
   const { data, error } = await supabase.auth.resetPasswordForEmail(email);
   return { data, error };
 };
 
+// Reads a response body as JSON while tolerating empty or invalid JSON.
 const safeJson = async (response) => {
   try {
     return await response.json();
@@ -422,6 +439,7 @@ const safeJson = async (response) => {
 const RESET_PASSWORD_FUNCTION_PATH = '/functions/v1/reset-password-with-otp';
 const SOCIAL_ACTIONS_FUNCTION_PATH = '/functions/v1/social-actions';
 
+// Calls a Supabase edge function and normalizes its success/error response.
 const invokeEdgeFunction = async (path, payload) => {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     return {
@@ -457,6 +475,7 @@ const invokeEdgeFunction = async (path, payload) => {
   }
 };
 
+// Calls the password reset edge function with email, OTP, and new password.
 const resetPasswordViaEdgeFunction = async (email, token, newPassword) => {
   return invokeEdgeFunction(RESET_PASSWORD_FUNCTION_PATH, {
     email,
@@ -465,6 +484,7 @@ const resetPasswordViaEdgeFunction = async (email, token, newPassword) => {
   });
 };
 
+// Supports the resetPasswordWithOtp workflow in this file.
 export const resetPasswordWithOtp = async (email, token, newPassword) => {
   const edgeResult = await resetPasswordViaEdgeFunction(
     email,
@@ -485,6 +505,7 @@ export const resetPasswordWithOtp = async (email, token, newPassword) => {
   return { data: edgeResult.data, error: edgeResult.error };
 };
 
+// Calls the social-actions edge function with auth token handling.
 const socialAction = async (action, payload, accessToken, refreshToken = null) => {
   if (DEBUG_SUPABASE_NETWORK) {
     console.warn('Supabase socialAction request', {
@@ -529,9 +550,11 @@ const DEFAULT_POST_MEDIA_BUCKET_CANDIDATES = [
   .filter(Boolean);
 const POST_MEDIA_SIGNED_URL_TTL_SEC = 60 * 60 * 24;
 
+// Removes duplicate strings while preserving their first-seen order.
 const dedupeStrings = (values) =>
   Array.from(new Set((Array.isArray(values) ? values : []).filter(Boolean)));
 
+// Converts base64 media data into an ArrayBuffer for upload.
 const decodeBase64ToArrayBuffer = (base64) => {
   const normalized = String(base64 || '')
     .replace(/\s+/g, '')
@@ -556,6 +579,7 @@ const decodeBase64ToArrayBuffer = (base64) => {
   return bytes.buffer;
 };
 
+// Chooses a file extension from a media URL or declared media type.
 const inferMediaExtension = (mediaUrl, mediaType) => {
   const normalizedType = String(mediaType || '').toLowerCase();
   const normalizedUrl = String(mediaUrl || '');
@@ -581,6 +605,7 @@ const inferMediaExtension = (mediaUrl, mediaType) => {
   return normalizedType === 'video' ? 'mp4' : 'jpg';
 };
 
+// Chooses an upload content type from extension and media type.
 const inferMediaContentType = (extension, mediaType) => {
   const ext = String(extension || '').toLowerCase();
   if (ext === 'png') return 'image/png';
@@ -594,6 +619,7 @@ const inferMediaContentType = (extension, mediaType) => {
     : 'image/jpeg';
 };
 
+// Reads local, data, or remote media into an ArrayBuffer for Supabase storage.
 const readMediaAsArrayBuffer = async (mediaUrl) => {
   const uri = String(mediaUrl || '').trim();
   if (!uri) throw new Error('mediaUrl is required.');
@@ -614,15 +640,18 @@ const readMediaAsArrayBuffer = async (mediaUrl) => {
   return payload;
 };
 
+// Gets post media bucket candidates for the caller.
 export const getPostMediaBucketCandidates = () =>
   dedupeStrings(DEFAULT_POST_MEDIA_BUCKET_CANDIDATES);
 
+// Checks whether storage media pointer is true.
 export const isStorageMediaPointer = (value) =>
   String(value || '')
     .trim()
     .toLowerCase()
     .startsWith(STORAGE_MEDIA_SCHEME);
 
+// Parses storage media references from request payloads before upload or deletion work.
 export const parseStorageMediaPointer = (value) => {
   const pointer = String(value || '').trim();
   if (!isStorageMediaPointer(pointer)) return null;
@@ -641,6 +670,7 @@ export const parseStorageMediaPointer = (value) => {
   }
 };
 
+// Converts a value to storage media pointer.
 export const toStorageMediaPointer = (bucket, path) => {
   const normalizedBucket = String(bucket || '').trim();
   const normalizedPath = String(path || '').trim();
@@ -648,6 +678,7 @@ export const toStorageMediaPointer = (bucket, path) => {
   return `${STORAGE_MEDIA_SCHEME}${encodeURIComponent(normalizedBucket)}/${encodeURIComponent(normalizedPath)}`;
 };
 
+// Detects storage errors caused by a missing Supabase bucket.
 const isMissingBucketError = (error) => {
   const message = String(error?.message || '').toLowerCase();
   return message.includes('bucket') && message.includes('not found');
@@ -733,6 +764,7 @@ export const hydratePinsWithSignedMediaUrls = async (
   if (rows.length === 0) return [];
 
   const accessToken = session?.access_token || null;
+// Reads candidate media list from the current environment or input.
   const readCandidateMediaList = (pin) => {
     const geometryList = Array.isArray(pin?.geometry?.media_urls)
       ? pin.geometry.media_urls

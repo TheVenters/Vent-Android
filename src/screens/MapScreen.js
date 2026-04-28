@@ -1,3 +1,5 @@
+// File purpose: Primary map experience that loads pins, renders layers, handles posting, clustering, comments, votes, and shape overlays.
+
 import React, {
   useState,
   useEffect,
@@ -101,6 +103,7 @@ import {
   hydrateAvatarUrlsInRows,
 } from "../utils/avatarUrls";
 
+// Builds a readable username label for a personal posting layer.
 const formatUsernameForLayer = (user) => {
   const fromMeta =
     user?.user_metadata?.username || user?.user_metadata?.display_name || null;
@@ -110,8 +113,10 @@ const formatUsernameForLayer = (user) => {
   return String(user?.id || "user").slice(0, 8);
 };
 
+// Builds the default layer name for a user personal posts layer.
 const makeUserPostingLayerName = (user) =>
   `user-${formatUsernameForLayer(user)}-posts`;
+// Normalizes layer identity strings before matching or comparing them.
 const normalizeLayerIdentityToken = (value) =>
   String(value || "")
     .trim()
@@ -138,6 +143,7 @@ const PLANE_CORNER_MERGE_THRESHOLD_METERS = 14;
 const PLANE_CORNER_MERGE_HOLD_MS = 550;
 const PLANE_RECT_DRAG_END_DEBOUNCE_MS = 140;
 
+// Normalizes selected audience keys for stable comparisons.
 const normalizeAudienceKeys = (audienceKeys) =>
   Array.from(
     new Set(
@@ -147,11 +153,14 @@ const normalizeAudienceKeys = (audienceKeys) =>
     ),
   ).sort();
 
+// Builds a stable cache key from selected layer and audience IDs.
 const buildLayerRequestKey = (layerIds, audienceKeys) =>
   `${toNormalizedLayerIdKey(layerIds)}::${normalizeAudienceKeys(audienceKeys).join("|")}`;
 
+// Converts degrees to radians for geographic distance calculations.
 const toRadians = (degrees) => (degrees * Math.PI) / 180;
 
+// Calculates the approximate distance in meters between two coordinates.
 const haversineMeters = (a, b) => {
   const earthRadiusMeters = 6371000;
   const deltaLat = toRadians(b.latitude - a.latitude);
@@ -169,6 +178,7 @@ const haversineMeters = (a, b) => {
   return earthRadiusMeters * y;
 };
 
+// Finds the midpoint coordinate for a polyline.
 const getLineMidpointCoordinate = (coords) => {
   if (!Array.isArray(coords) || coords.length === 0) return null;
   if (coords.length === 1) return coords[0];
@@ -207,6 +217,7 @@ const getLineMidpointCoordinate = (coords) => {
   return coords[coords.length - 1];
 };
 
+// Finds a reasonable center point for a polygon.
 const getPolygonCenterCoordinate = (coords) => {
   if (!Array.isArray(coords) || coords.length === 0) return null;
   const valid = coords.filter(
@@ -227,6 +238,7 @@ const getPolygonCenterCoordinate = (coords) => {
   };
 };
 
+// Simplifies a line using the Douglas-Peucker algorithm.
 const douglasPeucker = (points, epsilonMeters) => {
   if (!Array.isArray(points) || points.length <= 2) {
     return Array.isArray(points) ? points : [];
@@ -254,6 +266,7 @@ const douglasPeucker = (points, epsilonMeters) => {
   return [start, end];
 };
 
+// Reduces coordinate count while preserving endpoints and closure when needed.
 const downsampleCoordinates = (coords, maxPoints, isClosed = false) => {
   if (!Array.isArray(coords) || coords.length <= maxPoints) {
     return Array.isArray(coords) ? coords : [];
@@ -282,12 +295,14 @@ const downsampleCoordinates = (coords, maxPoints, isClosed = false) => {
   return sampled;
 };
 
+// Simplifies drawn line coordinates before storage or rendering.
 const simplifyLineCoordinates = (coords) => {
   if (!Array.isArray(coords) || coords.length < 2) return [];
   const simplified = douglasPeucker(coords, DRAW_SIMPLIFY_TOLERANCE_METERS);
   return downsampleCoordinates(simplified, DRAW_MAX_LINE_POINTS, false);
 };
 
+// Extracts the outer boundary from a plane-style coordinate set.
 const getPlaneOuterBoundary = (coords) => {
   if (!Array.isArray(coords) || coords.length < 3) {
     return Array.isArray(coords) ? coords : [];
@@ -317,6 +332,7 @@ const getPlaneOuterBoundary = (coords) => {
     if (a.longitude === b.longitude) return a.latitude - b.latitude;
     return a.longitude - b.longitude;
   });
+// Supports the cross workflow in this file.
   const cross = (o, a, b) =>
     (a.longitude - o.longitude) * (b.latitude - o.latitude) -
     (a.latitude - o.latitude) * (b.longitude - o.longitude);
@@ -348,6 +364,7 @@ const getPlaneOuterBoundary = (coords) => {
   return hull.length >= 3 ? hull : unique;
 };
 
+// Simplifies plane polygon coordinates while preserving usable geometry.
 const simplifyPlaneCoordinates = (coords) => {
   if (!Array.isArray(coords) || coords.length < 3) return [];
   const outerBoundary = getPlaneOuterBoundary(coords);
@@ -361,6 +378,7 @@ const simplifyPlaneCoordinates = (coords) => {
   return downsampleCoordinates(opened, DRAW_MAX_PLANE_POINTS, true);
 };
 
+// Builds rectangle coordinates from two diagonal corner points.
 const buildRectangleFromDiagonal = (anchor, target) => {
   if (
     !Number.isFinite(anchor?.latitude) ||
@@ -384,6 +402,7 @@ const buildRectangleFromDiagonal = (anchor, target) => {
   ];
 };
 
+// Calculates the distance from a coordinate to a line segment.
 const distancePointToSegmentMeters = (point, start, end) => {
   if (
     !point ||
@@ -428,6 +447,7 @@ const distancePointToSegmentMeters = (point, start, end) => {
   return Math.hypot(px - closestX, py - closestY);
 };
 
+// Finds the closest polygon edge to a tap point within a threshold.
 const findNearestPlaneEdgeIndex = (coords, point, thresholdMeters) => {
   if (!Array.isArray(coords) || coords.length < 2) return -1;
 
@@ -447,16 +467,19 @@ const findNearestPlaneEdgeIndex = (coords, point, thresholdMeters) => {
   return bestDistance <= thresholdMeters ? bestIndex : -1;
 };
 
+// Checks whether a pin has usable latitude and longitude values.
 const hasValidCoordinate = (post) =>
   typeof post?.lat === "number" &&
   Number.isFinite(post.lat) &&
   typeof post?.lng === "number" &&
   Number.isFinite(post.lng);
 
+// Checks whether a standalone coordinate can be rendered on the map.
 const hasValidMapCoordinate = (coordinate) =>
   Number.isFinite(coordinate?.latitude) &&
   Number.isFinite(coordinate?.longitude);
 
+// Detects pins whose media still needs signed URL hydration.
 const pinHasUnhydratedMedia = (pin) => {
   const primary = String(pin?.media_url || "").trim();
   if (isStorageMediaPointer(primary)) return true;
@@ -470,6 +493,7 @@ const pinHasUnhydratedMedia = (pin) => {
   );
 };
 
+// Checks whether a pin includes any media reference.
 const pinHasAnyMedia = (pin) => {
   if (!pin) return false;
   if (["media", "photo", "video"].includes(String(pin?.type || "").toLowerCase())) {
@@ -488,6 +512,7 @@ const pinHasAnyMedia = (pin) => {
   );
 };
 
+// Wraps longitude values into the -180 to 180 range.
 const normalizeLongitude = (longitude) => {
   if (!Number.isFinite(longitude)) return longitude;
   let next = longitude;
@@ -496,6 +521,7 @@ const normalizeLongitude = (longitude) => {
   return next;
 };
 
+// Checks whether a longitude falls inside map bounds, including dateline wrapping.
 const isLongitudeWithinBounds = (longitude, minLng, maxLng) => {
   if (minLng <= maxLng) {
     return longitude >= minLng && longitude <= maxLng;
@@ -550,6 +576,7 @@ const isCoordinateWithinRegionBounds = (
   return isLongitudeWithinBounds(longitude, minLng, maxLng);
 };
 
+// Projects a map coordinate into approximate screen coordinates for clustering.
 const toScreenPoint = (coordinate, mapRegion, mapSize) => {
   const width = Number(mapSize?.width || 0);
   const height = Number(mapSize?.height || 0);
@@ -597,15 +624,18 @@ const isScreenPointWithinClusterViewport = (
   );
 };
 
+// Validates raw longitude/latitude pairs before converting them.
 const isFiniteLngLatPair = (value) =>
   Array.isArray(value) &&
   value.length >= 2 &&
   Number.isFinite(Number(value[0])) &&
   Number.isFinite(Number(value[1]));
+// Converts raw coordinate pairs into React Native Maps coordinate objects.
 const toMapCoordinate = (value) => ({
   longitude: Number(value[0]),
   latitude: Number(value[1]),
 });
+// Reads stored shape geometry from a pin record.
 const getPersistedShapeGeometry = (pin) => {
   const geometry = pin?.geometry;
   if (!geometry || typeof geometry !== "object") return null;
@@ -634,12 +664,14 @@ const getPersistedShapeGeometry = (pin) => {
 
   return null;
 };
+// Detects Supabase row-level-security failures so the UI can show clearer messaging.
 const isRlsPolicyError = (error) =>
   error?.code === "42501" ||
   String(error?.message || "")
     .toLowerCase()
     .includes("row-level security policy");
 
+// Converts unknown errors into readable messages for alerts and reports.
 const formatErrorMessage = (error) => {
   if (!error) return "Unknown error";
   if (typeof error === "string") return error;
@@ -659,6 +691,7 @@ const formatErrorMessage = (error) => {
   }
 };
 
+// Detects temporary network failures that can be retried.
 const isTransientNetworkError = (error) => {
   const msg = formatErrorMessage(error).toLowerCase();
   const raw = String(error || "").toLowerCase();
@@ -677,6 +710,7 @@ const isTransientNetworkError = (error) => {
   );
 };
 
+// Writes optional debug logs for layer loading and filtering.
 const logLayerTrace = (label, payload = null) => {
   if (!LAYER_TRACE_ENABLED) return;
   if (payload === null) {
@@ -686,6 +720,7 @@ const logLayerTrace = (label, payload = null) => {
   console.log(`[LayerTrace] ${label}`, payload);
 };
 
+// Writes optional debug logs for community map behavior.
 const logCommunityMapTrace = (label, payload = null) => {
   if (!COMMUNITY_MAP_TRACE_ENABLED) return;
   if (payload === null) {
@@ -695,6 +730,7 @@ const logCommunityMapTrace = (label, payload = null) => {
   console.log(`[CommunityMapTrace] ${label}`, payload);
 };
 
+// Normalizes comment rows from the backend into UI-friendly objects.
 const normalizePinComment = (comment) => {
   if (!comment || typeof comment !== "object") return null;
   const id = String(comment.id || "");
@@ -718,6 +754,7 @@ const normalizePinComment = (comment) => {
   };
 };
 
+// Filters layer data down to the public layers available to signed-out users.
 const toGuestPublicOnlyLayers = (layerRows) => {
   const source = Array.isArray(layerRows) ? layerRows : [];
   const publicSystemLayers = source.filter((layer) => {
@@ -806,6 +843,7 @@ const buildVirtualMyPostsAudienceLayers = ({
   });
 };
 
+// Keeps system audience layer toggles aligned with the available layer rows.
 const synchronizeSystemAudienceStates = (layerRows) => {
   const rows = Array.isArray(layerRows) ? layerRows : [];
   const effectiveEnabledByAudience = new Map();
@@ -837,6 +875,7 @@ const synchronizeSystemAudienceStates = (layerRows) => {
   });
 };
 
+// Collects a root comment and its replies for threaded deletion or UI updates.
 const collectCommentThreadIds = (comments, rootCommentId) => {
   const byParentId = new Map();
   (Array.isArray(comments) ? comments : []).forEach((comment) => {
@@ -862,6 +901,7 @@ const collectCommentThreadIds = (comments, rootCommentId) => {
   return ids;
 };
 
+// Renders the main map and coordinates all pin, layer, location, and post interactions.
 const MapScreen = ({ navigation, route }) => {
   const { isDark, palette } = useAppTheme();
   const insets = useSafeAreaInsets();
@@ -1193,6 +1233,7 @@ const MapScreen = ({ navigation, route }) => {
         return inFlight.promise;
       }
 
+// Supports the requestPromise workflow in this file.
       const requestPromise = (async () => {
         setLayersLoading(true);
 
@@ -1809,6 +1850,7 @@ const MapScreen = ({ navigation, route }) => {
   );
 
   useEffect(() => {
+// Supports the initialize workflow in this file.
     const initialize = async () => {
       const user = await getCurrentUser();
       setCurrentUser(user);
@@ -1839,6 +1881,7 @@ const MapScreen = ({ navigation, route }) => {
       setIsAdmin(false);
       return;
     }
+// Supports the fetchAdminStatus workflow in this file.
     const fetchAdminStatus = async () => {
       try {
         const { data, error } = await supabase
@@ -1927,6 +1970,7 @@ const MapScreen = ({ navigation, route }) => {
 
     const layerName = makeUserPostingLayerName(currentUser);
     const legacyLayerName = `user-${currentUser.id}-posts`;
+// Checks whether recoverable ownership constraint error is true.
     const isRecoverableOwnershipConstraintError = (error) => {
       const message = String(error?.message || "").toLowerCase();
       return (
@@ -2097,6 +2141,7 @@ const MapScreen = ({ navigation, route }) => {
   useFocusEffect(
     useCallback(() => {
       let active = true;
+// Loads map preferences from storage or the backend.
       const loadMapPreferences = async () => {
         const nextCloudsEnabled = await getMapCloudsEnabled();
         if (active) {
@@ -2128,6 +2173,7 @@ const MapScreen = ({ navigation, route }) => {
     setSelectedCloud(null);
   }, [cloudsEnabled]);
 
+// Supports the clearCommunityMapContext workflow in this file.
   const clearCommunityMapContext = () => {
     setCommunityMapContext(null);
     if (route?.params?.communityMap) {
@@ -2201,6 +2247,7 @@ useEffect(() => {
     return () => cancelAnimationFrame(frame);
   }, [allLoadedPosts, arrowFocusedPinId, cloudsEnabled, mapSize, region]);
 
+// Supports the requestLocationPermission workflow in this file.
   const requestLocationPermission = async () => {
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
@@ -2231,6 +2278,7 @@ useEffect(() => {
       enabledLayerIdsInput,
       enabledAudienceKeysInput,
     );
+// Checks whether stale request is true.
     const isStaleRequest = () =>
       requestSeq !== pinLoadRequestSeqRef.current ||
       requestLayerKey !== latestEnabledLayerKeyRef.current;
@@ -2462,6 +2510,7 @@ useEffect(() => {
     return () => clearTimeout(timer);
   }, [currentUser?.id, handleRefreshLayersAndPins, layersLoading]);
 
+// Loads pin associations from storage or the backend.
   const loadPinAssociations = async (pin) => {
     if (!pin) {
       setSelectedPinLayers([]);
@@ -2564,6 +2613,7 @@ useEffect(() => {
     };
   };
 
+// Handles toggle layer interactions or requests.
   const handleToggleLayer = async (layerId, nextEnabled, options = {}) => {
     const userId = await resolveCurrentUserId();
     if (!userId) {
@@ -2776,6 +2826,7 @@ useEffect(() => {
     },
     [handleRefreshLayersAndPins, resolveCurrentUserId],
   );
+// Supports the clearPlaneInteractionTimers workflow in this file.
   const clearPlaneInteractionTimers = () => {
     if (planeRectStopTimerRef.current) {
       clearTimeout(planeRectStopTimerRef.current);
@@ -2788,16 +2839,19 @@ useEffect(() => {
     planeMergeTargetRef.current = null;
   };
 
+// Supports the resetLineStrokeTracking workflow in this file.
   const resetLineStrokeTracking = () => {
     activeLineStrokeStartIndexRef.current = null;
     lineStrokeStartIndicesRef.current = [];
   };
 
+// Supports the resetPlaneStrokeTracking workflow in this file.
   const resetPlaneStrokeTracking = () => {
     activePlaneStrokeStartIndexRef.current = null;
     planeStrokeStartIndicesRef.current = [];
   };
 
+// Supports the beginActiveLineStroke workflow in this file.
   const beginActiveLineStroke = () => {
     const startIndex = drawingCoordsRef.current.length;
     activeLineStrokeStartIndexRef.current = startIndex;
@@ -2808,6 +2862,7 @@ useEffect(() => {
     }
   };
 
+// Supports the finalizeActiveLineStroke workflow in this file.
   const finalizeActiveLineStroke = () => {
     const startIndex = activeLineStrokeStartIndexRef.current;
     if (!Number.isInteger(startIndex) || startIndex < 0) {
@@ -2825,6 +2880,7 @@ useEffect(() => {
     activeLineStrokeStartIndexRef.current = null;
   };
 
+// Supports the beginActivePlaneStroke workflow in this file.
   const beginActivePlaneStroke = () => {
     const startIndex = drawingCoordsRef.current.length;
     activePlaneStrokeStartIndexRef.current = startIndex;
@@ -2835,6 +2891,7 @@ useEffect(() => {
     }
   };
 
+// Supports the finalizeActivePlaneStroke workflow in this file.
   const finalizeActivePlaneStroke = () => {
     const startIndex = activePlaneStrokeStartIndexRef.current;
     if (!Number.isInteger(startIndex) || startIndex < 0) {
@@ -2852,6 +2909,7 @@ useEffect(() => {
     activePlaneStrokeStartIndexRef.current = null;
   };
 
+// Supports the updateMapTouchState workflow in this file.
   const updateMapTouchState = (event, phase = "move") => {
     const now = Date.now();
     const previousTouchCount = activeMapTouchCountRef.current;
@@ -2942,6 +3000,7 @@ useEffect(() => {
     }
   };
 
+// Handles map press interactions or requests.
   const handleMapPress = (event) => {
     if (isPickingPostLocation && pendingPostData) {
       const { latitude, longitude } = event.nativeEvent.coordinate;
@@ -2955,6 +3014,7 @@ useEffect(() => {
     }
   };
 
+// Handles map long press interactions or requests.
   const handleMapLongPress = (event) => {
     if (!isDrawingMode || drawingType !== GEOMETRY_TYPES.PLANE) return;
     const { latitude, longitude } = event.nativeEvent.coordinate || {};
@@ -2983,6 +3043,7 @@ useEffect(() => {
     setDrawingCoords(buildRectangleFromDiagonal(nextCoord, nextCoord));
   };
 
+// Handles map pan drag interactions or requests.
   const handleMapPanDrag = (event) => {
     if (!isDrawingMode) return;
     if (activeMapTouchCountRef.current > 1) return;
@@ -3029,6 +3090,7 @@ useEffect(() => {
     setArrowNavigationResetToken((value) => value + 1);
   }, [dismissMapCallouts]);
 
+// Handles plane corner drag start interactions or requests.
   const handlePlaneCornerDragStart = () => {
     if (planeMergeHoldTimerRef.current) {
       clearTimeout(planeMergeHoldTimerRef.current);
@@ -3037,6 +3099,7 @@ useEffect(() => {
     planeMergeTargetRef.current = null;
   };
 
+// Handles plane corner drag interactions or requests.
   const handlePlaneCornerDrag = (index, event) => {
     const { latitude, longitude } = event?.nativeEvent?.coordinate || {};
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
@@ -3103,6 +3166,7 @@ useEffect(() => {
     });
   };
 
+// Handles plane corner drag end interactions or requests.
   const handlePlaneCornerDragEnd = (index, event) => {
     const { latitude, longitude } = event?.nativeEvent?.coordinate || {};
     if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
@@ -3121,6 +3185,7 @@ useEffect(() => {
     planeMergeTargetRef.current = null;
   };
 
+// Handles start drawing interactions or requests.
   const handleStartDrawing = (geometryType) => {
     clearPlaneInteractionTimers();
     resetLineStrokeTracking();
@@ -3131,6 +3196,7 @@ useEffect(() => {
     setDrawingCoords([]);
   };
 
+// Handles finish drawing interactions or requests.
   const handleFinishDrawing = () => {
     clearPlaneInteractionTimers();
     resetLineStrokeTracking();
@@ -3139,6 +3205,7 @@ useEffect(() => {
     setIsDrawingMode(false);
   };
 
+// Handles post submit interactions or requests.
   const handlePostSubmit = async (postData) => {
     if (!currentUser) {
       Alert.alert("Sign In Required", "Please sign in to create posts");
@@ -3580,6 +3647,7 @@ useEffect(() => {
     }
   };
 
+// Handles search interactions or requests.
   const handleSearch = (query) => {
     Alert.alert("Search", `Searching for: ${query}`);
   };
@@ -3605,6 +3673,7 @@ useEffect(() => {
     [allLoadedPosts],
   );
 
+// Supports the openLayerPosts workflow in this file.
   const openLayerPosts = async (layer) => {
     const pinLayerKey = getPinLayerKeyFromLayer(layer);
     setLayerPostsTarget({ ...layer, pinLayerKey });
@@ -3698,6 +3767,7 @@ useEffect(() => {
       return await inFlight;
     }
 
+// Supports the requestPromise workflow in this file.
     const requestPromise = (async () => {
       try {
         const session = await getActiveSession();
@@ -3844,6 +3914,7 @@ useEffect(() => {
       return await inFlight;
     }
 
+// Supports the requestPromise workflow in this file.
     const requestPromise = (async () => {
       try {
         const session = await getActiveSession();
@@ -3952,6 +4023,7 @@ useEffect(() => {
     [],
   );
 
+// Handles pin press interactions or requests.
   const handlePinPress = (pin) => {
     setShapePreviewPinId(null);
     dismissMapCallouts({ clearArrowFocus: false });
@@ -4057,6 +4129,7 @@ useEffect(() => {
 
     let active = true;
 
+// Supports the hydrateSelectedPinMedia workflow in this file.
     const hydrateSelectedPinMedia = async () => {
       try {
         const hydratedPin = await hydrateSinglePinMedia(selectedPin);
@@ -4143,6 +4216,7 @@ useEffect(() => {
     };
   }, [pins, currentUser?.id]);
 
+// Handles cloud press interactions or requests.
   const handleCloudPress = (cloud) => {
     setSelectedCloud(cloud);
     setCloudPostsModalVisible(true);
@@ -4194,6 +4268,7 @@ useEffect(() => {
     });
   };
 
+// Handles cloud post press interactions or requests.
   const handleCloudPostPress = (post) => {
     openPostFromPreview(post, {
       closeCloud: true,
@@ -4201,6 +4276,7 @@ useEffect(() => {
     });
   };
 
+// Handles layer post press interactions or requests.
   const handleLayerPostPress = (post) => {
     openPostFromPreview(post, {
       closeLayer: true,
@@ -4333,6 +4409,7 @@ useEffect(() => {
     [shapePreviewPinId, handleArrowPinFocus, handlePinPress],
   );
 
+// Handles vote pin interactions or requests.
   const handleVotePin = async (vote) => {
     if (!selectedPin) return;
     if (!isUuid(selectedPin.id)) {
@@ -4429,6 +4506,7 @@ useEffect(() => {
     }
   };
 
+// Handles add pin comment interactions or requests.
   const handleAddPinComment = async (content, options = {}) => {
     if (!selectedPin?.id) return false;
 
@@ -4678,6 +4756,7 @@ useEffect(() => {
     }
   };
 
+// Handles delete pin comment interactions or requests.
   const handleDeletePinComment = async (commentId) => {
     const normalizedCommentId = String(commentId || "");
     if (!isUuid(normalizedCommentId)) return false;
@@ -4738,6 +4817,7 @@ useEffect(() => {
         }
 
         let directAccessToken = session.access_token;
+// Supports the performDirectDelete workflow in this file.
         const performDirectDelete = async () => {
           const authed = supabaseWithAccessToken(directAccessToken);
           return await authed
@@ -4810,6 +4890,7 @@ useEffect(() => {
     }
   };
 
+// Handles update pin interactions or requests.
   const handleUpdatePin = async (pinId, updates) => {
     try {
       const normalizedUpdates = { ...(updates || {}) };
@@ -4874,7 +4955,9 @@ useEffect(() => {
     }
   };
 
+// Deletes a pin and associated grouped records when the actor has permission.
   const handleDeletePin = async (pinId) => {
+// Supports the applyDeletedPinIds workflow in this file.
     const applyDeletedPinIds = (ids) => {
       const deletedIdSet = new Set(ids);
       setAllLoadedPosts((prev) =>
@@ -4894,6 +4977,7 @@ useEffect(() => {
       setDeletingCommentId(null);
     };
 
+// Supports the showDeleteResultAlert workflow in this file.
     const showDeleteResultAlert = (deletedCount, requestedCount) => {
       if (deletedCount < requestedCount) {
         Alert.alert(
@@ -5504,6 +5588,7 @@ useEffect(() => {
   );
 };
 
+// Builds StyleSheet values from the current theme palette and safe-area inputs.
 const createStyles = (palette, insets = { top: 0, bottom: 0 }) =>
   StyleSheet.create({
     container: {

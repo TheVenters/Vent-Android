@@ -1,3 +1,5 @@
+// File purpose: Avatar URL helper that signs Supabase storage paths and leaves already-renderable URLs alone.
+
 import {
   getActiveSession,
   isStorageMediaPointer,
@@ -8,6 +10,7 @@ import {
 
 const AVATAR_SIGNED_URL_TTL_SEC = 60 * 60 * 24;
 
+// Checks whether an avatar value can be rendered without signing.
 const isDirectRenderableAvatarUrl = (value) => {
   const uri = String(value || "").trim().toLowerCase();
   if (!uri) return false;
@@ -22,6 +25,7 @@ const isDirectRenderableAvatarUrl = (value) => {
   );
 };
 
+// Chooses the Supabase storage client, optionally scoped to a supplied session.
 const getStorageClient = async (sessionOverride = null) => {
   const accessToken =
     sessionOverride?.access_token ||
@@ -30,6 +34,7 @@ const getStorageClient = async (sessionOverride = null) => {
   return accessToken ? supabaseWithAccessToken(accessToken) : supabase;
 };
 
+// Creates signed avatar URLs for Supabase storage paths.
 const resolveSignedAvatarUrlMap = async (values, sessionOverride = null) => {
   const pointers = Array.from(
     new Set(
@@ -92,6 +97,7 @@ export const hydrateAvatarUrlsInRows = async (
   });
 };
 
+// Supports the hydrateAvatarUrl workflow in this file.
 export const hydrateAvatarUrl = async (value, sessionOverride = null) => {
   const [row] = await hydrateAvatarUrlsInRows(
     [{ avatar_url: value }],
@@ -101,6 +107,7 @@ export const hydrateAvatarUrl = async (value, sessionOverride = null) => {
   return row?.avatar_url || null;
 };
 
+// Gets profile avatar url for the caller.
 export const getProfileAvatarUrl = async (userId, sessionOverride = null) => {
   const resolvedUserId = String(userId || "").trim();
   if (!resolvedUserId) return null;

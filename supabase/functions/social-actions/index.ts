@@ -1,3 +1,5 @@
+// File purpose: Supabase edge function that centralizes social actions such as pins, comments, votes, friends, communities, messages, and admin issue reports.
+
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
 
 const corsHeaders = {
@@ -6,6 +8,7 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+// Creates a JSON HTTP response with shared headers for Supabase edge functions.
 const jsonResponse = (status: number, body: Record<string, unknown>) =>
   new Response(JSON.stringify(body), {
     status,
@@ -47,6 +50,7 @@ type SocialAction =
   | "mark_direct_messages_read"
   | "list_community_messages";
 
+// Converts unknown request values into trimmed strings for validation.
 const asString = (value: unknown) => String(value ?? "").trim();
 const MAX_COMMENT_LENGTH = 500;
 const BUG_SCREENSHOT_BUCKET = "bug-report-screenshots";
@@ -54,10 +58,12 @@ const MEDIA_STORAGE_POINTER_SCHEME = "storage://";
 const DEFAULT_POST_MEDIA_SIGNED_URL_TTL_SEC = 60 * 60 * 24;
 const MAX_POST_MEDIA_SIGNED_URL_TTL_SEC = 60 * 60 * 24 * 7;
 
+// Checks whether a string has the UUID format expected by database IDs.
 const isUuid = (value: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
     .test(value);
 
+// Parses storage media references from request payloads before upload or deletion work.
 const parseStorageMediaPointer = (value: unknown) => {
   const pointer = asString(value);
   if (!pointer.toLowerCase().startsWith(MEDIA_STORAGE_POINTER_SCHEME)) return null;
@@ -300,6 +306,7 @@ const handleVoteSummary = async (
   return jsonResponse(200, { success: true, ...summary });
 };
 
+// Validates comment body text before it is stored.
 const parseCommentContent = (value: unknown) => {
   const comment = String(value ?? "").trim();
   if (!comment) return null;
@@ -307,6 +314,7 @@ const parseCommentContent = (value: unknown) => {
   return comment;
 };
 
+// Normalizes optional parent comment IDs used for replies.
 const parseOptionalCommentId = (value: unknown) => {
   const commentId = asString(value);
   if (!commentId) return null;
@@ -314,6 +322,7 @@ const parseOptionalCommentId = (value: unknown) => {
   return commentId;
 };
 
+// Detects old comment schemas that do not yet expose the expected identity columns.
 const isCommentIdentitySchemaError = (error: unknown) => {
   const code = asString((error as Record<string, unknown>)?.code);
   const message = asString((error as Record<string, unknown>)?.message).toLowerCase();
@@ -332,12 +341,14 @@ const isCommentIdentitySchemaError = (error: unknown) => {
   );
 };
 
+// Detects databases that do not yet support threaded comment parent IDs.
 const isParentCommentColumnError = (error: unknown) => {
   const code = asString((error as Record<string, unknown>)?.code);
   const message = asString((error as Record<string, unknown>)?.message).toLowerCase();
   return code === "42703" && message.includes('column "parent_comment_id"');
 };
 
+// Extracts the user ID from comment rows across old and new schema variants.
 const resolveCommentUserId = (row: Record<string, unknown>) => {
   const userId = asString(row?.user_id);
   if (userId) return userId;
@@ -1216,6 +1227,7 @@ const handleListPins = async (
     })
     .slice(0, limit);
 
+// Reads candidate media list from the current environment or input.
   const readCandidateMediaList = (pin: Record<string, unknown>) => {
     const geometryMediaUrls = Array.isArray((pin?.geometry as Record<string, unknown> | null)?.media_urls)
       ? ((pin?.geometry as Record<string, unknown>).media_urls as unknown[])
@@ -2162,6 +2174,7 @@ Deno.serve(async (req) => {
       return jsonResponse(401, { error: "Invalid or expired session token." });
     }
 
+// Supports the withRefreshedTokens workflow in this file.
     const withRefreshedTokens = async (response: Response) => {
       if (!actor.refreshedAccessToken || response.status !== 200) {
         return response;

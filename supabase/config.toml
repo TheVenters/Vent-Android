@@ -1,3 +1,5 @@
+# File purpose: Supabase local development configuration for API, database, auth, storage, and edge-function settings.
+
 # For detailed configuration reference documentation, visit:
 # https://supabase.com/docs/guides/local-development/cli/config
 # A string used to distinguish different Supabase projects on the same host. Defaults to the

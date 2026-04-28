@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000007_ensure_system_core_layers.sql.
+
 insert into public.layers (kind, name, enabled, owner_type, owner_id, is_public)
 select seed.kind, seed.name, true, 'system', null, seed.is_public
 from (

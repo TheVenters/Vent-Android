@@ -1,3 +1,5 @@
+-- File purpose: Supabase SQL reference file or schema snapshot used for database setup and comparison.
+
 
 
 

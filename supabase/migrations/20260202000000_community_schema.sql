@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260202000000_community_schema.sql.
+
 create table if not exists public.communities (
   id uuid primary key default gen_random_uuid(),
   slug text not null unique,

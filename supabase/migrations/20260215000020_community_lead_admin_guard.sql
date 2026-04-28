@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000020_community_lead_admin_guard.sql.
+
 -- Ensure lead-admin resolution requires accepted admin membership,
 -- and prevent non-lead-admin users from changing lead_admin_user_id directly.
 

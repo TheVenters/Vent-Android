@@ -1,3 +1,5 @@
+// File purpose: Direct-message conversation screen for one-on-one friend chats.
+
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
@@ -20,6 +22,7 @@ import {
 } from '../services/supabase';
 import { COLORS, SIZES } from '../constants/theme';
 
+// Renders a direct-message thread and sends new messages.
 const ChatScreen = ({ route, navigation }) => {
   const { friend } = route.params;
   const [currentUser, setCurrentUser] = useState(null);
@@ -41,11 +44,13 @@ const ChatScreen = ({ route, navigation }) => {
     }
   }, [currentUser, friend]);
 
+// Supports the initializeUser workflow in this file.
   const initializeUser = async () => {
     const user = await getCurrentUser();
     setCurrentUser(user);
   };
 
+// Loads messages from storage or the backend.
   const loadMessages = async () => {
     try {
       const session = await getActiveSession();
@@ -63,6 +68,7 @@ const ChatScreen = ({ route, navigation }) => {
     }
   };
 
+// Supports the markMessagesAsRead workflow in this file.
   const markMessagesAsRead = async () => {
     try {
       const session = await getActiveSession();
@@ -78,6 +84,7 @@ const ChatScreen = ({ route, navigation }) => {
     }
   };
 
+// Supports the subscribeToMessages workflow in this file.
   const subscribeToMessages = () => {
     const channel = supabase
       .channel(`chat-${currentUser.id}-${friend.id}`)
@@ -114,6 +121,7 @@ const ChatScreen = ({ route, navigation }) => {
     };
   };
 
+// Supports the sendMessage workflow in this file.
   const sendMessage = async () => {
     if (!newMessage.trim()) return;
 
@@ -143,6 +151,7 @@ const ChatScreen = ({ route, navigation }) => {
     }
   };
 
+// Formats time for display.
   const formatTime = (dateString) => {
     const date = new Date(dateString);
     const now = new Date();
@@ -162,6 +171,7 @@ const ChatScreen = ({ route, navigation }) => {
     });
   };
 
+// Supports the renderMessage workflow in this file.
   const renderMessage = ({ item, index }) => {
     const isMe = item.sender_id === currentUser?.id;
     const showDate = index === 0 ||

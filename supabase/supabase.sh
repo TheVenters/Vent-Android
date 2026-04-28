@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# File purpose: Shell helper script used by project setup, development, or Supabase maintenance workflows.
 set -euo pipefail
 
 SUPABASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

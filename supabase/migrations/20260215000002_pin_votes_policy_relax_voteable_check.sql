@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000002_pin_votes_policy_relax_voteable_check.sql.
+
 -- ==========================================================================
 -- Pin Votes RLS follow-up
 -- Relax vote eligibility to match original behavior:

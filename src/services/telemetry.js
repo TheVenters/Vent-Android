@@ -1,3 +1,5 @@
+// File purpose: Telemetry helpers for capturing app errors, issue reports, device metadata, and screenshots.
+
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
 import { getActiveSession, supabase, supabaseWithAccessToken } from './supabase';
@@ -12,9 +14,11 @@ let currentScreenName = null;
 let globalTrackingInstalled = false;
 let lastErrorSignatures = new Map();
 
+// Shortens text values before storing telemetry rows.
 const truncate = (value, maxLength = MAX_TEXT_LENGTH) =>
   String(value || '').slice(0, maxLength);
 
+// Removes empty values and truncates strings in telemetry metadata.
 const cleanObject = (input) => {
   if (!input || typeof input !== 'object') return {};
   const output = {};
@@ -35,8 +39,10 @@ const cleanObject = (input) => {
   return output;
 };
 
+// Returns the current timestamp in ISO format.
 const nowIso = () => new Date().toISOString();
 
+// Reads the app version from Expo constants.
 const readAppVersion = () =>
   truncate(
     Constants?.expoConfig?.version ||
@@ -46,6 +52,7 @@ const readAppVersion = () =>
     64,
   );
 
+// Reads the native build number from Expo constants.
 const readAppBuild = () =>
   truncate(
     Constants?.nativeBuildVersion ||
@@ -55,6 +62,7 @@ const readAppBuild = () =>
     64,
   );
 
+// Collects platform and app metadata for telemetry reports.
 const readDeviceInfo = () => {
   const details = {
     platform: Platform.OS,
@@ -66,6 +74,7 @@ const readDeviceInfo = () => {
   return truncate(JSON.stringify(details), 512);
 };
 
+// Converts thrown values into a consistent telemetry error shape.
 const normalizeError = (error) => {
   if (!error) {
     return {
@@ -89,9 +98,11 @@ const normalizeError = (error) => {
   };
 };
 
+// Builds a duplicate-detection key for telemetry events.
 const buildSignature = (category, severity, title, message, stack) =>
   `${category}|${severity}|${title}|${message}|${stack.slice(0, 300)}`;
 
+// Suppresses repeated telemetry events within a short window.
 const shouldDropDuplicate = (signature) => {
   const now = Date.now();
   const previous = lastErrorSignatures.get(signature) || 0;
@@ -107,6 +118,7 @@ const shouldDropDuplicate = (signature) => {
   return false;
 };
 
+// Writes one issue report row to Supabase.
 const insertIssueReport = async (row, session = null) => {
   const client = session?.access_token
     ? supabaseWithAccessToken(session.access_token)
@@ -122,6 +134,7 @@ const insertIssueReport = async (row, session = null) => {
   return data || null;
 };
 
+// Chooses a screenshot file extension from URI or MIME type.
 const resolveImageExtension = (uri, contentType = '') => {
   const lowerType = String(contentType || '').toLowerCase();
   if (lowerType.includes('heic') || lowerType.includes('heif')) return 'heic';
@@ -136,6 +149,7 @@ const resolveImageExtension = (uri, contentType = '') => {
   return 'jpg';
 };
 
+// Chooses a screenshot MIME type from extension or explicit type.
 const resolveImageMimeType = (fileExt, explicitMimeType = '') => {
   const lower = String(explicitMimeType || '').toLowerCase();
   if (lower.startsWith('image/')) return lower;
@@ -145,6 +159,7 @@ const resolveImageMimeType = (fileExt, explicitMimeType = '') => {
   return 'image/jpeg';
 };
 
+// Converts base64 media data into an ArrayBuffer for upload.
 const decodeBase64ToArrayBuffer = (base64Value) => {
   const normalized = String(base64Value || '').replace(/\s+/g, '');
   if (!normalized) return null;
@@ -166,6 +181,7 @@ const decodeBase64ToArrayBuffer = (base64Value) => {
   throw new Error('Base64 decoding is unavailable on this device.');
 };
 
+// Normalizes screenshot input into URI, base64, and MIME metadata.
 const normalizeScreenshotInput = (input) => {
   if (!input) return null;
   if (typeof input === 'string') {
@@ -191,6 +207,7 @@ const normalizeScreenshotInput = (input) => {
   };
 };
 
+// Uploads a screenshot to Supabase storage and returns its path.
 const uploadScreenshot = async (session, userId, screenshotInput) => {
   if (!session?.access_token || !userId || !screenshotInput) return null;
 
@@ -232,10 +249,12 @@ const uploadScreenshot = async (session, userId, screenshotInput) => {
   return path;
 };
 
+// Supports the setCurrentTelemetryScreen workflow in this file.
 export const setCurrentTelemetryScreen = (screenName) => {
   currentScreenName = screenName ? truncate(screenName, 120) : null;
 };
 
+// Gets current telemetry screen for the caller.
 export const getCurrentTelemetryScreen = () => currentScreenName;
 
 export const captureClientIssue = async ({
@@ -364,6 +383,7 @@ export const submitBugReport = async ({
   });
 };
 
+// Supports the installGlobalErrorTracking workflow in this file.
 export const installGlobalErrorTracking = () => {
   if (globalTrackingInstalled) {
     return () => {};

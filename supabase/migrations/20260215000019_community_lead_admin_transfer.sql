@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000019_community_lead_admin_transfer.sql.
+
 -- Add explicit optional lead-admin pointer with fallback inference.
 -- Default lead remains inferred (earliest accepted admin) when pointer is null.
 -- Lead admins can transfer lead role to another accepted member.

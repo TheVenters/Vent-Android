@@ -1,3 +1,5 @@
+// File purpose: Full-screen post composer for creating map posts with text, media, visibility, shape tools, and community targets.
+
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
@@ -91,6 +93,7 @@ const DROPDOWN_IDS = {
   GEOMETRY: "geometry",
 };
 
+// Normalizes image-picker assets into the shape expected by the post composer.
 const normalizePickedAsset = (asset, fallbackSource) => {
   if (!asset || typeof asset !== "object") return null;
 
@@ -118,11 +121,13 @@ const normalizePickedAsset = (asset, fallbackSource) => {
   };
 };
 
+// Keeps camera zoom values inside the native normalized 0-to-1 range.
 const clampNormalizedZoom = (value) => {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(1, value));
 };
 
+// Applies a minimum visible camera zoom so preview changes are noticeable.
 const applyVisibleZoomFloor = (value) => {
   const normalized = clampNormalizedZoom(value);
   if (normalized <= 0) return 0;
@@ -209,11 +214,13 @@ const PostCreationForm = ({
   const pinchStartZoomRef = useRef(0);
   const pinchLastLogAtRef = useRef(0);
 
+// Supports the logCapture workflow in this file.
   const logCapture = (...args) => {
     if (!DEBUG_CAPTURE_GESTURES) return;
     console.log("[CaptureFlow]", ...args);
   };
 
+// Supports the ensureMediaLibraryPermission workflow in this file.
   const ensureMediaLibraryPermission = async () => {
     try {
       const current = await MediaLibrary.getPermissionsAsync();
@@ -225,6 +232,7 @@ const PostCreationForm = ({
     }
   };
 
+// Supports the persistCapturedMediaLocally workflow in this file.
   const persistCapturedMediaLocally = async (mediaUri, mediaType) => {
     const uri = String(mediaUri || "").trim();
     if (!uri) return;
@@ -270,6 +278,7 @@ const PostCreationForm = ({
     throw new Error(`Camera did not become ready for ${reason}.`);
   };
 
+// Supports the clearRecordRetryTimer workflow in this file.
   const clearRecordRetryTimer = () => {
     if (recordRetryTimerRef.current) {
       clearTimeout(recordRetryTimerRef.current);
@@ -291,11 +300,13 @@ const PostCreationForm = ({
     const hideEvent =
       Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
 
+// Handles keyboard show interactions or requests.
     const handleKeyboardShow = (event) => {
       const nextHeight = Number(event?.endCoordinates?.height || 0);
       setKeyboardHeight(nextHeight);
     };
 
+// Handles keyboard hide interactions or requests.
     const handleKeyboardHide = () => {
       setKeyboardHeight(0);
     };
@@ -309,6 +320,7 @@ const PostCreationForm = ({
     };
   }, []);
 
+// Supports the clearForceStopFinalizeTimer workflow in this file.
   const clearForceStopFinalizeTimer = () => {
     if (forceStopFinalizeTimerRef.current) {
       clearTimeout(forceStopFinalizeTimerRef.current);
@@ -316,6 +328,7 @@ const PostCreationForm = ({
     }
   };
 
+// Supports the clearScheduledStopTimer workflow in this file.
   const clearScheduledStopTimer = () => {
     if (scheduledStopTimerRef.current) {
       clearTimeout(scheduledStopTimerRef.current);
@@ -323,6 +336,7 @@ const PostCreationForm = ({
     }
   };
 
+// Supports the clearCameraModeSwapTimer workflow in this file.
   const clearCameraModeSwapTimer = () => {
     if (cameraModeSwapTimerRef.current) {
       clearTimeout(cameraModeSwapTimerRef.current);
@@ -330,6 +344,7 @@ const PostCreationForm = ({
     }
   };
 
+// Supports the remountCameraForMode workflow in this file.
   const remountCameraForMode = (nextMode) => {
     clearCameraModeSwapTimer();
     setRenderedCameraMode(null);
@@ -340,6 +355,7 @@ const PostCreationForm = ({
     }, 80);
   };
 
+// Supports the switchCameraMode workflow in this file.
   const switchCameraMode = (nextMode) => {
     setPendingHoldRecordStart(false);
     clearRecordRetryTimer();
@@ -364,6 +380,7 @@ const PostCreationForm = ({
     remountCameraForMode(nextMode);
   };
 
+// Supports the scheduleRecordRetry workflow in this file.
   const scheduleRecordRetry = (reason) => {
     if (recordRetryTimerRef.current) return;
     const shouldRetry =
@@ -380,6 +397,7 @@ const PostCreationForm = ({
     }, RECORD_RETRY_DELAY_MS);
   };
 
+// Supports the safelyStopRecording workflow in this file.
   const safelyStopRecording = () => {
     const stopRecording = videoCameraRef.current?.stopRecording;
     if (typeof stopRecording !== "function") {
@@ -556,6 +574,7 @@ const PostCreationForm = ({
     [],
   );
 
+// Supports the flushZoomUpdate workflow in this file.
   const flushZoomUpdate = (nextZoom) => {
     const clampedZoom = clampNormalizedZoom(Number(nextZoom || 0));
     pendingZoomRef.current = clampedZoom;
@@ -573,6 +592,7 @@ const PostCreationForm = ({
     });
   };
 
+// Supports the resetForm workflow in this file.
   const resetForm = () => {
     safelyStopRecording();
     if (shutterHoldTimerRef.current) {
@@ -618,11 +638,13 @@ const PostCreationForm = ({
     stopRecordingRequestedRef.current = false;
   };
 
+// Handles close interactions or requests.
   const handleClose = () => {
     resetForm();
     onClose();
   };
 
+// Handles submit interactions or requests.
   const handleSubmit = () => {
     if (!title.trim() && normalizedMediaItems.length === 0) {
       Alert.alert(
@@ -685,6 +707,7 @@ const PostCreationForm = ({
     resetForm();
   };
 
+// Supports the applyPickedMedia workflow in this file.
   const applyPickedMedia = (result, source) => {
     if (result.canceled || !Array.isArray(result.assets) || result.assets.length === 0)
       return;
@@ -700,6 +723,7 @@ const PostCreationForm = ({
     });
   };
 
+// Supports the pickMediaFromLibrary workflow in this file.
   const pickMediaFromLibrary = async () => {
     try {
       const permissionResult =
@@ -727,6 +751,7 @@ const PostCreationForm = ({
     }
   };
 
+// Supports the capturePhotoViaSystemCamera workflow in this file.
   const capturePhotoViaSystemCamera = async () => {
     const result = await ImagePicker.launchCameraAsync({
       mediaTypes: ["images"],
@@ -740,6 +765,7 @@ const PostCreationForm = ({
     return normalizePickedAsset(result.assets[0], MEDIA_SOURCE.CAMERA);
   };
 
+// Supports the captureFromLiveCamera workflow in this file.
   const captureFromLiveCamera = async () => {
     if (isCapturing || isVideoRecording || isVideoFinalizing) return;
 
@@ -758,6 +784,7 @@ const PostCreationForm = ({
     try {
       setIsCapturing(true);
       await waitForCameraReady("photo_capture");
+// Supports the takePhoto workflow in this file.
       const takePhoto = async () =>
         (await pictureCameraRef.current?.takePictureAsync?.({
           quality: 0.8,
@@ -846,6 +873,7 @@ const PostCreationForm = ({
     }
   };
 
+// Supports the stopVideoRecording workflow in this file.
   const stopVideoRecording = () => {
     logCapture("stopVideoRecording", {
       isVideoRecording: isVideoRecordingRef.current,
@@ -861,6 +889,7 @@ const PostCreationForm = ({
     setIsVideoFinalizing(true);
     isVideoFinalizingRef.current = true;
 
+// Supports the performNativeStop workflow in this file.
     const performNativeStop = () => {
       const stopInvoked = safelyStopRecording();
       if (!stopInvoked) {
@@ -927,6 +956,7 @@ const PostCreationForm = ({
     performNativeStop();
   };
 
+// Supports the startVideoRecording workflow in this file.
   const startVideoRecording = async ({ source = "unknown" } = {}) => {
     if (
       recordStartInFlightRef.current ||
@@ -1136,6 +1166,7 @@ const PostCreationForm = ({
     stopVideoRecording();
   }, [holdRecordStopToken]);
 
+// Supports the cycleAudience workflow in this file.
   const cycleAudience = () => {
     setBaseAudience((prev) => {
       if (prev === POST_AUDIENCE.FRIENDS) return POST_AUDIENCE.PUBLIC;
@@ -1144,6 +1175,7 @@ const PostCreationForm = ({
     });
   };
 
+// Handles shutter press in interactions or requests.
   const handleShutterPressIn = () => {
     if (isVideoFinalizingRef.current) {
       logCapture("shutter press in ignored during video finalize");
@@ -1183,6 +1215,7 @@ const PostCreationForm = ({
     }, SHUTTER_RECORD_LONG_PRESS_DELAY_MS);
   };
 
+// Handles shutter press out interactions or requests.
   const handleShutterPressOut = () => {
     const isVideoGesture =
       shutterLongPressActiveRef.current ||
@@ -1227,6 +1260,7 @@ const PostCreationForm = ({
     shutterLongPressActiveRef.current = false;
   };
 
+// Handles shutter press interactions or requests.
   const handleShutterPress = () => {
     if (suppressNextShutterTapRef.current) {
       suppressNextShutterTapRef.current = false;
@@ -1234,6 +1268,7 @@ const PostCreationForm = ({
     }
   };
 
+// Supports the adjustCameraZoom workflow in this file.
   const adjustCameraZoom = (direction) => {
     const delta = direction === "in" ? CAMERA_ZOOM_STEP : -CAMERA_ZOOM_STEP;
     const rawNext = Number(cameraZoomRef.current || 0) + delta;
@@ -1244,6 +1279,7 @@ const PostCreationForm = ({
     setCameraZoom(next);
   };
 
+// Handles pinch gesture event interactions or requests.
   const handlePinchGestureEvent = (event) => {
     const scale = Number(event?.nativeEvent?.scale || 1);
     const nextZoom = pinchStartZoomRef.current + (scale - 1) * 0.35;
@@ -1260,6 +1296,7 @@ const PostCreationForm = ({
     }
   };
 
+// Handles pinch state change interactions or requests.
   const handlePinchStateChange = (event) => {
     const nextState = Number(event?.nativeEvent?.state);
     const scale = Number(event?.nativeEvent?.scale || 1);
@@ -1355,6 +1392,7 @@ const PostCreationForm = ({
         )
       : 0;
 
+// Supports the toggleOptionsPanel workflow in this file.
   const toggleOptionsPanel = () => {
     setOpenDropdown(null);
     setShowOptionsPanel((prev) => {
@@ -1459,6 +1497,7 @@ const PostCreationForm = ({
     } catch (_error) {}
   }, [previewVideoSource, videoPreviewPlayer]);
 
+// Supports the openMediaPreviewFromStack workflow in this file.
   const openMediaPreviewFromStack = (index = 0) => {
     if (stackMediaItems.length === 0) return;
     const clampedIndex = Math.max(
@@ -1538,6 +1577,7 @@ const PostCreationForm = ({
       }),
     [previewableMediaItems.length],
   );
+// Supports the goToPrevPreviewItem workflow in this file.
   const goToPrevPreviewItem = () => {
     const count = previewableMediaItems.length;
     if (count <= 1) return;
@@ -1546,6 +1586,7 @@ const PostCreationForm = ({
       return (current - 1 + count) % count;
     });
   };
+// Supports the goToNextPreviewItem workflow in this file.
   const goToNextPreviewItem = () => {
     const count = previewableMediaItems.length;
     if (count <= 1) return;
@@ -1554,6 +1595,7 @@ const PostCreationForm = ({
       return (current + 1) % count;
     });
   };
+// Supports the removeMediaItemById workflow in this file.
   const removeMediaItemById = (mediaId) => {
     const normalizedId = String(mediaId || "");
     if (!normalizedId) return;
@@ -1586,6 +1628,7 @@ const PostCreationForm = ({
       Math.max(0, Math.min(remainingCount - 1, Number(prev) || 0)),
     );
   };
+// Supports the confirmRemoveMediaItem workflow in this file.
   const confirmRemoveMediaItem = (mediaItem) => {
     const item = mediaItem || null;
     const itemId = String(item?.id || "");
@@ -2278,6 +2321,7 @@ const PostCreationForm = ({
   );
 };
 
+// Builds StyleSheet values from the current theme palette and safe-area inputs.
 const createStyles = (palette, isDark, insets = { top: 0, bottom: 0 }) =>
   StyleSheet.create({
     gestureRoot: {

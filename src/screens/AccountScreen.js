@@ -1,3 +1,5 @@
+// File purpose: Account/profile screen for authentication, profile editing, viewing posts, and account actions.
+
 import React, { useState, useEffect, useRef } from "react";
 import {
   View,
@@ -37,6 +39,7 @@ import {
 
 const MAX_SAFE_AUTH_TOKEN_LENGTH = 12000;
 
+// Renders account/profile UI and handles authentication and profile updates.
 const AccountScreen = ({ navigation, route }) => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -120,9 +123,11 @@ const AccountScreen = ({ navigation, route }) => {
     }
   }, [currentUser?.id, profileUserId]);
 
+// Checks whether inline avatar data url is true.
   const isInlineAvatarDataUrl = (value) =>
     /^data:image\//i.test(String(value || "").trim());
 
+// Supports the scrubAvatarFromAuthMetadata workflow in this file.
   const scrubAvatarFromAuthMetadata = async (user) => {
     const userId = String(user?.id || "");
     const avatarValue = String(user?.user_metadata?.avatar_url || "").trim();
@@ -144,9 +149,11 @@ const AccountScreen = ({ navigation, route }) => {
     }
   };
 
+// Checks whether oversized session is true.
   const isOversizedSession = (session) =>
     String(session?.access_token || "").length > MAX_SAFE_AUTH_TOKEN_LENGTH;
 
+// Handles oversized session interactions or requests.
   const handleOversizedSession = async (session) => {
     if (!isOversizedSession(session)) return false;
     try {
@@ -165,6 +172,7 @@ const AccountScreen = ({ navigation, route }) => {
     return true;
   };
 
+// Loads user from storage or the backend.
   const loadUser = async () => {
     try {
       const {
@@ -186,6 +194,7 @@ const AccountScreen = ({ navigation, route }) => {
     }
   };
 
+// Loads profile from storage or the backend.
   const loadProfile = async (userId) => {
     if (!userId) {
       setViewedProfile(null);
@@ -256,6 +265,7 @@ const AccountScreen = ({ navigation, route }) => {
     }
   };
 
+// Loads my posts from storage or the backend.
   const loadMyPosts = async (userId) => {
     if (!userId) {
       setMyPosts([]);
@@ -291,6 +301,7 @@ const AccountScreen = ({ navigation, route }) => {
       }
 
       if (!loadedViaEdge) {
+// Supports the queryPins workflow in this file.
         const queryPins = (selectClause) =>
           supabase
             .from("pins")
@@ -387,6 +398,7 @@ const AccountScreen = ({ navigation, route }) => {
     }
   };
 
+// Loads joined layers from storage or the backend.
   const loadJoinedLayers = async (userId) => {
     if (!userId) {
       setJoinedLayers([]);
@@ -518,12 +530,14 @@ const AccountScreen = ({ navigation, route }) => {
     }
   };
 
+// Formats post date for display.
   const formatPostDate = (value) => {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "";
     return date.toLocaleString();
   };
 
+// Gets post preview for the caller.
   const getPostPreview = (post) => {
     const content = String(post?.content || "").trim();
     if (content) return content;
@@ -538,6 +552,7 @@ const AccountScreen = ({ navigation, route }) => {
     return "[empty post]";
   };
 
+// Gets audience label for the caller.
   const getAudienceLabel = (value) => {
     const audience = String(value || "public").trim().toLowerCase();
     if (audience === "friends") return "Friends";
@@ -545,6 +560,7 @@ const AccountScreen = ({ navigation, route }) => {
     return "Public";
   };
 
+// Gets audience icon for the caller.
   const getAudienceIcon = (value) => {
     const audience = String(value || "public").trim().toLowerCase();
     if (audience === "friends") return "👥";
@@ -552,6 +568,7 @@ const AccountScreen = ({ navigation, route }) => {
     return "🌎";
   };
 
+// Gets post layer labels for the caller.
   const getPostLayerLabels = (post) => {
     const explicitLabels = Array.isArray(post?.layer_labels)
       ? post.layer_labels
@@ -562,6 +579,7 @@ const AccountScreen = ({ navigation, route }) => {
     return [getAudienceLabel(post?.base_audience || post?.layer || "public")];
   };
 
+// Checks whether renderable remote media url is true.
   const isRenderableRemoteMediaUrl = (value) => {
     const uri = String(value || "").trim();
     if (!uri) return false;
@@ -573,6 +591,7 @@ const AccountScreen = ({ navigation, route }) => {
     return true;
   };
 
+// Gets post media urls for the caller.
   const getPostMediaUrls = (post) => {
     const geometryList = Array.isArray(post?.geometry?.media_urls)
       ? post.geometry.media_urls
@@ -588,15 +607,18 @@ const AccountScreen = ({ navigation, route }) => {
     return isRenderableRemoteMediaUrl(primary) ? [primary] : [];
   };
 
+// Supports the openPostDetail workflow in this file.
   const openPostDetail = (post) => {
     if (!post) return;
     setSelectedPost(post);
   };
 
+// Supports the closePostDetail workflow in this file.
   const closePostDetail = () => {
     setSelectedPost(null);
   };
 
+// Handles sign in interactions or requests.
   const handleSignIn = async () => {
     if (!email.trim() || !password.trim()) {
       Alert.alert("Error", "Please enter email and password");
@@ -620,6 +642,7 @@ const AccountScreen = ({ navigation, route }) => {
     }
   };
 
+// Handles sign up interactions or requests.
   const handleSignUp = async () => {
     if (!email.trim() || !password.trim()) {
       Alert.alert("Error", "Please enter email and password");
@@ -663,6 +686,7 @@ const AccountScreen = ({ navigation, route }) => {
     }
   };
 
+// Supports the clearForm workflow in this file.
   const clearForm = () => {
     setEmail("");
     setPassword("");
@@ -675,16 +699,19 @@ const AccountScreen = ({ navigation, route }) => {
     setConfirmPassword("");
   };
 
+// Supports the toggleMode workflow in this file.
   const toggleMode = () => {
     setIsSignUp(!isSignUp);
     clearForm();
   };
 
+// Handles forgot password interactions or requests.
   const handleForgotPassword = () => {
     setResetStep("email");
     setResetEmail(email.trim());
   };
 
+// Supports the cancelReset workflow in this file.
   const cancelReset = () => {
     setResetStep(null);
     setResetEmail("");
@@ -693,6 +720,7 @@ const AccountScreen = ({ navigation, route }) => {
     setConfirmPassword("");
   };
 
+// Handles send reset code interactions or requests.
   const handleSendResetCode = async () => {
     const trimmedEmail = resetEmail.trim();
     if (!trimmedEmail) {
@@ -717,6 +745,7 @@ const AccountScreen = ({ navigation, route }) => {
     }
   };
 
+// Handles reset password interactions or requests.
   const handleResetPassword = async () => {
     const trimmedOtp = otpCode.trim();
     if (!trimmedOtp || trimmedOtp.length < 6) {
@@ -768,6 +797,7 @@ const AccountScreen = ({ navigation, route }) => {
     }
   };
 
+// Handles sign out interactions or requests.
   const handleSignOut = async () => {
     setLoading(true);
     try {
@@ -782,6 +812,7 @@ const AccountScreen = ({ navigation, route }) => {
     }
   };
 
+// Handles pick avatar interactions or requests.
   const handlePickAvatar = async () => {
     if (!currentUser?.id) return;
 
@@ -855,6 +886,7 @@ const AccountScreen = ({ navigation, route }) => {
     }
   };
 
+// Supports the renderTopBar workflow in this file.
   const renderTopBar = () => (
     <View style={styles.topBar}>
       <TouchableOpacity
@@ -893,6 +925,7 @@ const AccountScreen = ({ navigation, route }) => {
     </View>
   );
 
+// Supports the renderBrandHeader workflow in this file.
   const renderBrandHeader = () => (
     <View style={styles.logo}>
       <Image source={brandAssets.logo} style={styles.logoImage} resizeMode="contain" />
@@ -1439,6 +1472,7 @@ const AccountScreen = ({ navigation, route }) => {
   );
 };
 
+// Builds StyleSheet values from the current theme palette and safe-area inputs.
 const createStyles = (palette, topInset = 0) =>
   StyleSheet.create({
     container: {

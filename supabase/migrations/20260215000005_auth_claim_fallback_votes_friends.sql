@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000005_auth_claim_fallback_votes_friends.sql.
+
 -- ============================================================================
 -- Auth claim fallback for votes + friends
 -- Mitigates environments where auth.uid() is null but JWT still contains

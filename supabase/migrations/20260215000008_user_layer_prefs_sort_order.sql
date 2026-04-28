@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000008_user_layer_prefs_sort_order.sql.
+
 -- Add per-user layer ordering for cross-device layer order sync.
 alter table if exists public.user_layer_prefs
   add column if not exists sort_order integer;

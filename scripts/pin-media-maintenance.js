@@ -1,3 +1,5 @@
+// File purpose: Maintenance script that audits and optionally cleans pin media fields stored in Supabase.
+
 #!/usr/bin/env node
 /* eslint-disable no-console */
 const fs = require("fs");
@@ -7,6 +9,7 @@ const { createClient } = require("@supabase/supabase-js");
 const args = process.argv.slice(2);
 const shouldApply = args.includes("--apply");
 
+// Loads local environment variables before maintenance scripts contact Supabase.
 const loadEnv = () => {
   const envPath = path.join(process.cwd(), ".env");
   if (!fs.existsSync(envPath)) return;
@@ -23,22 +26,33 @@ const loadEnv = () => {
   });
 };
 
+// Converts values into trimmed strings for safer comparisons.
 const normalizeString = (value) => String(value || "").trim();
+// Normalizes URI-like strings to lowercase for scheme checks.
 const normalizeUriLower = (value) => normalizeString(value).toLowerCase();
 
+// Checks whether media data points to Supabase storage instead of a local-only URI.
 const isStoragePointer = (value) =>
   normalizeUriLower(value).startsWith("storage://");
+// Checks whether a media value is an HTTP or HTTPS URL.
 const isHttpUrl = (value) => /^https?:\/\//i.test(normalizeString(value));
+// Checks whether a media value is an inline data URL.
 const isDataUrl = (value) => normalizeUriLower(value).startsWith("data:");
+// Checks whether a media value is a device file URL.
 const isFileUrl = (value) => normalizeUriLower(value).startsWith("file://");
+// Checks whether a media value is an Android content URI.
 const isContentUrl = (value) =>
   normalizeUriLower(value).startsWith("content://");
+// Checks whether a media value is an iOS Photos URI.
 const isPhUrl = (value) => normalizeUriLower(value).startsWith("ph://");
+// Detects media URIs that cannot be rendered after leaving the original device.
 const isLocalOnlyUrl = (value) =>
   isFileUrl(value) || isContentUrl(value) || isPhUrl(value);
+// Detects media URLs safe to keep in persisted pin records.
 const isPersistableMediaUrl = (value) =>
   isStoragePointer(value) || isHttpUrl(value) || isDataUrl(value);
 
+// Removes duplicate strings while preserving their first-seen order.
 const dedupeStrings = (values) =>
   Array.from(
     new Set(
@@ -48,6 +62,7 @@ const dedupeStrings = (values) =>
     ),
   );
 
+// Normalizes media type labels to the supported image/video set.
 const normalizeMediaType = (value) => {
   const lowered = normalizeString(value).toLowerCase();
   if (!lowered) return "";
@@ -56,9 +71,11 @@ const normalizeMediaType = (value) => {
   return lowered;
 };
 
+// Returns a plain object when the input is object-like, otherwise an empty object.
 const ensureObject = (value) =>
   value && typeof value === "object" && !Array.isArray(value) ? value : {};
 
+// Compares string arrays by position and value.
 const areStringArraysEqual = (left, right) => {
   if (!Array.isArray(left) || !Array.isArray(right)) return false;
   if (left.length !== right.length) return false;
@@ -68,6 +85,7 @@ const areStringArraysEqual = (left, right) => {
   return true;
 };
 
+// Compares JSON-compatible values by their serialized representation.
 const areJsonEqual = (left, right) => {
   try {
     return JSON.stringify(left) === JSON.stringify(right);
@@ -76,6 +94,7 @@ const areJsonEqual = (left, right) => {
   }
 };
 
+// Builds the database update needed to clean one pin media row.
 const buildPatch = (row) => {
   const reasons = [];
   const originalMediaUrl = normalizeString(row?.media_url);
@@ -182,6 +201,7 @@ const buildPatch = (row) => {
   };
 };
 
+// Runs the command-line workflow for this script or edge action dispatcher.
 const main = async () => {
   loadEnv();
   const supabaseUrl =

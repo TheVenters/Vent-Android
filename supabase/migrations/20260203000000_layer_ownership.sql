@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260203000000_layer_ownership.sql.
+
 alter table public.layers
   add column if not exists owner_type text not null default 'system',
   add column if not exists owner_id uuid,

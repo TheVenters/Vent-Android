@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260212220230_add_missing_tables.sql.
+
 -- Adds missing tables for pins-based model
 -- No separate posts
 -- No group chat

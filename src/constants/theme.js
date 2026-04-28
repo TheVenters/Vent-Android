@@ -1,3 +1,5 @@
+// File purpose: Shared color palette and layout tokens used across app screens.
+
 export const COLORS = {
   primary: '#667eea',
   secondary: '#764ba2',

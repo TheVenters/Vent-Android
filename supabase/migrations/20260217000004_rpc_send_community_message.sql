@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260217000004_rpc_send_community_message.sql.
+
 -- RPC for sending community chat messages, bypassing table-level RLS.
 
 create or replace function public.send_community_message(

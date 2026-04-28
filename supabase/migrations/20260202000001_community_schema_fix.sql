@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260202000001_community_schema_fix.sql.
+
 do $$
 begin
   -- If an older/incorrect communities table exists (missing `slug`), rebuild it.

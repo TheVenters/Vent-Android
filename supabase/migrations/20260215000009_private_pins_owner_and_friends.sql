@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000009_private_pins_owner_and_friends.sql.
+
 -- ============================================================================
 -- Private pins visibility: owner + accepted friends
 -- ============================================================================

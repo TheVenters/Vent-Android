@@ -1,3 +1,5 @@
+// File purpose: Pin feed resolver that decides which pins to fetch and show for the current layer/audience selection.
+
 import {
   getPinLayerKeyFromLayer,
   isNamedUserPostsLayer,
@@ -16,6 +18,7 @@ import {
 import { hydrateAvatarUrlsInRows } from "../../utils/avatarUrls";
 
 const LAYER_TRACE_ENABLED = false;
+// Writes optional debug logs for layer loading and filtering.
 const logLayerTrace = (label, payload = null) => {
   if (!LAYER_TRACE_ENABLED) return;
   if (payload === null) {
@@ -25,21 +28,25 @@ const logLayerTrace = (label, payload = null) => {
   console.log(`[LayerTrace] ${label}`, payload);
 };
 
+// Normalizes audience values used by the pin feed resolver.
 const normalizeAudienceValue = (value) =>
   String(value || "")
     .trim()
     .toLowerCase();
 
 const USER_POSTS_LAYER_NAME_REGEX = /^user-(.+)-posts$/i;
+// Normalizes layer identity tokens used for matching user/community layers.
 const normalizeIdentityToken = (value) =>
   String(value || "")
     .trim()
     .toLowerCase()
     .replace(/\s+/g, "-");
+// Extracts the user-posts slug from a layer identity token.
 const extractUserPostsLayerSlug = (layer) => {
   const match = String(layer?.name || "").trim().match(USER_POSTS_LAYER_NAME_REGEX);
   return match ? normalizeIdentityToken(match[1]) : "";
 };
+// Checks whether a friend-scoped layer belongs to a pin author.
 const doesFriendScopedLayerMatchPinAuthor = (layer, pin) => {
   const layerSlug = extractUserPostsLayerSlug(layer);
   if (!layerSlug) return false;
@@ -48,6 +55,7 @@ const doesFriendScopedLayerMatchPinAuthor = (layer, pin) => {
   return (pinUserId && pinUserId === layerSlug) || (pinUsername && pinUsername === layerSlug);
 };
 
+// Loads the actor own pins through the social action endpoint or fallback query path.
 const loadMyPins = async (reader, userId, accessToken = null, refreshToken = null) => {
   if (!userId) return [];
   if (accessToken) {
@@ -324,6 +332,7 @@ export const resolvePinsForMap = async ({
   }
 
   let ownPinsCache = null;
+// Loads own pins cached from storage or the backend.
   const loadOwnPinsCached = async () => {
     if (ownPinsCache) return ownPinsCache;
     ownPinsCache = await loadMyPins(reader, ownUserId, accessToken, refreshToken);
@@ -481,6 +490,7 @@ export const resolvePinsForMap = async ({
     return [];
   }
 
+// Supports the pickTopLayerId workflow in this file.
   const pickTopLayerId = (pin, candidateLayerIds) => {
     const uniqueCandidateIds = Array.from(new Set(candidateLayerIds || []));
     if (uniqueCandidateIds.length === 0) return null;

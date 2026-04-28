@@ -1,3 +1,5 @@
+// File purpose: Legacy/simple modal for creating a quick pin with optional title, description, and image URL.
+
 import React, { useState } from 'react';
 import {
   View,
@@ -15,6 +17,7 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import { COLORS, SIZES, PIN_TYPES } from '../constants/theme';
 
+// Renders the quick post modal and submits simple pin data.
 const PinModal = ({ visible, type, onClose, onSubmit }) => {
   const [content, setContent] = useState('');
   const [caption, setCaption] = useState('');
@@ -23,6 +26,7 @@ const PinModal = ({ visible, type, onClose, onSubmit }) => {
   const [selectedImage, setSelectedImage] = useState(null);
   const [previewAspectRatio, setPreviewAspectRatio] = useState(4 / 3);
 
+// Supports the pickImage workflow in this file.
   const pickImage = async (useCamera = false) => {
     try {
       // Request permissions
@@ -65,6 +69,7 @@ const PinModal = ({ visible, type, onClose, onSubmit }) => {
     }
   };
 
+// Handles submit interactions or requests.
   const handleSubmit = () => {
     if (type === PIN_TYPES.TEXT && !content.trim()) {
       Alert.alert('Error', 'Please enter some text');
@@ -91,6 +96,7 @@ const PinModal = ({ visible, type, onClose, onSubmit }) => {
     setPreviewAspectRatio(4 / 3);
   };
 
+// Handles close interactions or requests.
   const handleClose = () => {
     setContent('');
     setCaption('');
@@ -101,6 +107,7 @@ const PinModal = ({ visible, type, onClose, onSubmit }) => {
     onClose();
   };
 
+// Gets title for the caller.
   const getTitle = () => {
     switch (type) {
       case PIN_TYPES.TEXT:

@@ -1,5 +1,8 @@
+// File purpose: Layer type constants and predicates shared by map and community code.
+
 const ICON_DELIMITER = "::";
 
+// Parses layer kind metadata into the shape this code expects.
 export const parseLayerKindMetadata = (kindValue) => {
   const rawKind = typeof kindValue === "string" ? kindValue : "";
   if (!rawKind) {
@@ -18,6 +21,7 @@ export const parseLayerKindMetadata = (kindValue) => {
   return { baseKind: baseKind || rawKind, layerIcon: layerIcon || null };
 };
 
+// Supports the encodeLayerKindWithIcon workflow in this file.
 export const encodeLayerKindWithIcon = (baseKindValue, layerIconValue) => {
   const baseKind = String(baseKindValue || "").trim();
   const layerIcon = String(layerIconValue || "").trim();

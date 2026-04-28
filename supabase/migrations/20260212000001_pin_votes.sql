@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260212000001_pin_votes.sql.
+
 -- ==========================================================================
 -- Pin Votes: thumbs up / thumbs down by non-authors
 -- ==========================================================================

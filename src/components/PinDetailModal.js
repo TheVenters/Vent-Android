@@ -1,3 +1,5 @@
+// File purpose: Pin detail modal that displays post content, media, voting, comments, and moderation actions.
+
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   View,
@@ -25,20 +27,24 @@ const COMMENT_MAX_VISUAL_DEPTH = 3;
 const COMMENT_AUTO_COLLAPSE_DEPTH = 2;
 const COMMENT_PREVIEW_CHILD_COUNT = 3;
 
+// Normalizes a pin visibility value to the supported visibility set.
 const normalizeVisibility = (value) => {
   const layer = String(value || "").toLowerCase();
   return VISIBILITY_OPTIONS.includes(layer) ? layer : "public";
 };
 
+// Converts internal visibility values into user-facing labels.
 const visibilityLabel = (value) =>
   String(value || "").charAt(0).toUpperCase() + String(value || "").slice(1);
 
+// Checks whether a media URL can be displayed directly by React Native.
 const isRenderableMediaUrl = (value) => {
   const uri = String(value || "").trim();
   if (!uri) return false;
   return !uri.toLowerCase().startsWith("storage://");
 };
 
+// Infers image or video media type from a URL extension.
 const inferMediaTypeFromUrl = (value) => {
   const uri = String(value || "").trim().toLowerCase();
   if (!uri) return "photo";
@@ -151,6 +157,7 @@ const PinDetailModal = ({
 
   const activeMediaUrl =
     mediaUrls[Math.max(0, Math.min(activeMediaIndex, mediaUrls.length - 1))] || null;
+// Supports the mediaTypeForIndex workflow in this file.
   const mediaTypeForIndex = (index) => {
     const safeIndex = Math.max(0, Math.min(mediaUrls.length - 1, Number(index) || 0));
     const fromList = String(mediaTypes[safeIndex] || "")
@@ -253,9 +260,11 @@ const PinDetailModal = ({
     const hideEvent =
       Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
 
+// Handles keyboard show interactions or requests.
     const handleKeyboardShow = (event) => {
       setKeyboardHeight(Number(event?.endCoordinates?.height || 0));
     };
+// Handles keyboard hide interactions or requests.
     const handleKeyboardHide = () => {
       setKeyboardHeight(0);
     };
@@ -269,6 +278,7 @@ const PinDetailModal = ({
     };
   }, []);
 
+// Handles save interactions or requests.
   const handleSave = () => {
     if (!caption.trim()) {
       Alert.alert("Error", "Title cannot be empty");
@@ -285,6 +295,7 @@ const PinDetailModal = ({
     setIsEditing(false);
   };
 
+// Handles delete interactions or requests.
   const handleDelete = () => {
     Alert.alert("Delete Pin", "Are you sure you want to delete this pin?", [
       { text: "Cancel", style: "cancel" },
@@ -296,11 +307,13 @@ const PinDetailModal = ({
     ]);
   };
 
+// Handles close interactions or requests.
   const handleClose = () => {
     setIsEditing(false);
     onClose();
   };
 
+// Formats date for display.
   const formatDate = (dateString) => {
     const date = new Date(dateString);
     return date.toLocaleDateString("en-US", {
@@ -466,6 +479,7 @@ const PinDetailModal = ({
 
   if (!pin) return null;
 
+// Handles submit comment interactions or requests.
   const handleSubmitComment = async () => {
     if (!onAddComment) return;
     const trimmed = commentDraft.trim();
@@ -479,6 +493,7 @@ const PinDetailModal = ({
     }
   };
 
+// Handles deletion rules for comments by author, pin owner, or admin.
   const handleDeleteComment = (commentId) => {
     if (!onDeleteComment) return;
     Alert.alert("Delete Comment", "Are you sure you want to delete this comment?", [
@@ -492,6 +507,7 @@ const PinDetailModal = ({
       },
     ]);
   };
+// Handles toggle thread interactions or requests.
   const handleToggleThread = (commentId) => {
     const normalizedCommentId = String(commentId || "");
     if (!normalizedCommentId) return;
@@ -506,6 +522,7 @@ const PinDetailModal = ({
     });
   };
 
+// Supports the renderThreadRail workflow in this file.
   const renderThreadRail = (depth = 0) => {
     if (depth <= 0) return null;
     return (
@@ -516,6 +533,7 @@ const PinDetailModal = ({
     );
   };
 
+// Supports the renderCommentRow workflow in this file.
   const renderCommentRow = (comment, depth = 0) => {
     const indentDepth = Math.min(depth, COMMENT_MAX_VISUAL_DEPTH);
     const overflowDepth = Math.max(0, depth - COMMENT_MAX_VISUAL_DEPTH);
@@ -597,6 +615,7 @@ const PinDetailModal = ({
       </View>
     );
   };
+// Supports the renderThreadToggle workflow in this file.
   const renderThreadToggle = (row) => {
     if (row.expanded && row.parentId !== hideRepliesParentId) {
       return null;

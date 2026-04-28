@@ -1,3 +1,5 @@
+// File purpose: Layer management drawer for enabling, ordering, hiding, and customizing map layers.
+
 import React, { useEffect, useState } from "react";
 import {
   Modal,
@@ -29,6 +31,7 @@ const MY_POSTS_AUDIENCE_LABELS = {
   friends: "Friends",
 };
 
+// Chooses badge colors for user, community, and system-owned layers.
 const getBadgeStyles = (ownerType, palette) => {
   if (ownerType === "community") {
     return {
@@ -72,6 +75,7 @@ const LayersControlPanel = ({
   const globalLayerIndexById = new Map(
     manageableLayers.map((layer, index) => [String(layer?.id || ""), index]),
   );
+// Supports the sortByGlobalLayerOrder workflow in this file.
   const sortByGlobalLayerOrder = (rows) =>
     [...rows].sort((left, right) => {
       const leftIdx = globalLayerIndexById.get(String(left?.id || ""));
@@ -83,12 +87,14 @@ const LayersControlPanel = ({
       if (Number.isFinite(rightIdx)) return 1;
       return String(left?.name || "").localeCompare(String(right?.name || ""));
     });
+// Checks whether friend specific layer is true.
   const isFriendSpecificLayer = (layer) => {
     const pinKey = getPinLayerKeyFromLayer(layer);
     if (pinKey !== "friends") return false;
     if (!isNamedUserPostsLayer(layer)) return false;
     return !layer?.isOwnUserPostsLayer;
   };
+// Checks whether core posts layer is true.
   const isCorePostsLayer = (layer) => {
     if (!layer) return false;
     if (isNamedUserPostsLayer(layer)) return true;
@@ -103,6 +109,7 @@ const LayersControlPanel = ({
   const primaryCollectionLayers = myCollectionLayers.filter(
     (layer) => layer?.owner_type !== "community",
   );
+// Gets audience rank for the caller.
   const getAudienceRank = (layer, audienceKey) => {
     const ownerType = String(layer?.owner_type || "system").toLowerCase();
     const pinKey = getPinLayerKeyFromLayer(layer);
@@ -141,6 +148,7 @@ const LayersControlPanel = ({
       panelAudienceKey: audienceKey,
     };
   }).filter(Boolean);
+// Supports the dedupeRowsByLayerId workflow in this file.
   const dedupeRowsByLayerId = (rows) => {
     const byId = new Map();
     rows.forEach((row) => {
@@ -246,14 +254,17 @@ const LayersControlPanel = ({
     }
   }, [friendLayers.length, showFriendsOnly, visible]);
 
+// Checks whether group enabled is true.
   const isGroupEnabled = (layerRows) =>
     (Array.isArray(layerRows) ? layerRows : []).some((layer) =>
       Boolean(layer?.isEnabled),
     );
+// Supports the canToggleGroup workflow in this file.
   const canToggleGroup = (layerRows) =>
     (Array.isArray(layerRows) ? layerRows : []).some(
       (layer) => !layer?.isForcedEnabled,
     );
+// Supports the setLayerRowsEnabled workflow in this file.
   const setLayerRowsEnabled = async (layerRows, nextEnabled) => {
     const rows = Array.isArray(layerRows) ? layerRows : [];
     for (const layer of rows) {
@@ -266,6 +277,7 @@ const LayersControlPanel = ({
       }
     }
   };
+// Gets group move state for the caller.
   const getGroupMoveState = (layerRows) => {
     const indices = (Array.isArray(layerRows) ? layerRows : [])
       .map((layer) => globalLayerIndexById.get(String(layer?.id || "")))
@@ -283,6 +295,7 @@ const LayersControlPanel = ({
       canMoveDown: maxIndex < manageableLayers.length - 1,
     };
   };
+// Supports the moveLayerGroup workflow in this file.
   const moveLayerGroup = async (layerRows, direction) => {
     if (!onMoveLayer) return;
     const rows = Array.isArray(layerRows) ? layerRows : [];
@@ -295,6 +308,7 @@ const LayersControlPanel = ({
     });
   };
 
+// Supports the renderLayerRows workflow in this file.
   const renderLayerRows = (layerRows, options = {}) =>
     layerRows.map((layer) => {
       const isCompact = Boolean(options.compact);
@@ -728,6 +742,7 @@ const LayersControlPanel = ({
   );
 };
 
+// Builds StyleSheet values from the current theme palette and safe-area inputs.
 const createStyles = (palette, isDark) =>
   StyleSheet.create({
     overlay: {

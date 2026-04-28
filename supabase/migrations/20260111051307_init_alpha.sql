@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260111051307_init_alpha.sql.
+
 create table if not exists layers (
   id text primary key,
   name text not null,

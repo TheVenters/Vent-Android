@@ -1,8 +1,11 @@
+// File purpose: Command-line smoke test for the password reset edge function.
+
 #!/usr/bin/env node
 
 const fs = require('fs');
 const path = require('path');
 
+// Parses command-line flags into a simple options object.
 const parseArgs = (argv) => {
   const args = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -16,6 +19,7 @@ const parseArgs = (argv) => {
   return args;
 };
 
+// Loads key-value pairs from the local .env file for command-line scripts.
 const loadDotEnv = () => {
   const envPath = path.resolve(process.cwd(), '.env');
   if (!fs.existsSync(envPath)) return;
@@ -39,6 +43,7 @@ const loadDotEnv = () => {
   }
 };
 
+// Prints the required command-line arguments for the smoke test.
 const printUsage = () => {
   console.log(
     [
@@ -52,6 +57,7 @@ const printUsage = () => {
   );
 };
 
+// Runs the command-line workflow for this script or edge action dispatcher.
 const main = async () => {
   if (typeof fetch !== 'function') {
     console.error('Node 18+ is required (global fetch missing).');

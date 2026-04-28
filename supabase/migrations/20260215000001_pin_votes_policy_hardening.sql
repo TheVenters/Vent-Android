@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000001_pin_votes_policy_hardening.sql.
+
 -- ==========================================================================
 -- Pin Votes RLS hardening
 -- Avoid nested-RLS false negatives by moving pin visibility checks into

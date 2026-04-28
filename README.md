@@ -1,71 +1,121 @@
-# Vent App (Mobile)
+# Vent App Mobile
 
-A location-based social media app for iOS, Android, and web.
+Vent App is a React Native/Expo mobile app for location-based social posting. Users can view and create map pins, use layers, join communities, message friends, and report issues.
 
----
+## What You Need First
 
-## Development Build Workflow (No Expo Go)
+Install these before trying to run the app:
 
-This project is configured for **Expo development builds**.
-Use the custom dev client, not Expo Go.
+- **Node.js**: installs `npm`, which downloads and runs the project tools.
+- **Git**: downloads the repository.
+- **Android Studio** for Android emulator/device builds, or **Xcode** for iPhone simulator builds on macOS.
+- **Expo development build tooling**: this app uses a custom Expo dev client, not Expo Go.
+- **Project environment variables**: ask the project owner for the `.env` file and put it in the project root next to `package.json`.
 
----
+The `.env` file must include the Supabase URL and anon key used by the app. Without it, login, maps data, pins, communities, and messages will not work correctly.
 
-## Setup Instructions
+## First-Time Setup
 
-### 1. Clone the Repository
-git clone https://github.com/TheVenters/VentApp_Mobile.git
+1. Clone the repository:
 
-### 2. Navigate Into the Project Directory
-cd <repo-folder-name>
+   ```sh
+   git clone https://github.com/TheVenters/VentApp_Mobile.git
+   ```
 
-Put API Key .env file in directory
+2. Move into the project folder:
 
-### 3. Install Dependencies
-`npm install`
+   ```sh
+   cd VentApp_Mobile
+   ```
 
-### 4. Build and Install the Dev Client (once per platform change)
-`npm run ios`
-or
-`npm run android`
+3. Add the `.env` file to this folder.
 
-### 5. Start the Dev Server for Development Builds
-`npm start`
+4. Install project dependencies:
 
-Optional helpers:
-- `npm run start:ios`
-- `npm run start:android`
-- `npm run start:clear`
+   ```sh
+   npm install
+   ```
 
-### 6. Open the Application
+## Running the App
 
-Choose one of the following options:
+This project uses an Expo development build. You must install that dev build on a simulator, emulator, or physical device before the Metro dev server can open the app.
 
-On a Phone or Emulator
-- Launch the installed Vent development build.
-- Connect to the Metro server started with `npm start`.
+## Included Android Build Files
 
-### 7. Local Supabase (Optional)
-Local stack via Docker:
-- `./supabase/supabase.sh start`
-- `./supabase/supabase.sh status`
-- `./supabase/supabase.sh stop`
+- **Signed, universal APK**: use this for direct Android testing outside Google Play. This file can be installed on an Android phone or emulator.
 
-### 8. Pull Live Remote Supabase Schema
-Docker must be running.
+To install the APK on a connected Android device or emulator:
 
-`npm run db:schema:pull`
+```sh
+adb install Vent-Andriod.apk
+```
 
-This updates:
-- `supabase/main_schema_snapshot.sql`
-- `supabase/remote_schema_schema-sync-YYYYMMDD.sql`
+If the app is already installed and you want to replace it:
 
----
+```sh
+adb install -r Vent-Adnriod.apk
+``
+
+### Android
+
+1. Start an Android emulator from Android Studio, or plug in an Android phone with USB debugging enabled.
+
+2. Build and install the Android dev client:
+
+   ```sh
+   npm run android
+   ```
+
+3. Start the Metro dev server:
+
+   ```sh
+   npm start
+   ```
+
+4. Open the installed Vent development app on the device/emulator. It should connect to Metro automatically. If it does not, use the URL/QR code shown in the terminal.
+
+## Common Commands
+
+- `npm start`: starts Expo Metro for the custom dev client.
+- `npm run start:android`: starts Metro and targets Android.
+- `npm run start:clear`: starts Metro with a cleared cache.
+- `npm run android`: builds and installs the Android dev client.
+- `npm run ios`: builds and installs the iOS dev client.
+- `npm run web`: starts the Expo web version for browser testing.
+
+## Local Supabase
+
+The app normally connects to the Supabase project named in `.env`. For local database work, Docker must be running.
+
+```sh
+./supabase/supabase.sh start
+./supabase/supabase.sh status
+./supabase/supabase.sh stop
+```
+
+To pull the live remote Supabase schema:
+
+```sh
+npm run db:schema:pull
+```
+
+This updates `supabase/main_schema_snapshot.sql` and writes a dated `supabase/remote_schema_schema-sync-YYYYMMDD.sql` copy.
 
 ## Password Reset Smoke Test
 
-Use a fresh OTP code from your reset email:
+Use a fresh OTP code from a reset email:
 
-`npm run smoke:reset -- --email you@example.com --token 123456 --password NewPass123`
+```sh
+npm run smoke:reset -- --email you@example.com --token 123456 --password NewPass123
+```
 
-This directly calls the `reset-password-with-otp` edge function and fails fast with the backend error message.
+The command calls the `reset-password-with-otp` Supabase edge function directly and prints the backend result.
+
+## Notes About File Comments
+
+Source files include comments at the top that explain what each file is responsible for. Important helper functions and screen/component entry points also have short comments explaining their role. JSON files such as `package.json`, `app.json`, and `eas.json` cannot contain comments, so their purpose is documented here instead:
+
+- `package.json`: npm scripts, dependency list, and package metadata.
+- `app.json`: Expo app configuration for name, icons, splash screen, platform settings, and plugins.
+- `eas.json`: Expo Application Services build configuration.
+- `tsconfig.json`: TypeScript checking settings.

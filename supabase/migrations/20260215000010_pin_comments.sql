@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000010_pin_comments.sql.
+
 -- ============================================================================
 -- Pin comments with visibility-aligned access
 -- Supports legacy pin_comments schemas that used author_id/text fields.

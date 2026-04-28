@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000022_community_lead_reassignment_on_leave.sql.
+
 -- Automatically reassign lead admin when the current lead leaves or stops
 -- being an accepted admin member.
 --

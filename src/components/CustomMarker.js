@@ -1,3 +1,5 @@
+// File purpose: Memoized map marker component that renders pin thumbnails, emojis, labels, and selection state.
+
 import React, { forwardRef, memo, useEffect, useMemo, useState } from "react";
 import { View, Text, StyleSheet, Image, Platform } from "react-native";
 import { Marker, Callout } from "react-native-maps";
@@ -120,6 +122,7 @@ const CustomMarkerComponent = (
   );
 };
 
+// Prevents unnecessary marker re-renders by comparing meaningful marker props.
 const areMarkerPropsEqual = (prevProps, nextProps) => {
   const prevPin = prevProps.pin || {};
   const nextPin = nextProps.pin || {};

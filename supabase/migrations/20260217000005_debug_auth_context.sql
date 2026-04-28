@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260217000005_debug_auth_context.sql.
+
 create or replace function public.debug_auth_context()
 returns jsonb
 language plpgsql

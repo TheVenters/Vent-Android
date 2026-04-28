@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260212221345_add_comments_reports_blocks_members.sql.
+
 -- Adds missing tables for pins-based model
 -- No separate posts
 -- No group chat

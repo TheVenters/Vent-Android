@@ -1,3 +1,5 @@
+// File purpose: Floating map action tray for navigation, map modes, drawing tools, layer toggles, and location controls.
+
 import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import {
   View,
@@ -122,10 +124,12 @@ const ActionButtonCluster = ({
   const keyboardOffset = useSharedValue(0);
 
   useEffect(() => {
+// Supports the animateToOffset workflow in this file.
     const animateToOffset = (offset, duration = 250) => {
       keyboardOffset.value = withTiming(offset, { duration });
     };
 
+// Handles keyboard change interactions or requests.
     const handleKeyboardChange = (event) => {
       const screenHeight = Dimensions.get("window").height;
       const endY = event?.endCoordinates?.screenY ?? screenHeight;
@@ -133,6 +137,7 @@ const ActionButtonCluster = ({
       animateToOffset(nextOffset, event?.duration ?? 250);
     };
 
+// Handles keyboard hide interactions or requests.
     const handleKeyboardHide = (event) => {
       animateToOffset(0, event?.duration ?? 250);
     };
@@ -397,6 +402,7 @@ const ActionButtonCluster = ({
     }
   }, []);
 
+// Supports the logVentHold workflow in this file.
   const logVentHold = (...args) => {
     if (!DEBUG_VENT_HOLD) return;
     console.log("[VentHold]", ...args);
@@ -861,6 +867,7 @@ const ActionButtonCluster = ({
   );
 };
 
+// Builds StyleSheet values from the current theme palette and safe-area inputs.
 const createStyles = (palette) =>
   StyleSheet.create({
     overlay: {

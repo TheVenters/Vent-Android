@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000004_pin_votes_rpc_bypass_table_rls.sql.
+
 -- ==========================================================================
 -- Pin Votes RPC hardening
 -- Ensure RPC path is not blocked by pin_votes table RLS.

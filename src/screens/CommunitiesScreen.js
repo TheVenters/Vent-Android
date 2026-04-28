@@ -1,3 +1,5 @@
+// File purpose: Community hub for browsing, creating, joining, managing communities, and community layers.
+
 import React, { useMemo, useState, useEffect, useCallback } from "react";
 import {
   View,
@@ -49,6 +51,7 @@ const OWNER_LABELS = {
   user: "User",
 };
 const ICON_TRACE_ENABLED = false;
+// Writes optional debug logs for community icon behavior.
 const logIconTrace = (label, payload = null) => {
   if (!ICON_TRACE_ENABLED) return;
   if (payload === null) {
@@ -57,16 +60,19 @@ const logIconTrace = (label, payload = null) => {
   }
   console.log(`[IconTrace] ${label}`, payload);
 };
+// Detects Supabase row-level-security failures so the UI can show clearer messaging.
 const isRlsPolicyError = (error) =>
   error?.code === "42501" ||
   String(error?.message || "")
     .toLowerCase()
     .includes("row-level security policy");
+// Detects deployments that do not yet include a requested edge action.
 const isUnsupportedEdgeActionError = (error) =>
   String(error?.message || "")
     .toLowerCase()
     .includes("unsupported action");
 
+// Converts a display name into a URL/database-friendly slug.
 const slugify = (value) =>
   (value || "")
     .toLowerCase()
@@ -75,6 +81,7 @@ const slugify = (value) =>
     .replace(/^-+|-+$/g, "")
     .slice(0, 60);
 
+// Normalizes community membership status values from database rows.
 const normalizeMembershipStatus = (value) => {
   const normalized = String(value || "")
     .trim()
@@ -83,6 +90,7 @@ const normalizeMembershipStatus = (value) => {
   return normalized;
 };
 
+// Normalizes community membership role values from database rows.
 const normalizeMembershipRole = (value) => {
   const normalized = String(value || "")
     .trim()
@@ -91,6 +99,7 @@ const normalizeMembershipRole = (value) => {
   return normalized || "member";
 };
 
+// Normalizes one community membership row for UI state.
 const normalizeMembershipRow = (row) => {
   if (!row) return row;
   return {
@@ -100,6 +109,7 @@ const normalizeMembershipRow = (row) => {
   };
 };
 
+// Renders community discovery and management workflows.
 const CommunitiesScreen = ({ navigation }) => {
   const { palette, isDark } = useAppTheme();
   const insets = useSafeAreaInsets();
@@ -651,6 +661,7 @@ const CommunitiesScreen = ({ navigation }) => {
   );
 
   useEffect(() => {
+// Supports the initialize workflow in this file.
     const initialize = async () => {
       const user = await getCurrentUser();
       setCurrentUser(user);
@@ -672,6 +683,7 @@ const CommunitiesScreen = ({ navigation }) => {
     loadCommunityDetail(selectedCommunityId, currentUser?.id);
   }, [selectedCommunityId, currentUser?.id, loadCommunityDetail]);
 
+// Gets join status for the caller.
   const getJoinStatus = (communityOrId) => {
     const communityId =
       typeof communityOrId === "string" ? communityOrId : communityOrId?.id;
@@ -696,6 +708,7 @@ const CommunitiesScreen = ({ navigation }) => {
     return "Join";
   };
 
+// Adds or requests membership in a community.
   const handleJoinCommunity = async (communityId) => {
     if (!currentUser?.id) {
       Alert.alert("Sign In Required", "Please sign in to join communities.");
@@ -775,6 +788,7 @@ const CommunitiesScreen = ({ navigation }) => {
     }
   };
 
+// Removes or deactivates the actor membership in a community.
   const handleLeaveCommunity = async (communityId) => {
     if (!currentUser?.id) {
       Alert.alert("Sign In Required", "Please sign in to manage communities.");
@@ -836,6 +850,7 @@ const CommunitiesScreen = ({ navigation }) => {
     );
   };
 
+// Handles toggle layer collection interactions or requests.
   const handleToggleLayerCollection = async (layerId, nextEnabled) => {
     let sessionUserId = null;
     let accessToken = null;
@@ -946,6 +961,7 @@ const CommunitiesScreen = ({ navigation }) => {
     }
   }, [pickCommunityAvatarDataUri, supportsCommunityAvatarColumn]);
 
+// Creates a community and initial membership/admin records.
   const handleCreateCommunity = async () => {
     if (!currentUser?.id) {
       Alert.alert("Sign In Required", "Please sign in to create communities.");
@@ -1109,6 +1125,7 @@ const CommunitiesScreen = ({ navigation }) => {
     }
   };
 
+// Handles create layer for community interactions or requests.
   const handleCreateLayerForCommunity = async () => {
     if (!selectedCommunityId) return;
 
@@ -1234,6 +1251,7 @@ const CommunitiesScreen = ({ navigation }) => {
     }
   }, [handleUpdateSelectedCommunityImage, pickCommunityAvatarDataUri]);
 
+// Handles attach existing layer interactions or requests.
   const handleAttachExistingLayer = async (layerId) => {
     if (!selectedCommunityId) return;
     const isAllowed = availableLayersToAttach.some(
@@ -1283,6 +1301,7 @@ const CommunitiesScreen = ({ navigation }) => {
     }
   };
 
+// Handles delete layer interactions or requests.
   const handleDeleteLayer = async (layer) => {
     if (!currentUser?.id || !selectedCommunityId) return;
     if (!isPlatformAdmin && detailMembership?.role !== "admin") {
@@ -1347,6 +1366,7 @@ const CommunitiesScreen = ({ navigation }) => {
     );
   };
 
+// Handles delete community interactions or requests.
   const handleDeleteCommunity = async () => {
     if (!selectedCommunityId || !canDeleteSelectedCommunity) {
       Alert.alert(
@@ -1409,6 +1429,7 @@ const CommunitiesScreen = ({ navigation }) => {
     );
   };
 
+// Handles update member role interactions or requests.
   const handleUpdateMemberRole = async (targetUserId, nextRole) => {
     if (!selectedCommunityId || !currentUser?.id) return;
     if (!canManageCommunityRoles) {
@@ -1447,6 +1468,7 @@ const CommunitiesScreen = ({ navigation }) => {
     }
   };
 
+// Handles transfer lead admin interactions or requests.
   const handleTransferLeadAdmin = async (targetUserId) => {
     if (!selectedCommunityId || !currentUser?.id) return;
     if (!canManageCommunityRoles) {
@@ -1512,12 +1534,14 @@ const CommunitiesScreen = ({ navigation }) => {
     );
   };
 
+// Supports the openLayerIconEditor workflow in this file.
   const openLayerIconEditor = (layer) => {
     setEditingLayer(layer);
     setLayerIconInput(layer?.layer_icon || "");
     setShowLayerIconModal(true);
   };
 
+// Handles save layer icon interactions or requests.
   const handleSaveLayerIcon = async () => {
     if (!editingLayer?.id) return;
 
@@ -1600,6 +1624,7 @@ const CommunitiesScreen = ({ navigation }) => {
     }
   };
 
+// Supports the renderCreateCommunityModal workflow in this file.
   const renderCreateCommunityModal = () => (
     <Modal
       visible={showCreateCommunityModal}
@@ -1690,6 +1715,7 @@ const CommunitiesScreen = ({ navigation }) => {
     </Modal>
   );
 
+// Supports the renderCreateLayerModal workflow in this file.
   const renderCreateLayerModal = () => (
     <Modal
       visible={showCreateLayerModal}
@@ -1752,6 +1778,7 @@ const CommunitiesScreen = ({ navigation }) => {
     </Modal>
   );
 
+// Supports the renderAttachLayerModal workflow in this file.
   const renderAttachLayerModal = () => (
     <Modal
       visible={showAttachLayerModal}
@@ -1802,6 +1829,7 @@ const CommunitiesScreen = ({ navigation }) => {
     </Modal>
   );
 
+// Supports the renderLayerIconModal workflow in this file.
   const renderLayerIconModal = () => (
     <Modal
       visible={showLayerIconModal}
@@ -2327,6 +2355,7 @@ const CommunitiesScreen = ({ navigation }) => {
   );
 };
 
+// Builds StyleSheet values from the current theme palette and safe-area inputs.
 const createStyles = (palette, isDark, topInset = 0) =>
   StyleSheet.create({
     container: {

@@ -1,3 +1,5 @@
+// File purpose: Application entry point that wires theme providers, navigation stacks, route tracking, and the hidden bottom-tab shell.
+
 import React, { useEffect, useRef } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
@@ -29,6 +31,7 @@ import {
 const Tab = createBottomTabNavigator();
 const Stack = createStackNavigator();
 
+// Defines the nested friends navigation flow, including the friend list, direct chat, and friend profile screens.
 function FriendsStack() {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
@@ -39,6 +42,7 @@ function FriendsStack() {
   );
 }
 
+// Defines the nested account navigation flow for profile, settings, bug reporting, and admin reports.
 function AccountStack() {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
@@ -50,6 +54,7 @@ function AccountStack() {
   );
 }
 
+// Defines the nested communities navigation flow from the community list into community chat.
 function CommunitiesStack() {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
@@ -59,6 +64,7 @@ function CommunitiesStack() {
   );
 }
 
+// Walks nested React Navigation state to find the currently visible route name for telemetry.
 const getActiveRouteName = (state) => {
   if (!state || !Array.isArray(state.routes) || state.routes.length === 0) {
     return null;
@@ -72,6 +78,7 @@ const getActiveRouteName = (state) => {
   return route.name || null;
 };
 
+// Builds the themed navigation container, installs global error tracking, and syncs route changes to telemetry.
 function AppNavigator() {
   const { isDark } = useAppTheme();
   const navigationRef = useRef(null);
@@ -82,6 +89,7 @@ function AppNavigator() {
     return () => uninstall?.();
   }, []);
 
+// Supports the syncCurrentRoute workflow in this file.
   const syncCurrentRoute = () => {
     const routeName = getActiveRouteName(navigationRef.current?.getRootState?.());
     if (!routeName || routeName === currentRouteRef.current) return;
@@ -138,6 +146,7 @@ function AppNavigator() {
   );
 }
 
+// Wraps the application in safe-area, gesture, and theme providers before rendering navigation.
 export default function App() {
   return (
     <SafeAreaProvider>

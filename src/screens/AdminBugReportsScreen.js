@@ -1,3 +1,5 @@
+// File purpose: Admin-only screen for reviewing client issue reports captured by telemetry.
+
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -21,6 +23,7 @@ import {
 
 const PAGE_SIZE = 30;
 
+// Converts unknown errors into readable messages for alerts and reports.
 const formatErrorMessage = (error) => {
   if (!error) return 'Unknown error';
   const message = String(error?.message || '').trim();
@@ -32,6 +35,7 @@ const formatErrorMessage = (error) => {
   }
 };
 
+// Converts a value to pretty date.
 const toPrettyDate = (value) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return 'Unknown date';
@@ -44,6 +48,7 @@ const toPrettyDate = (value) => {
   });
 };
 
+// Renders issue report triage tools for admins.
 const AdminBugReportsScreen = ({ navigation }) => {
   const { palette } = useAppTheme();
   const insets = useSafeAreaInsets();
@@ -118,6 +123,7 @@ const AdminBugReportsScreen = ({ navigation }) => {
     loadReports({ append: false });
   }, []);
 
+// Handles open screenshot interactions or requests.
   const handleOpenScreenshot = async (url) => {
     const target = String(url || '').trim();
     if (!target) return;
@@ -128,6 +134,7 @@ const AdminBugReportsScreen = ({ navigation }) => {
     }
   };
 
+// Supports the renderRow workflow in this file.
   const renderRow = ({ item }) => {
     const createdAt = toPrettyDate(item?.created_at);
     const description = String(item?.description || '').trim();
@@ -231,6 +238,7 @@ const AdminBugReportsScreen = ({ navigation }) => {
   );
 };
 
+// Builds StyleSheet values from the current theme palette and safe-area inputs.
 const createStyles = (palette, topInset = 0) =>
   StyleSheet.create({
     container: {

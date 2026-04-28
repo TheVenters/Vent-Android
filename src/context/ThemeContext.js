@@ -1,3 +1,5 @@
+// File purpose: Theme context that persists light/dark mode and exposes theme helpers to the app.
+
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useColorScheme } from 'react-native';
@@ -31,12 +33,14 @@ const DARK_PALETTE = {
 
 const ThemeContext = createContext(null);
 
+// Supports the ThemeProvider workflow in this file.
 export const ThemeProvider = ({ children }) => {
   const deviceScheme = useColorScheme();
   const [themeMode, setThemeMode] = useState('system');
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
+// Loads theme from storage or the backend.
     const loadTheme = async () => {
       try {
         const stored = await AsyncStorage.getItem(THEME_STORAGE_KEY);
@@ -53,6 +57,7 @@ export const ThemeProvider = ({ children }) => {
     loadTheme();
   }, []);
 
+// Supports the setMode workflow in this file.
   const setMode = async (mode) => {
     const nextMode =
       mode === 'dark' || mode === 'light' || mode === 'system' ? mode : 'system';
@@ -80,6 +85,7 @@ export const ThemeProvider = ({ children }) => {
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 };
 
+// React hook helper that manages app theme.
 export const useAppTheme = () => {
   const ctx = useContext(ThemeContext);
   if (!ctx) {

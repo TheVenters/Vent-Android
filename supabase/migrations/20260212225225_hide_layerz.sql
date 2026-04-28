@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260212225225_hide_layerz.sql.
+
 -- 1️⃣ Create table
 create table if not exists public.user_layer_prefs (
   user_id uuid not null

@@ -1,3 +1,5 @@
+// File purpose: Community message screen for real-time style group conversations.
+
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -22,12 +24,14 @@ import {
   supabase,
 } from "../services/supabase";
 
+// Detects Supabase row-level-security failures so the UI can show clearer messaging.
 const isRlsPolicyError = (error) =>
   error?.code === "42501" ||
   String(error?.message || "")
     .toLowerCase()
     .includes("row-level security policy");
 
+// Normalizes community membership status values from database rows.
 const normalizeMembershipStatus = (value) => {
   const normalized = String(value || "")
     .trim()
@@ -36,6 +40,7 @@ const normalizeMembershipStatus = (value) => {
   return normalized;
 };
 
+// Renders messages for a single community.
 const CommunityChatScreen = ({ route, navigation }) => {
   const { palette, isDark } = useAppTheme();
   const styles = createStyles(palette, isDark);
@@ -152,6 +157,7 @@ const CommunityChatScreen = ({ route, navigation }) => {
   }, [communityId]);
 
   useEffect(() => {
+// Supports the initialize workflow in this file.
     const initialize = async () => {
       const user = await getCurrentUser();
       setCurrentUser(user);
@@ -189,6 +195,7 @@ const CommunityChatScreen = ({ route, navigation }) => {
     };
   }, [canUseChat, communityId, loadMessages]);
 
+// Handles send interactions or requests.
   const handleSend = async () => {
     if (!canUseChat || !communityId || !currentUser?.id) return;
     const content = String(composerValue || "").trim();
@@ -225,6 +232,7 @@ const CommunityChatScreen = ({ route, navigation }) => {
     }
   };
 
+// Supports the renderMessage workflow in this file.
   const renderMessage = ({ item }) => {
     const isMine = item.sender_id === currentUser?.id;
     return (
@@ -324,6 +332,7 @@ const CommunityChatScreen = ({ route, navigation }) => {
   );
 };
 
+// Builds StyleSheet values from the current theme palette and safe-area inputs.
 const createStyles = (palette, isDark) =>
   StyleSheet.create({
     container: {

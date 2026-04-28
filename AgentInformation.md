@@ -1,5 +1,7 @@
 # Agent Information
 
+Purpose: operational notes for AI/code agents working in this repo, especially around Supabase access and schema-sensitive tasks.
+
 ## Access Status
 - Supabase access is available from this workspace.
 - Current app target:

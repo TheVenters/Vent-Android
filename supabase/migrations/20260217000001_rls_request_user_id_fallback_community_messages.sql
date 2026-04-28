@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260217000001_rls_request_user_id_fallback_community_messages.sql.
+
 -- ============================================================================
 -- Restore community join + messaging writes when auth.uid() is intermittently
 -- null by using request_user_id() fallback in RLS/function checks.

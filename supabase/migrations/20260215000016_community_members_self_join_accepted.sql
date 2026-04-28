@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000016_community_members_self_join_accepted.sql.
+
 -- Allow authenticated users to join communities immediately as accepted members.
 -- Keep first-member bootstrap logic for accepted admin inserts.
 

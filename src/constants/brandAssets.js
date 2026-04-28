@@ -1,3 +1,5 @@
+// File purpose: Central registry of local brand and navigation image assets.
+
 const LIGHT_THEME_ASSETS = {
   logo: require("../../assets/icons/VentLogo-Light.png"),
   menu: {
@@ -20,5 +22,6 @@ const DARK_THEME_ASSETS = {
   },
 };
 
+// Gets brand assets for theme for the caller.
 export const getBrandAssetsForTheme = (isDark) =>
   isDark ? DARK_THEME_ASSETS : LIGHT_THEME_ASSETS;

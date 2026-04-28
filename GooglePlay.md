@@ -1,3 +1,5 @@
+Purpose: reference checklist for preparing and publishing the Android app through the Google Play Store.
+
 ________________________________________
 Report: Steps and Requirements to Publish an App on the Google Play Store
 ________________________________________

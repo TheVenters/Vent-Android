@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260218000001_fix_pin_membership_rebuild_and_base_uniqueness.sql.
+
 begin;
 
 -- Keep pin memberships rebuild independent of any named unique constraint.

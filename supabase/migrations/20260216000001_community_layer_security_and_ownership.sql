@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260216000001_community_layer_security_and_ownership.sql.
+
 -- ============================================================================
 -- Community ownership + layer security hardening
 -- ============================================================================

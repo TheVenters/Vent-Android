@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260217000003_rpc_send_message_and_join_community.sql.
+
 -- ============================================================================
 -- RPC functions for message sending and community joining.
 -- These bypass table-level RLS and perform equivalent security checks in the

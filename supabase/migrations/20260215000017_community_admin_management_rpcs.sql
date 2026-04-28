@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000017_community_admin_management_rpcs.sql.
+
 -- Admin-scoped community management RPCs.
 -- These centralize permission checks and cleanup for community layer/community deletion.
 

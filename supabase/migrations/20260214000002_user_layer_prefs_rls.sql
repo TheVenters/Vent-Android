@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260214000002_user_layer_prefs_rls.sql.
+
 -- Ensure authenticated users can manage their own layer preferences.
 alter table if exists public.user_layer_prefs enable row level security;
 drop policy if exists "Users can view their own layer prefs" on public.user_layer_prefs;

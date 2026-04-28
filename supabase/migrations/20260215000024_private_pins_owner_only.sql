@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000024_private_pins_owner_only.sql.
+
 -- Private pins should be visible only to the owner (not friends).
 
 drop policy if exists "Private pins are viewable by owner and friends" on public.pins;

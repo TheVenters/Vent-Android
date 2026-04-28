@@ -1,3 +1,5 @@
+// File purpose: Supabase edge function that verifies a password reset OTP and updates the user password.
+
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
 
 const corsHeaders = {
@@ -6,6 +8,7 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+// Creates a JSON HTTP response with shared headers for Supabase edge functions.
 const jsonResponse = (status: number, body: Record<string, unknown>) =>
   new Response(JSON.stringify(body), {
     status,
@@ -15,6 +18,7 @@ const jsonResponse = (status: number, body: Record<string, unknown>) =>
     },
   });
 
+// Hides most of an email address before writing it to logs.
 const maskEmail = (email: string) => {
   const [localPart, domain] = email.split("@");
   if (!localPart || !domain) return "invalid-email";

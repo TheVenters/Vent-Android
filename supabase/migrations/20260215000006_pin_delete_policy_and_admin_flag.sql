@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000006_pin_delete_policy_and_admin_flag.sql.
+
 alter table public.profiles
   add column if not exists is_admin boolean not null default false;
 drop policy if exists "Users can delete their own pins" on public.pins;

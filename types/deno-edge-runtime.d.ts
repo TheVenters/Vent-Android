@@ -1,3 +1,5 @@
+// File purpose: Minimal Deno global declarations used so Supabase edge functions type-check in this project.
+
 declare const Deno: {
   env: {
     get: (key: string) => string | undefined;

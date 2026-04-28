@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000018_community_lead_admin_delete_scope.sql.
+
 -- Tighten community delete scope: only lead admin (first accepted admin member)
 -- can delete a community. Regular admins still manage layers.
 

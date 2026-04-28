@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260214000001_community_social.sql.
+
 -- ============================================================================
 -- Community Social Features: memberships, join requests, group chat
 -- ============================================================================

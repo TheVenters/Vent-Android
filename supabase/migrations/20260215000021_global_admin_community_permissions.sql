@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000021_global_admin_community_permissions.sql.
+
 -- Grant platform admins (profiles.is_admin = true) full community permissions.
 -- This applies across membership/admin/lead-admin checks.
 

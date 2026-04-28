@@ -1,3 +1,5 @@
+// File purpose: Settings screen for theme selection and account-level preferences.
+
 import React, { useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, StatusBar as RNStatusBar, Switch } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -9,6 +11,7 @@ import {
   setMapCloudsEnabled,
 } from '../utils/mapPreferences';
 
+// Renders account settings and theme controls.
 const SettingsScreen = ({ navigation }) => {
   const { themeMode, setThemeMode, palette } = useAppTheme();
   const [isAdmin, setIsAdmin] = useState(false);
@@ -24,6 +27,7 @@ const SettingsScreen = ({ navigation }) => {
   useEffect(() => {
     let active = true;
 
+// Loads admin status from storage or the backend.
     const loadAdminStatus = async () => {
       try {
         const user = await getCurrentUser();
@@ -61,6 +65,7 @@ const SettingsScreen = ({ navigation }) => {
   useEffect(() => {
     let active = true;
 
+// Loads map preferences from storage or the backend.
     const loadMapPreferences = async () => {
       const nextCloudsEnabled = await getMapCloudsEnabled();
       if (active) {
@@ -74,6 +79,7 @@ const SettingsScreen = ({ navigation }) => {
     };
   }, []);
 
+// Handles clouds toggle interactions or requests.
   const handleCloudsToggle = async (nextValue) => {
     setCloudsEnabledState(nextValue);
     try {
@@ -173,6 +179,7 @@ const SettingsScreen = ({ navigation }) => {
   );
 };
 
+// Builds StyleSheet values from the current theme palette and safe-area inputs.
 const createStyles = (palette, topInset = 0) =>
   StyleSheet.create({
     container: {

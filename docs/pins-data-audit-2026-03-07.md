@@ -1,5 +1,7 @@
 # Pins Data Audit (March 7, 2026)
 
+Purpose: historical audit notes for pin media and layer data found in the live Supabase database on March 7, 2026.
+
 ## Scope
 - Pulled live schema first via `npm run db:schema:pull`.
 - Audited live `public.pins` rows using service-role read access.

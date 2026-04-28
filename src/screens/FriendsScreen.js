@@ -1,3 +1,5 @@
+// File purpose: Friends screen for requests, accepted friends, searching users, and opening chats.
+
 import React, { useState, useEffect } from 'react';
 import {
   View,
@@ -26,6 +28,7 @@ import {
 import { COLORS, SIZES } from '../constants/theme';
 import { useAppTheme } from '../context/ThemeContext';
 
+// Renders friend lists, requests, search, and chat entry points.
 const FriendsScreen = ({ navigation }) => {
   const { palette, isDark } = useAppTheme();
   const insets = useSafeAreaInsets();
@@ -91,17 +94,20 @@ const FriendsScreen = ({ navigation }) => {
     };
   }, [currentUser?.id]);
 
+// Supports the initializeUser workflow in this file.
   const initializeUser = async () => {
     const user = await getCurrentUser();
     setCurrentUser(user);
   };
 
+// Supports the onRefresh workflow in this file.
   const onRefresh = async () => {
     setRefreshing(true);
     await loadFriendCollections();
     setRefreshing(false);
   };
 
+// Loads friend collections from storage or the backend.
   const loadFriendCollections = async () => {
     if (!currentUser?.id) {
       setFriends([]);
@@ -130,6 +136,7 @@ const FriendsScreen = ({ navigation }) => {
     }
   };
 
+// Handles search interactions or requests.
   const handleSearch = async () => {
     if (!searchQuery.trim()) {
       setSearchResults([]);
@@ -166,6 +173,7 @@ const FriendsScreen = ({ navigation }) => {
     }
   };
 
+// Supports the sendFriendRequest workflow in this file.
   const sendFriendRequest = async (friendId) => {
     try {
       const session = await getActiveSession();
@@ -226,6 +234,7 @@ const FriendsScreen = ({ navigation }) => {
     }
   };
 
+// Supports the acceptFriendRequest workflow in this file.
   const acceptFriendRequest = async (requestId) => {
     try {
       const session = await getActiveSession();
@@ -251,6 +260,7 @@ const FriendsScreen = ({ navigation }) => {
     }
   };
 
+// Supports the rejectFriendRequest workflow in this file.
   const rejectFriendRequest = async (requestId) => {
     try {
       const session = await getActiveSession();
@@ -276,6 +286,7 @@ const FriendsScreen = ({ navigation }) => {
     }
   };
 
+// Supports the removeFriend workflow in this file.
   const removeFriend = async (friendshipId) => {
     Alert.alert(
       'Remove Friend',
@@ -313,6 +324,7 @@ const FriendsScreen = ({ navigation }) => {
     );
   };
 
+// Supports the openFriendProfile workflow in this file.
   const openFriendProfile = (profileId) => {
     const nextProfileId = String(profileId || '');
     if (!nextProfileId) return;
@@ -322,6 +334,7 @@ const FriendsScreen = ({ navigation }) => {
     });
   };
 
+// Supports the renderProfileAvatar workflow in this file.
   const renderProfileAvatar = (profile) => {
     const avatarUrl = String(profile?.avatar_url || '').trim();
     const seed =
@@ -371,6 +384,7 @@ const FriendsScreen = ({ navigation }) => {
     );
   }
 
+// Supports the renderFriendItem workflow in this file.
   const renderFriendItem = ({ item }) => (
     <View style={styles.friendItem}>
       <TouchableOpacity
@@ -406,6 +420,7 @@ const FriendsScreen = ({ navigation }) => {
     </View>
   );
 
+// Supports the renderRequestItem workflow in this file.
   const renderRequestItem = ({ item }) => (
     <View style={styles.friendItem}>
       <TouchableOpacity
@@ -443,6 +458,7 @@ const FriendsScreen = ({ navigation }) => {
     </View>
   );
 
+// Supports the renderSearchItem workflow in this file.
   const renderSearchItem = ({ item }) => (
     <View style={styles.friendItem}>
       <TouchableOpacity
@@ -468,6 +484,7 @@ const FriendsScreen = ({ navigation }) => {
     </View>
   );
 
+// Supports the renderSentItem workflow in this file.
   const renderSentItem = ({ item }) => (
     <View style={styles.friendItem}>
       <TouchableOpacity
@@ -634,6 +651,7 @@ const FriendsScreen = ({ navigation }) => {
   );
 };
 
+// Builds StyleSheet values from the current theme palette and safe-area inputs.
 const createStyles = (palette, topInset = 0) =>
   StyleSheet.create({
     container: {

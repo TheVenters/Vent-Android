@@ -1,3 +1,5 @@
+-- File purpose: Supabase migration that applies the database change described by 20260215000011_pin_comments_delete_by_pin_owner.sql.
+
 -- ============================================================================
 -- Pin comments delete policy: comment author OR pin author
 -- ============================================================================
