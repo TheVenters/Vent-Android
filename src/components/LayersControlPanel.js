@@ -1,6 +1,6 @@
 // File purpose: Layer management drawer for enabling, ordering, hiding, and customizing map layers.
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Modal,
   StyleSheet,
@@ -200,6 +200,7 @@ const LayersControlPanel = ({
   const [showMyPostsLayersList, setShowMyPostsLayersList] = useState(true);
   const [showOtherLayersList, setShowOtherLayersList] = useState(false);
   const [groupToggleState, setGroupToggleState] = useState({});
+  const autoExpandedSelectedLayerIdRef = useRef("");
   const showFriendsOnly = sectionMode === "friends";
   const panelTitle = showFriendsOnly ? "Friends Layers" : "Layers";
   const publicPrimaryLayer =
@@ -209,6 +210,7 @@ const LayersControlPanel = ({
 
   useEffect(() => {
     if (!visible) {
+      autoExpandedSelectedLayerIdRef.current = "";
       setShowFriendLayersList(false);
       setShowMyPostsLayersList(true);
       setShowOtherLayersList(false);
@@ -218,6 +220,10 @@ const LayersControlPanel = ({
         }
         return {};
       });
+      return;
+    }
+    const selectedId = String(selectedLayerId || "");
+    if (!selectedId || autoExpandedSelectedLayerIdRef.current === selectedId) {
       return;
     }
     const selectedIsMyPosts = myPostsLayers.some(
@@ -237,6 +243,9 @@ const LayersControlPanel = ({
     }
     if (selectedIsOther) {
       setShowOtherLayersList(true);
+    }
+    if (selectedIsMyPosts || selectedIsFriendSpecific || selectedIsOther) {
+      autoExpandedSelectedLayerIdRef.current = selectedId;
     }
   }, [
     friendLayers,
@@ -483,6 +492,14 @@ const LayersControlPanel = ({
     const parentCanToggle = canToggleGroup(rows);
     const selectedWithinGroup = rows.some((layer) => layer?.id === selectedLayerId);
     const { canMoveUp, canMoveDown } = getGroupMoveState(rows);
+// Supports the toggleParentExpanded workflow in this file.
+    const toggleParentExpanded = () => {
+      if (allowExpand) {
+        onToggleExpanded && onToggleExpanded((previous) => !previous);
+        return;
+      }
+      if (onOpenParent) onOpenParent();
+    };
 
     return (
       <View style={styles.subMenuSection}>
@@ -496,21 +513,21 @@ const LayersControlPanel = ({
           <TouchableOpacity
             style={styles.parentRowMain}
             activeOpacity={0.9}
-            onPress={() => {
-              if (allowExpand) {
-                onToggleExpanded && onToggleExpanded((previous) => !previous);
-                return;
-              }
-              if (onOpenParent) onOpenParent();
-            }}
+            onPress={toggleParentExpanded}
           >
             <Text style={styles.subMenuToggleTitle}>{title}</Text>
             <Text style={styles.subMenuToggleMeta}>{metaLabel}</Text>
           </TouchableOpacity>
           {allowExpand ? (
-            <Text style={styles.subMenuToggleChevron}>
-              {expanded && parentOn ? "▾" : "▸"}
-            </Text>
+            <TouchableOpacity
+              style={styles.subMenuToggleChevronPress}
+              activeOpacity={0.8}
+              onPress={toggleParentExpanded}
+            >
+              <Text style={styles.subMenuToggleChevron}>
+                {expanded && parentOn ? "▾" : "▸"}
+              </Text>
+            </TouchableOpacity>
           ) : null}
           <View style={styles.reorderButtons}>
             <TouchableOpacity
@@ -886,6 +903,12 @@ const createStyles = (palette, isDark) =>
       flex: 1,
       justifyContent: "center",
       gap: 2,
+    },
+    subMenuToggleChevronPress: {
+      minWidth: 32,
+      minHeight: 32,
+      alignItems: "center",
+      justifyContent: "center",
     },
     parentRowMuted: {
       opacity: 0.72,
