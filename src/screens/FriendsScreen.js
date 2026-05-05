@@ -47,15 +47,42 @@ const FriendsScreen = ({ navigation }) => {
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
-    initializeUser();
+    let active = true;
+
+// Supports the syncInitialUser workflow in this file.
+    const syncInitialUser = async () => {
+      const user = await getCurrentUser();
+      if (active) {
+        setCurrentUser(user);
+      }
+    };
+
+    syncInitialUser();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setCurrentUser(session?.user || null);
+      if (!session?.user) {
+        setFriends([]);
+        setRequests([]);
+        setSentRequests([]);
+        setSearchResults([]);
+      }
+    });
+
+    return () => {
+      active = false;
+      subscription?.unsubscribe?.();
+    };
   }, []);
 
   // Separate effect for loading data
   useEffect(() => {
-    if (currentUser) {
+    if (currentUser?.id) {
       loadFriendCollections();
     }
-  }, [currentUser]);
+  }, [currentUser?.id]);
 
   // Separate effect for realtime subscription
   useEffect(() => {
@@ -93,12 +120,6 @@ const FriendsScreen = ({ navigation }) => {
       supabase.removeChannel(channel);
     };
   }, [currentUser?.id]);
-
-// Supports the initializeUser workflow in this file.
-  const initializeUser = async () => {
-    const user = await getCurrentUser();
-    setCurrentUser(user);
-  };
 
 // Supports the onRefresh workflow in this file.
   const onRefresh = async () => {
