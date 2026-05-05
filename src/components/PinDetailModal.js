@@ -44,6 +44,31 @@ const isRenderableMediaUrl = (value) => {
   return !uri.toLowerCase().startsWith("storage://");
 };
 
+// Builds a stable identity for media URLs that may have refreshed signed tokens.
+const getMediaUrlIdentity = (value) => {
+  const uri = String(value || "").trim();
+  if (!uri) return "";
+  if (/^https?:\/\//i.test(uri)) {
+    return uri.split(/[?#]/)[0];
+  }
+  return uri;
+};
+
+// Dedupes renderable media URLs while keeping the first, freshest source URL.
+const dedupeRenderableMediaUrls = (values) => {
+  const seen = new Set();
+  const urls = [];
+  (Array.isArray(values) ? values : []).forEach((value) => {
+    const uri = String(value || "").trim();
+    if (!isRenderableMediaUrl(uri)) return;
+    const identity = getMediaUrlIdentity(uri);
+    if (!identity || seen.has(identity)) return;
+    seen.add(identity);
+    urls.push(uri);
+  });
+  return urls;
+};
+
 // Infers image or video media type from a URL extension.
 const inferMediaTypeFromUrl = (value) => {
   const uri = String(value || "").trim().toLowerCase();
@@ -102,18 +127,7 @@ const PinDetailModal = ({
 
     // Match the marker/callout precedence so the modal uses the same
     // freshest hydrated URL instead of preferring stale geometry values.
-    const normalizedList = [...topLevelList, ...geometryList]
-      .map((value) => String(value || "").trim())
-      .filter(isRenderableMediaUrl);
-
-    if (isRenderableMediaUrl(primary)) {
-      normalizedList.unshift(primary);
-    }
-
-    if (normalizedList.length > 0) {
-      return Array.from(new Set(normalizedList));
-    }
-    return isRenderableMediaUrl(primary) ? [primary] : [];
+    return dedupeRenderableMediaUrls([primary, ...topLevelList, ...geometryList]);
   }, [pin?.geometry?.media_urls, pin?.media_url, pin?.media_urls]);
   const mediaTypes = useMemo(() => {
     const topLevelTypes = Array.isArray(pin?.media_types) ? pin.media_types : [];

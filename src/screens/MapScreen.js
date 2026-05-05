@@ -485,12 +485,31 @@ const pinHasUnhydratedMedia = (pin) => {
   if (isStorageMediaPointer(primary)) return true;
 
   const topLevelList = Array.isArray(pin?.media_urls) ? pin.media_urls : [];
+  if (
+    topLevelList.some((value) =>
+      isStorageMediaPointer(String(value || "").trim()),
+    )
+  ) {
+    return true;
+  }
+
   const geometryList = Array.isArray(pin?.geometry?.media_urls)
     ? pin.geometry.media_urls
     : [];
-  return [...topLevelList, ...geometryList].some((value) =>
+  const geometryPointerCount = geometryList.filter((value) =>
     isStorageMediaPointer(String(value || "").trim()),
-  );
+  ).length;
+  if (geometryPointerCount === 0) return false;
+
+  const renderableMediaCount = Array.from(
+    new Set(
+      [primary, ...topLevelList]
+        .map((value) => String(value || "").trim())
+        .filter((value) => value && !isStorageMediaPointer(value)),
+    ),
+  ).length;
+
+  return renderableMediaCount < geometryPointerCount;
 };
 
 // Checks whether a pin includes any media reference.
@@ -4001,6 +4020,7 @@ useEffect(() => {
           : []
         ).find((pin) => String(pin?.id || "") === pinId) || targetPin;
       if (!sourcePin) return null;
+      if (!pinHasUnhydratedMedia(sourcePin)) return sourcePin;
 
       const [hydratedPin] = await hydratePinsWithSignedMediaUrls(
         [sourcePin],
@@ -4123,7 +4143,7 @@ useEffect(() => {
   }, [allLoadedPosts, selectedPin?.id, showDetailModal]);
 
   useEffect(() => {
-    if (!showDetailModal || !selectedPin || !pinHasAnyMedia(selectedPin)) {
+    if (!showDetailModal || !selectedPin || !pinHasUnhydratedMedia(selectedPin)) {
       return;
     }
 
